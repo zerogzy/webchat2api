@@ -42,12 +42,13 @@ import {
 } from "@/components/ui/select";
 import {
   deleteAccounts,
+  deleteLimitedAccounts,
   exportAccounts,
   fetchAccounts,
   refreshAccounts,
   updateAccount,
   type Account,
-  type AccountExportFormat,
+  type AccountExportProvider,
   type AccountProvider,
   type AccountStatus,
 } from "@/lib/api";
@@ -314,6 +315,13 @@ function AccountsPageContent() {
       .map((item) => item.access_token);
   }, [accounts, selectedIds]);
 
+  const selectedGrokTokens = useMemo(() => {
+    const selectedSet = new Set(selectedIds);
+    return accounts
+      .filter((item) => selectedSet.has(item.access_token) && isGrokAccount(item))
+      .map((item) => item.access_token);
+  }, [accounts, selectedIds]);
+
   const selectedTokens = useMemo(() => {
     const selectedSet = new Set(selectedIds);
     return accounts.filter((item) => selectedSet.has(item.access_token)).map((item) => item.access_token);
@@ -321,8 +329,14 @@ function AccountsPageContent() {
 
   const gptTokens = useMemo(() => accounts.filter(isGptAccount).map((item) => item.access_token), [accounts]);
 
+  const grokTokens = useMemo(() => accounts.filter(isGrokAccount).map((item) => item.access_token), [accounts]);
+
   const abnormalTokens = useMemo(() => {
     return accounts.filter((item) => item.status === "异常").map((item) => item.access_token);
+  }, [accounts]);
+
+  const limitedTokens = useMemo(() => {
+    return accounts.filter((item) => item.status === "限流").map((item) => item.access_token);
   }, [accounts]);
 
   const paginationItems = useMemo(() => {
@@ -353,6 +367,26 @@ function AccountsPageContent() {
       toast.success(`删除 ${data.removed ?? 0} 个账户`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除账户失败";
+      toast.error(message);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleDeleteLimitedAccounts = async () => {
+    if (limitedTokens.length === 0) {
+      toast.error("没有限流账户可移除");
+      return;
+    }
+
+    setIsDeleting(true);
+    try {
+      const data = await deleteLimitedAccounts();
+      setAccounts(data.items);
+      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      toast.success(`移除 ${data.removed ?? 0} 个限流账户`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "移除限流账户失败";
       toast.error(message);
     } finally {
       setIsDeleting(false);
@@ -415,17 +449,17 @@ function AccountsPageContent() {
     }
   };
 
-  const handleExportAccounts = async (format: AccountExportFormat, tokens: string[]) => {
+  const handleExportAccounts = async (provider: AccountExportProvider, tokens: string[]) => {
     if (tokens.length === 0) {
-      toast.error("没有可导出的账户");
+      toast.error(`没有可导出的 ${provider === "gpt" ? "GPT" : "Grok"} 账户`);
       return;
     }
 
     setIsExporting(true);
     try {
-      const data = await exportAccounts(format, tokens);
+      const data = await exportAccounts(provider, tokens);
       downloadBlob(data.blob, data.filename);
-      toast.success(format === "zip" ? "ZIP 压缩包已导出" : "JSON 文件已导出");
+      toast.success(`${provider === "gpt" ? "GPT" : "Grok"} TXT 文件已导出`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "导出账户失败";
       toast.error(message);
@@ -482,20 +516,20 @@ function AccountsPageContent() {
           <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleExportAccounts("json", accounts.map((item) => item.access_token))}
-            disabled={accounts.length === 0 || isExporting}
+            onClick={() => void handleExportAccounts("gpt", gptTokens)}
+            disabled={gptTokens.length === 0 || isExporting || isDeleting}
           >
             {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-            导出全部 JSON
+            导出 GPT TXT
           </Button>
           <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleExportAccounts("zip", accounts.map((item) => item.access_token))}
-            disabled={accounts.length === 0 || isExporting}
+            onClick={() => void handleExportAccounts("grok", grokTokens)}
+            disabled={grokTokens.length === 0 || isExporting || isDeleting}
           >
             {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-            导出全部 ZIP
+            导出 Grok TXT
           </Button>
         </div>
       </section>
@@ -712,6 +746,15 @@ function AccountsPageContent() {
                 </Button>
                 <Button
                   variant="ghost"
+                  className="h-8 rounded-lg px-3 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
+                  onClick={() => void handleDeleteLimitedAccounts()}
+                  disabled={limitedTokens.length === 0 || isDeleting}
+                >
+                  {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                  移除限流账号
+                </Button>
+                <Button
+                  variant="ghost"
                   className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
                   onClick={() => void handleDeleteTokens(selectedTokens)}
                   disabled={selectedTokens.length === 0 || isDeleting}
@@ -722,20 +765,20 @@ function AccountsPageContent() {
                 <Button
                   variant="ghost"
                   className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                  onClick={() => void handleExportAccounts("json", selectedTokens)}
-                  disabled={selectedTokens.length === 0 || isExporting}
+                  onClick={() => void handleExportAccounts("gpt", selectedGptTokens)}
+                  disabled={selectedGptTokens.length === 0 || isExporting || isDeleting}
                 >
                   {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-                  导出所选 JSON
+                  导出所选 GPT TXT
                 </Button>
                 <Button
                   variant="ghost"
                   className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                  onClick={() => void handleExportAccounts("zip", selectedTokens)}
-                  disabled={selectedTokens.length === 0 || isExporting}
+                  onClick={() => void handleExportAccounts("grok", selectedGrokTokens)}
+                  disabled={selectedGrokTokens.length === 0 || isExporting || isDeleting}
                 >
                   {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-                  导出所选 ZIP
+                  导出所选 Grok TXT
                 </Button>
                 {selectedIds.length > 0 ? (
                   <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">

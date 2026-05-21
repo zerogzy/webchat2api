@@ -72,7 +72,7 @@ export type AccountImportPayload = {
   [key: string]: unknown;
 };
 
-export type AccountExportFormat = "json" | "zip";
+export type AccountExportProvider = "gpt" | "grok";
 
 export type SettingsConfig = {
   proxy: string;
@@ -309,6 +309,13 @@ export async function deleteAccounts(tokens: string[]) {
   });
 }
 
+export async function deleteLimitedAccounts() {
+  return httpRequest<AccountMutationResponse>("/api/accounts", {
+    method: "DELETE",
+    body: { mode: "limited" },
+  });
+}
+
 export async function refreshAccounts(accessTokens: string[]) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
@@ -326,19 +333,23 @@ function getFilenameFromDisposition(value: unknown, fallback: string) {
   return match?.[1] || fallback;
 }
 
-export async function exportAccounts(format: AccountExportFormat, accessTokens: string[] = []) {
+function accountExportFallbackFilename(provider: AccountExportProvider) {
+  return provider === "gpt" ? "webchat2api-gpt.txt" : "webchat2api_grok.txt";
+}
+
+export async function exportAccounts(provider: AccountExportProvider, accessTokens: string[] = []) {
   const response = await request.request<Blob>({
     url: "/api/accounts/export",
     method: "POST",
     data: {
-      format,
+      provider,
       access_tokens: accessTokens,
     },
     responseType: "blob",
   });
   return {
     blob: response.data,
-    filename: getFilenameFromDisposition(response.headers["content-disposition"], `codex-accounts.${format}`),
+    filename: getFilenameFromDisposition(response.headers["content-disposition"], accountExportFallbackFilename(provider)),
   };
 }
 
