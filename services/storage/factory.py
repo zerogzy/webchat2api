@@ -4,9 +4,6 @@ import os
 from pathlib import Path
 
 from services.storage.base import StorageBackend
-from services.storage.database_storage import DatabaseStorageBackend
-from services.storage.git_storage import GitStorageBackend
-from services.storage.json_storage import JSONStorageBackend
 
 
 def create_storage_backend(data_dir: Path) -> StorageBackend:
@@ -29,8 +26,10 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
         # 本地 JSON 文件存储
         file_path = data_dir / "accounts.json"
         auth_keys_path = data_dir / "auth_keys.json"
+        settings_path = data_dir / "settings.json"
         print(f"[storage] Using JSON storage: {file_path}")
-        return JSONStorageBackend(file_path, auth_keys_path)
+        from services.storage.json_storage import JSONStorageBackend
+        return JSONStorageBackend(file_path, auth_keys_path, settings_path)
     
     elif backend_type in ("sqlite", "postgres", "postgresql", "mysql", "database"):
         # 数据库存储
@@ -43,6 +42,7 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
         else:
             print(f"[storage] Using database storage: {_mask_password(database_url)}")
         
+        from services.storage.database_storage import DatabaseStorageBackend
         return DatabaseStorageBackend(database_url)
     
     elif backend_type == "git":
@@ -52,6 +52,7 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
         branch = os.getenv("GIT_BRANCH", "main").strip()
         file_path = os.getenv("GIT_FILE_PATH", "accounts.json").strip()
         auth_keys_file_path = os.getenv("GIT_AUTH_KEYS_FILE_PATH", "auth_keys.json").strip()
+        settings_file_path = os.getenv("GIT_SETTINGS_FILE_PATH", "settings.json").strip()
         
         if not repo_url:
             raise ValueError(
@@ -62,12 +63,14 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
         print(f"[storage] Using Git storage: {_mask_token(repo_url)}, branch: {branch}, file: {file_path}")
         
         cache_dir = data_dir / "git_cache"
+        from services.storage.git_storage import GitStorageBackend
         return GitStorageBackend(
             repo_url=repo_url,
             token=token,
             branch=branch,
             file_path=file_path,
             auth_keys_file_path=auth_keys_file_path,
+            settings_file_path=settings_file_path,
             local_cache_dir=cache_dir,
         )
     

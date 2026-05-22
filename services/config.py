@@ -39,6 +39,24 @@ DEFAULT_IMAGE_STORAGE = {
 
 
 PLACEHOLDER_AUTH_KEYS = {"change-me", "your_secret_key", "your_secret_key_here"}
+PERSISTENT_CONFIG_KEYS = {
+    "refresh_account_interval_minute",
+    "image_retention_days",
+    "image_poll_timeout_secs",
+    "image_poll_interval_secs",
+    "image_poll_initial_wait_secs",
+    "image_account_concurrency",
+    "auto_remove_invalid_accounts",
+    "auto_remove_rate_limited_accounts",
+    "log_levels",
+    "sensitive_words",
+    "ai_review",
+    "global_system_prompt",
+    "backup",
+    "image_storage",
+    "proxy",
+    "base_url",
+}
 
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
@@ -157,6 +175,10 @@ def _read_json_object(path: Path, *, name: str) -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
+def _persistent_settings(data: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in data.items() if key in PERSISTENT_CONFIG_KEYS}
+
+
 def _configured_auth_key(raw_config: dict[str, object]) -> str:
     return _normalize_auth_key(
         os.getenv("LOGIN_SECRET")
@@ -191,8 +213,8 @@ class ConfigStore:
     def __init__(self, path: Path):
         self.path = path
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        self.data = self._load()
         self._storage_backend: StorageBackend | None = None
+        self.data = self._load()
         if _is_invalid_auth_key(self.auth_key):
             raise ValueError(
                 "❌ auth-key 未设置或仍为占位值！\n"
@@ -205,10 +227,18 @@ class ConfigStore:
             )
 
     def _load(self) -> dict[str, object]:
-        return _read_json_object(self.path, name="config.json")
+        file_settings = _read_json_object(self.path, name="config.json")
+        storage = self.get_storage_backend()
+        storage_settings = storage.load_settings()
+        if storage_settings:
+            return {**file_settings, **_persistent_settings(storage_settings)}
+        initial_settings = _persistent_settings(file_settings)
+        if initial_settings:
+            storage.save_settings(initial_settings)
+        return file_settings
 
     def _save(self) -> None:
-        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.get_storage_backend().save_settings(_persistent_settings(self.data))
 
     @property
     def auth_key(self) -> str:
@@ -343,6 +373,8 @@ class ConfigStore:
 
     def get(self) -> dict[str, object]:
         data = dict(self.data)
+        data["base_url"] = self.base_url
+        data["proxy"] = self.get_proxy_settings()
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
         data["image_retention_days"] = self.image_retention_days
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
@@ -365,7 +397,7 @@ class ConfigStore:
 
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
-        next_data.update(dict(data or {}))
+        next_data.update(_persistent_settings(dict(data or {})))
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "image_storage" in next_data:

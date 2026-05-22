@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import Column, String, Text, create_engine, Integer, text
+from sqlalchemy import Column, Integer, String, Text, create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 from services.storage.base import StorageBackend
 
-Base = declarative_base()
+Base: Any = declarative_base()
 
 
 class AccountModel(Base):
@@ -18,7 +18,7 @@ class AccountModel(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     access_token = Column(String(2048), unique=True, nullable=False, index=True)
-    data = Column(Text, nullable=False)  # JSON 格式存储完整账号数据
+    data = Column(Text, nullable=False)
 
 
 class AuthKeyModel(Base):
@@ -30,6 +30,14 @@ class AuthKeyModel(Base):
     data = Column(Text, nullable=False)
 
 
+class AppSettingModel(Base):
+    """全局设置数据模型"""
+    __tablename__ = "app_settings"
+
+    key = Column(String(255), primary_key=True)
+    data = Column(Text, nullable=False)
+
+
 class DatabaseStorageBackend(StorageBackend):
     """数据库存储后端（支持 SQLite、PostgreSQL、MySQL 等）"""
 
@@ -37,8 +45,8 @@ class DatabaseStorageBackend(StorageBackend):
         self.database_url = database_url
         self.engine = create_engine(
             database_url,
-            pool_pre_ping=True,  # 自动检测连接是否有效
-            pool_recycle=3600,   # 1小时回收连接
+            pool_pre_ping=True,
+            pool_recycle=3600,
         )
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
@@ -71,7 +79,39 @@ class DatabaseStorageBackend(StorageBackend):
         """保存鉴权密钥数据到数据库"""
         self._save_rows(AuthKeyModel, auth_keys, "id", "key_id")
 
-    def _load_rows(self, model: type[AccountModel] | type[AuthKeyModel]) -> list[dict[str, Any]]:
+    def load_settings(self) -> dict[str, Any]:
+        """从数据库加载全局设置"""
+        session = self.Session()
+        try:
+            row = session.query(AppSettingModel).filter_by(key="settings").one_or_none()
+            if row is None:
+                return {}
+            try:
+                settings = json.loads(row.data)
+            except json.JSONDecodeError:
+                return {}
+            return settings if isinstance(settings, dict) else {}
+        finally:
+            session.close()
+
+    def save_settings(self, settings: dict[str, Any]) -> None:
+        """保存全局设置到数据库"""
+        session = self.Session()
+        try:
+            row = session.query(AppSettingModel).filter_by(key="settings").one_or_none()
+            data = json.dumps(settings, ensure_ascii=False)
+            if row is None:
+                session.add(AppSettingModel(key="settings", data=data))
+            else:
+                row.data = data
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
+
+    def _load_rows(self, model: Any) -> list[dict[str, Any]]:
         session = self.Session()
         try:
             items = []
@@ -88,7 +128,7 @@ class DatabaseStorageBackend(StorageBackend):
 
     def _save_rows(
         self,
-        model: type[AccountModel] | type[AuthKeyModel],
+        model: Any,
         items: list[dict[str, Any]],
         source_key: str,
         target_key: str | None = None,
@@ -120,16 +160,17 @@ class DatabaseStorageBackend(StorageBackend):
         try:
             session = self.Session()
             try:
-                # 尝试执行简单查询
                 session.execute(text("SELECT 1"))
                 count = session.query(AccountModel).count()
                 auth_key_count = session.query(AuthKeyModel).count()
+                settings_count = session.query(AppSettingModel).count()
                 return {
                     "status": "healthy",
                     "backend": "database",
                     "database_url": self._mask_password(self.database_url),
                     "account_count": count,
                     "auth_key_count": auth_key_count,
+                    "settings_count": settings_count,
                 }
             finally:
                 session.close()
@@ -149,7 +190,7 @@ class DatabaseStorageBackend(StorageBackend):
             db_type = "postgresql"
         elif "mysql" in self.database_url:
             db_type = "mysql"
-        
+
         return {
             "type": "database",
             "db_type": db_type,

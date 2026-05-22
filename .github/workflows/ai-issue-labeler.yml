@@ -1,0 +1,390 @@
+name: AI Issue Labeler
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - reopened
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ai-issue-labeler-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: gpt-5.3-codex
+
+    steps:
+      - name: Label issue with AI
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const whitelist = [
+              'bug',
+              'feature',
+              'question',
+              'documentation',
+              'security',
+              'regression',
+              'performance',
+              'ci',
+              'test',
+              'refactor',
+              'needs reproduction',
+              'needs information',
+              'good first issue',
+              'help wanted',
+              'fixed-in-dev',
+              'awaiting-release',
+              'priority: low',
+              'priority: medium',
+              'priority: high',
+            ];
+
+            const whitelistSet = new Set(whitelist);
+            const issue = context.payload.issue;
+            const maxTitleLength = 300;
+            const maxBodyLength = 6000;
+            const maxLabels = 5;
+            const maxCommentLength = 1800;
+            const maxEvidenceFiles = 5;
+            const maxEvidenceFileLength = 2200;
+            const maxEvidenceSummaryLength = 900;
+            const maxStructureEntries = 80;
+            const maxTreeEntriesToScore = 2000;
+            const devRef = 'dev';
+            const evidenceLabels = new Set(['bug', 'regression', 'performance', 'security', 'fixed-in-dev', 'awaiting-release']);
+            const evidenceExtensions = new Set([
+              '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.json', '.yml', '.yaml',
+              '.py', '.go', '.rs', '.java', '.kt', '.php', '.rb', '.sh', '.md', '.dockerfile',
+            ]);
+            const importantFiles = new Set([
+              'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'package.json',
+              'pnpm-lock.yaml', 'yarn.lock', 'package-lock.json', 'README.md', 'SECURITY.md',
+            ]);
+            const stopWords = new Set([
+              'about', 'after', 'again', 'also', 'because', 'before', 'being', 'between',
+              'cannot', 'could', 'error', 'fails', 'from', 'have', 'issue', 'label',
+              'like', 'main', 'problem', 'repo', 'should', 'that', 'their', 'there',
+              'these', 'this', 'when', 'where', 'which', 'with', 'would', 'using',
+            ]);
+
+            const truncate = (value, maxLength) => {
+              const text = String(value || '');
+              if (text.length <= maxLength) {
+                return text;
+              }
+              return `${text.slice(0, maxLength)}\n\n[Content truncated before AI analysis]`;
+            };
+
+            const bounded = (value, maxLength) => {
+              const text = String(value || '').replace(/\s+/g, ' ').trim();
+              if (text.length <= maxLength) {
+                return text;
+              }
+              return `${text.slice(0, maxLength - 13).trim()}... [truncated]`;
+            };
+
+            const stripFence = (value) => {
+              const text = String(value || '').trim();
+              const match = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+              return (match ? match[1] : text).trim();
+            };
+
+            const extensionForPath = (path) => {
+              const name = path.split('/').pop() || path;
+              if (name === 'Dockerfile' || name.endsWith('.dockerfile')) {
+                return '.dockerfile';
+              }
+              const match = name.match(/\.[^.]+$/);
+              return match ? match[0].toLowerCase() : '';
+            };
+
+            const isEvidenceCandidate = (entry) => {
+              if (!entry || entry.type !== 'blob' || !entry.path) {
+                return false;
+              }
+              const name = entry.path.split('/').pop() || entry.path;
+              if (importantFiles.has(name)) {
+                return true;
+              }
+              return evidenceExtensions.has(extensionForPath(entry.path));
+            };
+
+            const extractIssueHints = (title, body) => {
+              const issueText = `${title}\n${body}`;
+              const lowerText = issueText.toLowerCase();
+              const pathHints = [...new Set((issueText.match(/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+/g) || [])
+                .map((path) => path.replace(/^\.?\//, '').replace(/[),.;:]+$/, '').toLowerCase())
+                .filter((path) => path.length <= 160))];
+              const keywordHints = [...new Set((lowerText.match(/[a-z0-9][a-z0-9_.-]{2,}/g) || [])
+                .map((word) => word.replace(/^[._-]+|[._-]+$/g, ''))
+                .filter((word) => word.length >= 3 && word.length <= 40 && !stopWords.has(word)))];
+
+              return {
+                pathHints: pathHints.slice(0, 25),
+                keywordHints: keywordHints.slice(0, 40),
+              };
+            };
+
+            const scoreEvidencePath = (path, hints) => {
+              const lowerPath = path.toLowerCase();
+              const name = lowerPath.split('/').pop() || lowerPath;
+              let score = 0;
+
+              for (const hint of hints.pathHints) {
+                if (lowerPath === hint || lowerPath.endsWith(`/${hint}`)) {
+                  score += 100;
+                } else if (lowerPath.includes(hint) || hint.includes(name)) {
+                  score += 60;
+                }
+              }
+
+              for (const keyword of hints.keywordHints) {
+                if (lowerPath.includes(keyword)) {
+                  score += name.includes(keyword) ? 12 : 5;
+                }
+              }
+
+              if (importantFiles.has(path.split('/').pop() || path)) {
+                score += 3;
+              }
+
+              return score;
+            };
+
+            const decodeContent = (content) => Buffer.from(content || '', 'base64').toString('utf8');
+
+            const summarizeEvidenceForPrompt = (evidence) => {
+              if (evidence.files.length > 0) {
+                return evidence.files.map((file) => [
+                  `Path: ${file.path}`,
+                  `Reason selected: ${file.reason}`,
+                  `Trusted dev branch excerpt:\n${file.content}`,
+                ].join('\n')).join('\n\n---\n\n');
+              }
+
+              return [
+                evidence.summary,
+                'Trusted dev branch project structure sample:',
+                evidence.structure.length > 0 ? evidence.structure.join('\n') : 'No dev branch file list was available.',
+              ].join('\n');
+            };
+
+            const gatherDevBranchEvidence = async (title, body) => {
+              const hints = extractIssueHints(title, body);
+
+              try {
+                const ref = await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `heads/${devRef}`,
+                });
+                const commit = await github.rest.git.getCommit({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  commit_sha: ref.data.object.sha,
+                });
+                const tree = await github.rest.git.getTree({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tree_sha: commit.data.tree.sha,
+                  recursive: 'true',
+                });
+
+                const candidates = (tree.data.tree || [])
+                  .filter(isEvidenceCandidate)
+                  .slice(0, maxTreeEntriesToScore);
+                const scored = candidates
+                  .map((entry) => ({
+                    path: entry.path,
+                    score: scoreEvidencePath(entry.path, hints),
+                  }))
+                  .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+                const selected = scored
+                  .filter((entry) => entry.score > 0)
+                  .slice(0, maxEvidenceFiles);
+
+                const files = [];
+                for (const entry of selected) {
+                  const file = await github.rest.repos.getContent({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    path: entry.path,
+                    ref: devRef,
+                  });
+
+                  if (!Array.isArray(file.data) && file.data.type === 'file' && file.data.encoding === 'base64') {
+                    files.push({
+                      path: entry.path,
+                      reason: `matched issue hints with score ${entry.score}`,
+                      content: truncate(decodeContent(file.data.content), maxEvidenceFileLength),
+                    });
+                  }
+                }
+
+                const structure = scored
+                  .slice(0, maxStructureEntries)
+                  .map((entry) => entry.score > 0 ? `${entry.path} (hint score ${entry.score})` : entry.path);
+                const summary = files.length > 0
+                  ? `Fetched ${files.length} trusted dev branch file excerpt(s) using issue path and keyword hints.`
+                  : 'No specific issue path or keyword hints strongly matched trusted dev branch files; using a bounded dev branch file list instead.';
+
+                return {
+                  files,
+                  structure,
+                  summary,
+                  promptText: truncate(summarizeEvidenceForPrompt({ files, structure, summary }), 9000),
+                };
+              } catch (error) {
+                const summary = `Could not fetch trusted dev branch code evidence: ${bounded(error.message, 180)}`;
+                return {
+                  files: [],
+                  structure: [],
+                  summary,
+                  promptText: summary,
+                };
+              }
+            };
+
+            const validateEvidenceStrings = (items) => {
+              if (!Array.isArray(items)) {
+                throw new Error('AI response evidence must be an array');
+              }
+              if (items.length > 5) {
+                throw new Error('AI response evidence must include at most 5 items');
+              }
+              for (const item of items) {
+                if (typeof item !== 'string' || item.trim().length === 0 || item.length > 300) {
+                  throw new Error('AI response evidence items must be non-empty strings up to 300 characters');
+                }
+              }
+            };
+
+            const validateResponse = (parsed) => {
+              if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                throw new Error('AI response was not a JSON object');
+              }
+              if (!Array.isArray(parsed.labels)) {
+                throw new Error('AI response labels must be an array');
+              }
+              if (typeof parsed.confidence !== 'number' || !Number.isFinite(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 1) {
+                throw new Error('AI response confidence must be a number from 0 to 1');
+              }
+              if (typeof parsed.reason !== 'string' || parsed.reason.trim().length === 0 || parsed.reason.length > 1000) {
+                throw new Error('AI response reason must be a non-empty string up to 1000 characters');
+              }
+              if (typeof parsed.code_evidence_summary !== 'string' || parsed.code_evidence_summary.trim().length === 0 || parsed.code_evidence_summary.length > 1000) {
+                throw new Error('AI response code_evidence_summary must be a non-empty string up to 1000 characters');
+              }
+              validateEvidenceStrings(parsed.evidence);
+            };
+
+            const postComment = async (body) => {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: bounded(body, maxCommentLength),
+              });
+            };
+
+            try {
+              if (!process.env.OPENAI_API_KEY) {
+                throw new Error('OPENAI_API_KEY is not configured');
+              }
+
+              const title = truncate(issue.title, maxTitleLength);
+              const body = truncate(issue.body, maxBodyLength);
+              const devEvidence = await gatherDevBranchEvidence(title, body);
+              const prompt = [
+                'Classify this GitHub issue using only labels from the whitelist.',
+                'Repository branch policy: dev is the active development branch and source of truth for issue judgment; main is the stable release branch.',
+                'Judge reported problems against trusted dev branch code evidence, not main/release or PR/head code. If a problem exists in main or the latest release but is already fixed in dev, label it fixed-in-dev and awaiting-release instead of treating it as a new unfixed bug.',
+                'Before applying bug, regression, performance, security, fixed-in-dev, or awaiting-release, consider the dev branch code evidence and explain in code_evidence_summary whether that evidence supports the label.',
+                'Return JSON only with this exact schema: {"labels": string[], "confidence": number, "reason": string, "code_evidence_summary": string, "evidence": string[]}. evidence must contain up to 5 short strings naming the dev branch facts used, or state that evidence was inconclusive.',
+                `Whitelist: ${whitelist.join(', ')}`,
+                `Issue title:\n${title}`,
+                `Issue body:\n${body}`,
+                `Trusted dev branch code evidence from GitHub REST API only:\n${devEvidence.promptText}`,
+              ].join('\n\n');
+
+              const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  model: process.env.OPENAI_MODEL,
+                  messages: [
+                    {
+                      role: 'system',
+                      content: 'You label GitHub issues. dev is the active development branch and source of truth; main is the stable release branch. Judge issues against trusted dev branch code evidence gathered through the GitHub REST API only. Before using bug, regression, performance, security, fixed-in-dev, or awaiting-release, explain whether the dev branch evidence supports that label. If a reported problem exists in main/release but is already fixed in dev, use fixed-in-dev and awaiting-release rather than treating it as a new unfixed bug. Respond with JSON only, no markdown, no commentary, no labels outside the whitelist.',
+                    },
+                    {
+                      role: 'user',
+                      content: prompt,
+                    },
+                  ],
+                }),
+              });
+
+              if (!response.ok) {
+                throw new Error(`OpenAI API request failed with status ${response.status}`);
+              }
+
+              const completion = await response.json();
+              const content = completion && completion.choices && completion.choices[0] && completion.choices[0].message && completion.choices[0].message.content;
+              if (typeof content !== 'string' || content.trim().length === 0) {
+                throw new Error('OpenAI API returned no message content');
+              }
+
+              const parsed = JSON.parse(stripFence(content));
+              validateResponse(parsed);
+
+              const labels = [...new Set(parsed.labels
+                .filter((label) => typeof label === 'string')
+                .map((label) => label.trim())
+                .filter((label) => whitelistSet.has(label)))]
+                .slice(0, maxLabels);
+              const evidenceSensitiveLabels = labels.filter((label) => evidenceLabels.has(label));
+
+              if (labels.length > 0) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels,
+                });
+              }
+
+              const labelSummary = labels.length > 0 ? labels.map((label) => `\`${label}\``).join(', ') : 'none';
+              const evidenceList = parsed.evidence.length > 0
+                ? parsed.evidence.map((item) => `- ${bounded(item, 220)}`).join('\n')
+                : '- No bounded dev branch evidence item was returned.';
+              await postComment([
+                'AI issue labeler summary (classification based on trusted dev branch evidence):',
+                `Labels: ${labelSummary}`,
+                `Evidence-sensitive labels considered: ${evidenceSensitiveLabels.length > 0 ? evidenceSensitiveLabels.join(', ') : 'none'}`,
+                `Confidence: ${parsed.confidence.toFixed(2)}`,
+                `Reason: ${bounded(parsed.reason, 650)}`,
+                `Code evidence summary: ${bounded(parsed.code_evidence_summary, maxEvidenceSummaryLength)}`,
+                'Bounded dev branch evidence used:',
+                evidenceList,
+              ].join('\n'));
+            } catch (error) {
+              await postComment([
+                'AI issue labeler summary (classification based on trusted dev branch evidence):',
+                'Labels: none',
+                'The issue could not be labeled automatically because AI analysis failed or returned an invalid response.',
+              ].join('\n'));
+            }

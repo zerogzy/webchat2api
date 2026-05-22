@@ -28,6 +28,16 @@ class StorageBackend(ABC):
         pass
 
     @abstractmethod
+    def load_settings(self) -> dict[str, Any]:
+        """加载全局设置"""
+        pass
+
+    @abstractmethod
+    def save_settings(self, settings: dict[str, Any]) -> None:
+        """保存全局设置"""
+        pass
+
+    @abstractmethod
     def health_check(self) -> dict[str, Any]:
         """健康检查，返回存储后端状态"""
         pass
