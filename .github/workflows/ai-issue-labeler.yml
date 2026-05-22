@@ -56,11 +56,12 @@ jobs:
             const maxBodyLength = 6000;
             const maxLabels = 5;
             const maxCommentLength = 1800;
-            const maxEvidenceFiles = 5;
-            const maxEvidenceFileLength = 2200;
-            const maxEvidenceSummaryLength = 900;
-            const maxStructureEntries = 80;
-            const maxTreeEntriesToScore = 2000;
+            const maxEvidenceFiles = 120;
+            const maxEvidenceFileLength = 10000;
+            const maxEvidencePromptLength = 220000;
+            const maxEvidenceSummaryLength = 1200;
+            const maxStructureEntries = 300;
+            const maxTreeEntriesToScore = 5000;
             const devRef = 'dev';
             const evidenceLabels = new Set(['bug', 'regression', 'performance', 'security', 'fixed-in-dev', 'awaiting-release']);
             const evidenceExtensions = new Set([
@@ -68,8 +69,13 @@ jobs:
               '.py', '.go', '.rs', '.java', '.kt', '.php', '.rb', '.sh', '.md', '.dockerfile',
             ]);
             const importantFiles = new Set([
-              'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'package.json',
-              'pnpm-lock.yaml', 'yarn.lock', 'package-lock.json', 'README.md', 'SECURITY.md',
+              'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'docker-compose.local.yml',
+              'package.json', 'pyproject.toml', 'uv.lock', 'bun.lock', 'README.md', 'SECURITY.md',
+              'VERSION', 'config.example.json', '.env.example',
+            ]);
+            const excludedPathParts = new Set([
+              '.git', '__pycache__', 'node_modules', '.next', 'out', 'web_dist', 'data',
+              '.venv', 'venv', '.pytest_cache', '.mypy_cache', '.ruff_cache',
             ]);
             const stopWords = new Set([
               'about', 'after', 'again', 'also', 'because', 'before', 'being', 'between',
@@ -113,8 +119,12 @@ jobs:
               if (!entry || entry.type !== 'blob' || !entry.path) {
                 return false;
               }
-              const name = entry.path.split('/').pop() || entry.path;
-              if (importantFiles.has(name)) {
+              const parts = entry.path.split('/');
+              if (parts.some((part) => excludedPathParts.has(part))) {
+                return false;
+              }
+              const name = parts.pop() || entry.path;
+              if (importantFiles.has(name) || importantFiles.has(entry.path)) {
                 return true;
               }
               return evidenceExtensions.has(extensionForPath(entry.path));
@@ -210,11 +220,10 @@ jobs:
                     score: scoreEvidencePath(entry.path, hints),
                   }))
                   .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
-                const selected = scored
-                  .filter((entry) => entry.score > 0)
-                  .slice(0, maxEvidenceFiles);
+                const selected = scored.slice(0, maxEvidenceFiles);
 
                 const files = [];
+                let usedEvidenceChars = 0;
                 for (const entry of selected) {
                   const file = await github.rest.repos.getContent({
                     owner: context.repo.owner,
@@ -224,10 +233,18 @@ jobs:
                   });
 
                   if (!Array.isArray(file.data) && file.data.type === 'file' && file.data.encoding === 'base64') {
+                    const decoded = decodeContent(file.data.content);
+                    const remaining = maxEvidencePromptLength - usedEvidenceChars;
+                    if (remaining <= 0) {
+                      break;
+                    }
+                    const contentLimit = Math.min(maxEvidenceFileLength, remaining);
+                    const content = truncate(decoded, contentLimit);
+                    usedEvidenceChars += content.length;
                     files.push({
                       path: entry.path,
-                      reason: `matched issue hints with score ${entry.score}`,
-                      content: truncate(decodeContent(file.data.content), maxEvidenceFileLength),
+                      reason: entry.score > 0 ? `matched issue hints with score ${entry.score}` : 'included as bounded dev branch project context',
+                      content,
                     });
                   }
                 }
@@ -235,15 +252,17 @@ jobs:
                 const structure = scored
                   .slice(0, maxStructureEntries)
                   .map((entry) => entry.score > 0 ? `${entry.path} (hint score ${entry.score})` : entry.path);
-                const summary = files.length > 0
-                  ? `Fetched ${files.length} trusted dev branch file excerpt(s) using issue path and keyword hints.`
-                  : 'No specific issue path or keyword hints strongly matched trusted dev branch files; using a bounded dev branch file list instead.';
+                const summary = [
+                  `Fetched ${files.length} trusted dev branch file excerpt(s) as broad bounded project context.`,
+                  `Fetched content budget used: ${usedEvidenceChars}/${maxEvidencePromptLength} characters.`,
+                  'Files are ordered by issue path/keyword relevance first, then path, but non-matching project files are still included up to the budget.',
+                ].join(' ');
 
                 return {
                   files,
                   structure,
                   summary,
-                  promptText: truncate(summarizeEvidenceForPrompt({ files, structure, summary }), 9000),
+                  promptText: truncate(summarizeEvidenceForPrompt({ files, structure, summary }), maxEvidencePromptLength),
                 };
               } catch (error) {
                 const summary = `Could not fetch trusted dev branch code evidence: ${bounded(error.message, 180)}`;
@@ -310,7 +329,8 @@ jobs:
                 'Classify this GitHub issue using only labels from the whitelist.',
                 'Repository branch policy: dev is the active development branch and source of truth for issue judgment; main is the stable release branch.',
                 'Judge reported problems against trusted dev branch code evidence, not main/release or PR/head code. If a problem exists in main or the latest release but is already fixed in dev, label it fixed-in-dev and awaiting-release instead of treating it as a new unfixed bug.',
-                'Before applying bug, regression, performance, security, fixed-in-dev, or awaiting-release, consider the dev branch code evidence and explain in code_evidence_summary whether that evidence supports the label.',
+                'Before applying bug, regression, performance, security, fixed-in-dev, or awaiting-release, consider the broad dev branch project context and explain in code_evidence_summary whether that evidence supports the label.',
+                'The evidence may include many files. Search it mentally for config, storage, API, UI, test, workflow, Docker, and documentation paths before deciding that evidence is inconclusive.',
                 'Return JSON only with this exact schema: {"labels": string[], "confidence": number, "reason": string, "code_evidence_summary": string, "evidence": string[]}. evidence must contain up to 5 short strings naming the dev branch facts used, or state that evidence was inconclusive.',
                 `Whitelist: ${whitelist.join(', ')}`,
                 `Issue title:\n${title}`,
