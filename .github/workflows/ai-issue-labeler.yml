@@ -331,6 +331,9 @@ jobs:
                 'Judge reported problems against trusted dev branch code evidence, not main/release or PR/head code. If a problem exists in main or the latest release but is already fixed in dev, label it fixed-in-dev and awaiting-release instead of treating it as a new unfixed bug.',
                 'Before applying bug, regression, performance, security, fixed-in-dev, or awaiting-release, consider the broad dev branch project context and explain in code_evidence_summary whether that evidence supports the label.',
                 'The evidence may include many files. Search it mentally for config, storage, API, UI, test, workflow, Docker, and documentation paths before deciding that evidence is inconclusive.',
+                'If the issue describes a concrete defect and the dev branch evidence shows matching implementation and tests that address the reported behavior, prefer fixed-in-dev. Also add awaiting-release when the issue likely came from a stable release or deployment that may not yet include dev/main changes.',
+                'Do not downgrade to needs reproduction solely because deployment logs are missing when dev branch code and tests directly address the reported behavior. Use needs reproduction only when the broad dev evidence does not show a plausible fix path or the report remains ambiguous after reading the relevant code.',
+                'For environment-variable/UI-display reports, treat code that surfaces the effective environment value in settings responses plus tests for that behavior as evidence of a fix, not merely as a design caveat.',
                 'Return JSON only with this exact schema: {"labels": string[], "confidence": number, "reason": string, "code_evidence_summary": string, "evidence": string[]}. evidence must contain up to 5 short strings naming the dev branch facts used, or state that evidence was inconclusive.',
                 `Whitelist: ${whitelist.join(', ')}`,
                 `Issue title:\n${title}`,
@@ -350,7 +353,7 @@ jobs:
                   messages: [
                     {
                       role: 'system',
-                      content: 'You label GitHub issues. dev is the active development branch and source of truth; main is the stable release branch. Judge issues against trusted dev branch code evidence gathered through the GitHub REST API only. Before using bug, regression, performance, security, fixed-in-dev, or awaiting-release, explain whether the dev branch evidence supports that label. If a reported problem exists in main/release but is already fixed in dev, use fixed-in-dev and awaiting-release rather than treating it as a new unfixed bug. Respond with JSON only, no markdown, no commentary, no labels outside the whitelist.',
+                      content: 'You label GitHub issues. dev is the active development branch and source of truth; main is the stable release branch. Judge issues against trusted dev branch code evidence gathered through the GitHub REST API only. Before using bug, regression, performance, security, fixed-in-dev, or awaiting-release, explain whether the dev branch evidence supports that label. If a reported problem exists in main/release but is already fixed in dev, use fixed-in-dev and awaiting-release rather than treating it as a new unfixed bug. When dev evidence contains both a matching implementation path and tests for the reported behavior, prefer fixed-in-dev even if deployment logs are missing. Respond with JSON only, no markdown, no commentary, no labels outside the whitelist.',
                     },
                     {
                       role: 'user',
