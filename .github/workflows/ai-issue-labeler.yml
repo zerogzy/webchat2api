@@ -21,6 +21,7 @@ jobs:
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_MODEL: gpt-5.3-codex
+      OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL || 'https://api.openai.com' }}
 
     steps:
       - name: Label issue with AI
@@ -317,7 +318,8 @@ jobs:
                 `Trusted dev branch code evidence from GitHub REST API only:\n${devEvidence.promptText}`,
               ].join('\n\n');
 
-              const response = await fetch('https://api.openai.com/v1/chat/completions', {
+              const openaiBaseUrl = String(process.env.OPENAI_BASE_URL || 'https://api.openai.com').replace(/\/+$/, '');
+              const response = await fetch(`${openaiBaseUrl}/v1/chat/completions`, {
                 method: 'POST',
                 headers: {
                   Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
