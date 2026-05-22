@@ -22,6 +22,7 @@ class GitStorageBackend(StorageBackend):
         branch: str = "main",
         file_path: str = "accounts.json",
         auth_keys_file_path: str = "auth_keys.json",
+        settings_file_path: str = "settings.json",
         local_cache_dir: Path | None = None,
     ):
         self.repo_url = repo_url
@@ -29,6 +30,7 @@ class GitStorageBackend(StorageBackend):
         self.branch = branch
         self.file_path = file_path
         self.auth_keys_file_path = auth_keys_file_path
+        self.settings_file_path = settings_file_path
         
         # 本地缓存目录
         if local_cache_dir is None:
@@ -117,6 +119,28 @@ class GitStorageBackend(StorageBackend):
             print(f"[git-storage] save failed: {e}")
             raise e
 
+    def load_settings(self) -> dict[str, Any]:
+        """从 Git 仓库加载全局设置"""
+        try:
+            data = self._load_json_value(self.settings_file_path)
+        except json.JSONDecodeError as e:
+            print(f"[git-storage] ignoring invalid settings file: {e}")
+            return {}
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            print(f"[git-storage] load settings failed: {e}")
+            raise
+        return data if isinstance(data, dict) else {}
+
+    def save_settings(self, settings: dict[str, Any]) -> None:
+        """保存全局设置到 Git 仓库"""
+        try:
+            self._save_json_file(self.settings_file_path, settings, "Update settings data")
+        except Exception as e:
+            print(f"[git-storage] save settings failed: {e}")
+            raise e
+
     def _load_json_file(self, file_path: str) -> list[dict[str, Any]]:
         data = self._load_json_value(file_path)
         return data if isinstance(data, list) else []
@@ -170,6 +194,7 @@ class GitStorageBackend(StorageBackend):
             "branch": self.branch,
             "file_path": self.file_path,
             "auth_keys_file_path": self.auth_keys_file_path,
+            "settings_file_path": self.settings_file_path,
         }
 
     @staticmethod
