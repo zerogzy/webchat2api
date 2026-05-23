@@ -139,7 +139,7 @@ export function ImageSidebar({
                     {stats.running > 0 || stats.queued > 0 ? (
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
                         {stats.running > 0 ? (
-                          <span className="rounded-full bg-blue-50 px-2 py-1 text-blue-600">处理中 {stats.running}</span>
+                          <span className="rounded-full bg-lime-50 px-2 py-1 text-lime-800">处理中 {stats.running}</span>
                         ) : null}
                         {stats.queued > 0 ? (
                           <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-700">排队 {stats.queued}</span>

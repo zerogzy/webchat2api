@@ -90,7 +90,7 @@ const metricCards = [
   { key: "limited", label: "限流账户", color: "text-orange-500", icon: CircleAlert },
   { key: "abnormal", label: "异常账户", color: "text-rose-500", icon: CircleOff },
   { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
-  { key: "quota", label: "GPT 图像额度", color: "text-blue-500", icon: RefreshCw },
+  { key: "quota", label: "GPT 图像额度", color: "text-amber-600", icon: RefreshCw },
 ] as const;
 
 function normalizeAccountProvider(provider: AccountProvider | null | undefined) {
@@ -478,16 +478,17 @@ function AccountsPageContent() {
 
   return (
     <>
-      <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
-            Account Pool
+      <section className="rounded-[28px] border border-white/70 bg-white/50 p-5 shadow-[var(--shadow-soft)] backdrop-blur-sm lg:p-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="space-y-1">
+            <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
+              Account Pool
+            </div>
+            <h1 className="text-2xl font-semibold tracking-tight">号池管理</h1>
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight">号池管理</h1>
-        </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
             onClick={() => void loadAccounts()}
@@ -531,6 +532,7 @@ function AccountsPageContent() {
             {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
             导出 Grok TXT
           </Button>
+        </div>
         </div>
       </section>
 

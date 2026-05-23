@@ -296,7 +296,7 @@ function ExperimentModeSwitch({
   onChange: (mode: ExperimentMode) => void;
 }) {
   return (
-    <div className="inline-flex rounded-full border border-stone-200 bg-white/80 p-1 shadow-[0_16px_50px_-34px_rgba(15,23,42,0.45)]">
+    <div className="inline-flex rounded-full border border-white/80 bg-white/65 p-1 shadow-[var(--shadow-soft)] backdrop-blur-sm">
       {[
         { value: "text" as const, label: "文本试验" },
         { value: "image" as const, label: "图像试验" },
@@ -306,7 +306,7 @@ function ExperimentModeSwitch({
           type="button"
           className={cn(
             "rounded-full px-4 py-2 text-sm font-medium transition",
-            mode === item.value ? "bg-stone-950 text-white" : "text-stone-500 hover:text-stone-900",
+            mode === item.value ? "bg-stone-900 text-white shadow-[0_12px_28px_-18px_rgba(68,64,60,0.9)]" : "text-stone-500 hover:bg-white/60 hover:text-stone-900",
           )}
           onClick={() => onChange(item.value)}
         >
@@ -352,7 +352,7 @@ function TextExperimentPanel({
 
   return (
     <section className="grid min-h-0 flex-1 gap-3 overflow-hidden lg:grid-cols-[minmax(0,1fr)_320px]">
-      <div className="flex min-h-0 flex-col overflow-hidden rounded-[24px] border border-white/80 bg-white/85 shadow-[0_22px_80px_-48px_rgba(15,23,42,0.48)]">
+      <div className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-white/80 bg-white/82 shadow-[var(--shadow-soft)] backdrop-blur-sm">
         <div className="border-b border-stone-200/70 px-4 py-4 sm:px-5">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
@@ -368,7 +368,7 @@ function TextExperimentPanel({
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto bg-[linear-gradient(180deg,rgba(250,250,249,0.96),rgba(255,255,255,0.9))] p-4 sm:p-5">
+        <div className="min-h-0 flex-1 overflow-y-auto bg-[linear-gradient(180deg,rgba(250,247,239,0.9),rgba(255,253,248,0.84))] p-4 sm:p-5">
           {messages.length > 0 ? (
             <div className="flex flex-col gap-4">
               {messages.map((message) => {
@@ -380,7 +380,7 @@ function TextExperimentPanel({
                       className={cn(
                         "max-w-[min(82%,760px)] rounded-[22px] px-4 py-3 text-sm leading-7 shadow-[0_18px_48px_-36px_rgba(15,23,42,0.5)]",
                         isUser
-                          ? "rounded-br-md bg-stone-950 text-white"
+                          ? "rounded-br-md bg-primary text-primary-foreground"
                           : isError
                             ? "rounded-bl-md border border-rose-200 bg-rose-50 text-rose-700"
                             : "rounded-bl-md border border-stone-200 bg-white text-stone-800",
@@ -1679,8 +1679,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <>
-      <section className="mx-auto flex h-[calc(100dvh-4.75rem)] min-h-0 w-full max-w-[1380px] flex-col gap-3 overflow-hidden px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:h-[calc(100dvh-4rem)] sm:px-3 sm:pb-5">
-        <div className="rounded-[22px] border border-white/80 bg-white/75 px-3 py-2.5 shadow-[0_18px_70px_-54px_rgba(15,23,42,0.5)] backdrop-blur sm:px-4">
+      <section className="mx-auto flex h-[calc(100dvh-5.5rem)] min-h-0 w-full max-w-[1380px] flex-col gap-3 overflow-hidden px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:h-[calc(100dvh-5.25rem)] sm:px-3 sm:pb-5">
+        <div className="rounded-[28px] border border-white/80 bg-white/58 px-4 py-3 shadow-[var(--shadow-soft)] backdrop-blur-xl sm:px-5">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">试验页面</div>
@@ -1709,7 +1709,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           />
         ) : (
           <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-hidden sm:gap-3 lg:grid-cols-[240px_minmax(0,1fr)]">
-            <div className="hidden h-full min-h-0 border-r border-stone-200/70 pr-3 lg:block">
+            <div className="hidden h-full min-h-0 rounded-[24px] border border-white/70 bg-white/45 px-3 shadow-[var(--shadow-soft)] backdrop-blur-sm lg:block">
               <ImageSidebar
             conversations={conversations}
             isLoadingHistory={isLoadingHistory}

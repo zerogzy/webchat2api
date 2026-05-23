@@ -32,7 +32,7 @@ function DialogOverlay({
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"
       className={cn(
-        "data-[state=open]:animate-in data-[state=closed]:animate-out fixed inset-0 z-50 bg-black/30 backdrop-blur-[2px]",
+        "data-[state=open]:animate-in data-[state=closed]:animate-out fixed inset-0 z-50 bg-stone-950/22 backdrop-blur-[3px]",
         className,
       )}
       {...props}
@@ -54,14 +54,14 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out fixed top-[50%] left-[50%] z-50 grid w-[min(92vw,560px)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-[28px] border border-white/80 p-6 shadow-[0_36px_120px_-45px_rgba(16,24,40,0.4)] duration-200",
+          "bg-card/96 data-[state=open]:animate-in data-[state=closed]:animate-out fixed top-[50%] left-[50%] z-50 grid w-[min(92vw,560px)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-[28px] border border-white/80 p-6 shadow-[var(--shadow-lift)] backdrop-blur-xl duration-200",
           className,
         )}
         {...props}
       >
         {children}
         {showCloseButton ? (
-          <DialogPrimitive.Close className="ring-offset-background focus:ring-ring data-[state=open]:bg-accent data-[state=open]:text-muted-foreground absolute top-4 right-4 rounded-full p-1 opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:outline-none disabled:pointer-events-none">
+          <DialogPrimitive.Close className="ring-offset-background focus:ring-ring data-[state=open]:bg-accent/55 data-[state=open]:text-muted-foreground absolute top-4 right-4 rounded-full p-1.5 opacity-70 transition hover:bg-white/65 hover:opacity-100 focus:ring-2 focus:outline-none disabled:pointer-events-none">
             <X className="size-4" />
             <span className="sr-only">Close</span>
           </DialogPrimitive.Close>

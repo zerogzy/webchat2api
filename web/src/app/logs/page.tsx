@@ -134,7 +134,7 @@ function LogsContent() {
   }, [type, startDate, endDate]);
 
   return (
-    <section className="space-y-5">
+    <section className="rounded-[28px] border border-white/70 bg-white/50 p-5 shadow-[var(--shadow-soft)] backdrop-blur-sm lg:p-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div className="space-y-1">
           <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Logs</div>
@@ -159,7 +159,7 @@ function LogsContent() {
         </div>
       </div>
 
-      <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card className="overflow-hidden rounded-[26px] border-white/80 bg-white/86 shadow-[var(--shadow-soft)]">
         <CardContent className="p-0">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
