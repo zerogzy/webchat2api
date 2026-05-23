@@ -222,6 +222,45 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(second.refresh_account_interval_minute, 11)
             self.assertNotIn("auth-key", second.get())
 
+    def test_network_profile_settings_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = self._isolated_store(
+                Path(tmp_dir),
+                env={"STORAGE_BACKEND": "json", "LOGIN_SECRET": "env-auth", "PROXY_URL": None},
+            )
+
+            result = store.update({
+                "chatgpt_fingerprint": {"impersonate": "edge101", "user-agent": "GPT UA", "cookie": "drop-me"},
+                "grok_console_fingerprint": {"impersonate": "chrome136", "user-agent": "Legacy UA", "cookie": "drop-me"},
+                "network_profiles": {
+                    "grok_console": {
+                        "impersonate": "chrome137",
+                        "user-agent": "Profile UA",
+                        "verify": True,
+                        "timeout": 60,
+                        "cf_clearance": "profile-clearance",
+                        "cookie": "drop-me",
+                    },
+                    "unknown_provider": {"user-agent": "Ignore Me"},
+                },
+                "unknown_fingerprint": {"user-agent": "Ignore Me"},
+            })
+
+            self.assertEqual(result["chatgpt_fingerprint"]["user-agent"], "GPT UA")
+            self.assertEqual(result["grok_console_fingerprint"]["user-agent"], "Legacy UA")
+            self.assertEqual(result["network_profiles"]["grok_console"]["impersonate"], "chrome137")
+            self.assertEqual(result["network_profiles"]["grok_console"]["cf_clearance"], "profile-clearance")
+            self.assertNotIn("cookie", result["chatgpt_fingerprint"])
+            self.assertNotIn("cookie", result["grok_console_fingerprint"])
+            self.assertNotIn("cookie", result["network_profiles"]["grok_console"])
+            self.assertNotIn("unknown_provider", result["network_profiles"])
+            settings = json.loads((Path(tmp_dir) / "data" / "settings.json").read_text(encoding="utf-8"))
+            self.assertIn("chatgpt_fingerprint", settings)
+            self.assertIn("grok_console_fingerprint", settings)
+            self.assertIn("network_profiles", settings)
+            self.assertEqual(settings["network_profiles"]["grok_console"]["cf_clearance"], "profile-clearance")
+            self.assertNotIn("unknown_fingerprint", settings)
+
 
 if __name__ == "__main__":
     unittest.main()

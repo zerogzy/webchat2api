@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from curl_cffi import requests
 from fastapi import HTTPException
 
+from services.config import config
 from services.models import GROK_PROVIDER, ModelSpec
+from services.network.client import create_session
+from services.network.headers import build_grok_console_headers
+from services.network.profiles import build_grok_console_profile
+from utils.log import logger
 
 CONSOLE_BASE_URL = "https://console.x.ai"
 CONSOLE_RESPONSES_URL = f"{CONSOLE_BASE_URL}/v1/responses"
@@ -120,18 +126,12 @@ def extract_console_text(payload: dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def _grok_console_profile():
+    return build_grok_console_profile(config.data)
+
+
 def _headers(access_token: str) -> dict[str, str]:
-    token = str(access_token or "").strip()
-    headers = {
-        "Content-Type": "application/json",
-        "Origin": CONSOLE_BASE_URL,
-        "Referer": f"{CONSOLE_BASE_URL}/",
-        "User-Agent": "Mozilla/5.0 (webchat2api grok console)",
-    }
-    if token:
-        headers["Cookie"] = token if "=" in token else f"sso={token}"
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
+    return build_grok_console_headers(_grok_console_profile(), access_token=access_token, base_url=CONSOLE_BASE_URL)
 
 
 def _openai_status(upstream_status: int) -> int:
@@ -154,10 +154,9 @@ def _feedback_status(upstream_status: int) -> str | None:
 
 class GrokConsoleClient:
     def __init__(self, access_token: str) -> None:
-        from services.proxy_service import proxy_settings
-
         self.access_token = access_token
-        self.session = requests.Session(**proxy_settings.build_session_kwargs(impersonate="edge101", verify=True))
+        self.network_profile = _grok_console_profile()
+        self.session = create_session(impersonate=self.network_profile.impersonate, verify=self.network_profile.verify)
 
     def close(self) -> None:
         self.session.close()
@@ -168,9 +167,38 @@ class GrokConsoleClient:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
+    def _call_with_retry(self, fn, policy=None, context=""):
+        """Wrap a callable with retry handling."""
+        from services.network.retry import retry_call, RetryPolicy
+
+        api_policy = policy or RetryPolicy(
+            max_attempts=3,
+            retry_statuses=frozenset({408, 429, 500, 502, 503, 504}),
+        )
+        deadline = time.monotonic() + 60.0
+
+        def on_retry(attempt, status_code, exc):
+            logger.warning({
+                "event": "grok_retry",
+                "context": context,
+                "attempt": attempt,
+                "status_code": status_code,
+                "error": str(exc) if exc else None,
+            })
+
+        return retry_call(fn, policy=api_policy, deadline=deadline, on_retry=on_retry)
+
     def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            response = self.session.post(CONSOLE_RESPONSES_URL, headers=_headers(self.access_token), json=payload, timeout=60)
+            response = self._call_with_retry(
+                lambda: self.session.post(
+                    CONSOLE_RESPONSES_URL,
+                    headers=_headers(self.access_token),
+                    json=payload,
+                    timeout=self.network_profile.timeout,
+                ),
+                context="create_response",
+            )
         except requests.exceptions.RequestException as exc:
             raise GrokConsoleError(f"Grok upstream request failed: {exc}", 502) from exc
         if response.status_code >= 400:

@@ -14,11 +14,12 @@ from PIL import Image
 
 from services.account_service import account_service
 from services.config import config
-from services.proxy_service import proxy_settings
+from services.network.client import create_session
+from services.network.headers import build_chatgpt_web_headers
+from services.network.profiles import build_chatgpt_web_profile
 from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
-from utils.turnstile import solve_turnstile_token
 
 
 class InvalidAccessTokenError(RuntimeError):
@@ -67,42 +68,20 @@ class OpenAIBackendAPI:
         self.client_version = DEFAULT_CLIENT_VERSION
         self.client_build_number = DEFAULT_CLIENT_BUILD_NUMBER
         self.access_token = access_token
-        self.fp = self._build_fp()
+        self.network_profile = self._build_network_profile()
+        self.fp = self.network_profile.as_fingerprint()
         self.user_agent = self.fp["user-agent"]
         self.device_id = self.fp["oai-device-id"]
         self.session_id = self.fp["oai-session-id"]
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
-        self.session = requests.Session(**proxy_settings.build_session_kwargs(
-            impersonate=self.fp["impersonate"],
-            verify=True,
+        self.session = create_session(impersonate=self.network_profile.impersonate, verify=self.network_profile.verify)
+        self.session.headers.update(build_chatgpt_web_headers(
+            self.network_profile,
+            base_url=self.base_url,
+            client_version=self.client_version,
+            client_build_number=self.client_build_number,
         ))
-        self.session.headers.update({
-            "User-Agent": self.user_agent,
-            "Origin": self.base_url,
-            "Referer": self.base_url + "/",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "Priority": "u=1, i",
-            "Sec-Ch-Ua": self.fp["sec-ch-ua"],
-            "Sec-Ch-Ua-Arch": '"x86"',
-            "Sec-Ch-Ua-Bitness": '"64"',
-            "Sec-Ch-Ua-Full-Version": '"143.0.3650.96"',
-            "Sec-Ch-Ua-Full-Version-List": '"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", "Not A(Brand";v="24.0.0.0"',
-            "Sec-Ch-Ua-Mobile": self.fp["sec-ch-ua-mobile"],
-            "Sec-Ch-Ua-Model": '""',
-            "Sec-Ch-Ua-Platform": self.fp["sec-ch-ua-platform"],
-            "Sec-Ch-Ua-Platform-Version": '"19.0.0"',
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-            "OAI-Device-Id": self.device_id,
-            "OAI-Session-Id": self.session_id,
-            "OAI-Language": "zh-CN",
-            "OAI-Client-Version": self.client_version,
-            "OAI-Client-Build-Number": self.client_build_number,
-        })
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
 
@@ -115,35 +94,84 @@ class OpenAIBackendAPI:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
 
-    def _build_fp(self) -> Dict[str, str]:
+    def _build_network_profile(self):
+        account = account_service.get_account(self.access_token) if self.access_token else {}
+        account = account if isinstance(account, dict) else {}
+        global_fp = config.data.get("chatgpt_fingerprint")
+        global_fp = global_fp if isinstance(global_fp, dict) else {}
+        return build_chatgpt_web_profile(account, global_fp)
+
+    def _call_with_retry(self, fn, policy=None, context=""):
+        """Wrap a callable with retry + session refresh on 403."""
+        from services.network.retry import retry_call, RetryPolicy
+
+        api_policy = policy or RetryPolicy(
+            max_attempts=3,
+            retry_statuses=frozenset({403, 408, 429, 500, 502, 503, 504}),
+        )
+        deadline = time.monotonic() + 60.0
+
+        def on_retry(attempt, status_code, exc):
+            if status_code == 403:
+                self._refresh_session()
+
+        return retry_call(fn, policy=api_policy, deadline=deadline, on_retry=on_retry)
+
+    def _refresh_session(self) -> None:
+        """Create a fresh session with new device/session IDs after anti-bot detection."""
+        from services.account_service import account_service
+        from services.network.client import create_session
+        from services.network.headers import build_chatgpt_web_headers
+        from services.network.profiles import build_chatgpt_web_profile
+
         account = account_service.get_account(self.access_token) if self.access_token else {}
         account = account if isinstance(account, dict) else {}
         raw_fp = account.get("fp")
-        fp = {str(k).lower(): str(v) for k, v in raw_fp.items()} if isinstance(raw_fp, dict) else {}
-        for key in (
-                "user-agent",
-                "impersonate",
-                "oai-device-id",
-                "oai-session-id",
-                "sec-ch-ua",
-                "sec-ch-ua-mobile",
-                "sec-ch-ua-platform",
-        ):
-            value = str(account.get(key) or "").strip()
-            if value:
-                fp[key] = value
-        fp.setdefault(
-            "user-agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-        )
-        fp.setdefault("impersonate", "edge101")
-        fp.setdefault("oai-device-id", new_uuid())
-        fp.setdefault("oai-session-id", new_uuid())
-        fp.setdefault("sec-ch-ua", '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"')
-        fp.setdefault("sec-ch-ua-mobile", "?0")
-        fp.setdefault("sec-ch-ua-platform", '"Windows"')
-        return fp
+        if isinstance(raw_fp, dict):
+            raw_fp.pop("oai-device-id", None)
+            raw_fp.pop("oai-session-id", None)
+            account["fp"] = raw_fp
+
+        from services.config import config
+
+        global_fp = config.data.get("chatgpt_fingerprint", {})
+        global_fp = global_fp if isinstance(global_fp, dict) else {}
+
+        fresh = build_chatgpt_web_profile(account, global_fp)
+        self.network_profile = fresh
+        self.fp = fresh.as_fingerprint()
+        self.user_agent = self.fp["user-agent"]
+        self.device_id = self.fp["oai-device-id"]
+        self.session_id = self.fp["oai-session-id"]
+
+        self.session = create_session(impersonate=fresh.impersonate, verify=fresh.verify)
+        self.session.headers.update(build_chatgpt_web_headers(
+            fresh,
+            base_url=self.base_url,
+            client_version=self.client_version,
+            client_build_number=self.client_build_number,
+        ))
+        if self.access_token:
+            self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+
+        if self.access_token:
+            account_service.update_account(self.access_token, {"fp": self.fp})
+
+        # Raw bootstrap to avoid recursive retry-wrapping — session is already fresh.
+        _bootstrap_response = self.session.get(self.base_url + "/", headers=self._bootstrap_headers(), timeout=30)
+        ensure_ok(_bootstrap_response, "bootstrap")
+        self.pow_script_sources, self.pow_data_build = parse_pow_resources(_bootstrap_response.text)
+        if not self.pow_script_sources:
+            self.pow_script_sources = [DEFAULT_POW_SCRIPT]
+
+        logger.warning({
+            "event": "session_refreshed",
+            "new_device_id": self.device_id,
+            "new_session_id": self.session_id,
+        })
+
+    def _build_fp(self) -> Dict[str, str]:
+        return self._build_network_profile().as_fingerprint()
 
     def _headers(self, path: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """构造请求头，并补上 web 端要求的 target path/route。"""
@@ -163,7 +191,10 @@ class OpenAIBackendAPI:
 
     def _get_me(self) -> Dict[str, Any]:
         path = "/backend-api/me"
-        response = self.session.get(self.base_url + path, headers=self._headers(path), timeout=20)
+        response = self._call_with_retry(
+            lambda: self.session.get(self.base_url + path, headers=self._headers(path), timeout=20),
+            context=path,
+        )
         if response.status_code != 200:
             if response.status_code == 401:
                 raise InvalidAccessTokenError(f"{path} failed: HTTP {response.status_code}")
@@ -172,16 +203,19 @@ class OpenAIBackendAPI:
 
     def _get_conversation_init(self) -> Dict[str, Any]:
         path = "/backend-api/conversation/init"
-        response = self.session.post(
-            self.base_url + path,
-            headers=self._headers(path, {"Content-Type": "application/json"}),
-            json={
-                "gizmo_id": None,
-                "requested_default_model": None,
-                "conversation_id": None,
-                "timezone_offset_min": -480,
-            },
-            timeout=20,
+        response = self._call_with_retry(
+            lambda: self.session.post(
+                self.base_url + path,
+                headers=self._headers(path, {"Content-Type": "application/json"}),
+                json={
+                    "gizmo_id": None,
+                    "requested_default_model": None,
+                    "conversation_id": None,
+                    "timezone_offset_min": -480,
+                },
+                timeout=20,
+            ),
+            context=path,
         )
         if response.status_code != 200:
             if response.status_code == 401:
@@ -191,8 +225,14 @@ class OpenAIBackendAPI:
 
     def _get_default_account(self) -> Dict[str, Any]:
         route = "/backend-api/accounts/check/v4-2023-04-27"
-        response = self.session.get(self.base_url + route + "?timezone_offset_min=-480", headers=self._headers(route),
-                                    timeout=20)
+        response = self._call_with_retry(
+            lambda: self.session.get(
+                self.base_url + route + "?timezone_offset_min=-480",
+                headers=self._headers(route),
+                timeout=20,
+            ),
+            context=route,
+        )
         if response.status_code != 200:
             if response.status_code == 401:
                 raise InvalidAccessTokenError(f"{route} failed: HTTP {response.status_code}")
@@ -275,8 +315,16 @@ class OpenAIBackendAPI:
 
         turnstile_token = ""
         turnstile_info = data.get("turnstile") or {}
-        if turnstile_info.get("required") and turnstile_info.get("dx"):
-            turnstile_token = solve_turnstile_token(turnstile_info["dx"], source_p) or ""
+        if turnstile_info.get("required"):
+            from utils.turnstile import solve_turnstile_token
+
+            if config.enable_turnstile_solver:
+                turnstile_token = solve_turnstile_token(turnstile_info.get("dx", ""), source_p)
+                if turnstile_token is None:
+                    logger.warning({"event": "turnstile_solve_failed"})
+                    raise RuntimeError("turnstile token generation returned None")
+            else:
+                raise RuntimeError("chat requirements requires turnstile token, which is not implemented")
 
         return ChatRequirements(
             token=data.get("token", ""),
@@ -893,12 +941,15 @@ class OpenAIBackendAPI:
         requirements = self._get_chat_requirements()
         path, timezone = self._chat_target()
         payload = self._conversation_payload(normalized, model, timezone)
-        response = self.session.post(
-            self.base_url + path,
-            headers=self._conversation_headers(path, requirements),
-            json=payload,
-            timeout=300,
-            stream=True,
+        response = self._call_with_retry(
+            lambda: self.session.post(
+                self.base_url + path,
+                headers=self._conversation_headers(path, requirements),
+                json=payload,
+                timeout=300,
+                stream=True,
+            ),
+            context=path,
         )
         ensure_ok(response, path)
         try:
@@ -926,10 +977,9 @@ class OpenAIBackendAPI:
 
     def _bootstrap(self) -> None:
         """预热首页，并提取 PoW 相关脚本引用。"""
-        response = self.session.get(
-            self.base_url + "/",
-            headers=self._bootstrap_headers(),
-            timeout=30,
+        response = self._call_with_retry(
+            lambda: self.session.get(self.base_url + "/", headers=self._bootstrap_headers(), timeout=30),
+            context="bootstrap",
         )
         ensure_ok(response, "bootstrap")
         self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
@@ -941,11 +991,14 @@ class OpenAIBackendAPI:
         path = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
         context = "auth_chat_requirements" if self.access_token else "noauth_chat_requirements"
         body = {"p": build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)}
-        response = self.session.post(
-            self.base_url + path,
-            headers=self._headers(path, {"Content-Type": "application/json"}),
-            json=body,
-            timeout=30,
+        response = self._call_with_retry(
+            lambda: self.session.post(
+                self.base_url + path,
+                headers=self._headers(path, {"Content-Type": "application/json"}),
+                json=body,
+                timeout=30,
+            ),
+            context=context,
         )
         ensure_ok(response, context)
         requirements = self._build_requirements(response.json(), "" if self.access_token else body["p"])
@@ -967,10 +1020,13 @@ class OpenAIBackendAPI:
         )
         route = "/backend-api/models" if self.access_token else "/backend-anon/models"
         context = "auth_models" if self.access_token else "anon_models"
-        response = self.session.get(
-            self.base_url + path,
-            headers=self._headers(route),
-            timeout=30,
+        response = self._call_with_retry(
+            lambda: self.session.get(
+                self.base_url + path,
+                headers=self._headers(route),
+                timeout=30,
+            ),
+            context=context,
         )
         ensure_ok(response, context)
         data = []

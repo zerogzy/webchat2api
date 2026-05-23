@@ -1,0 +1,2 @@
+class NetworkProfileError(RuntimeError):
+    pass

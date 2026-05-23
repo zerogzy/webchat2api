@@ -56,6 +56,10 @@ PERSISTENT_CONFIG_KEYS = {
     "image_storage",
     "proxy",
     "base_url",
+    "chatgpt_fingerprint",
+    "grok_console_fingerprint",
+    "network_profiles",
+    "enable_turnstile_solver",
 }
 
 
@@ -114,6 +118,62 @@ def _normalize_backup_state(value: object) -> dict[str, object]:
         "last_error": str(source.get("last_error") or "").strip() or None,
         "last_object_key": str(source.get("last_object_key") or "").strip() or None,
     }
+
+
+CHATGPT_FINGERPRINT_KEYS = {
+    "user-agent",
+    "impersonate",
+    "oai-device-id",
+    "oai-session-id",
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+}
+
+
+def _nonempty_string(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_chatgpt_fingerprint(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        key: text
+        for key in CHATGPT_FINGERPRINT_KEYS
+        if (text := _nonempty_string(source.get(key)))
+    }
+
+
+def _normalize_grok_console_profile(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    normalized: dict[str, object] = {}
+    if impersonate := _nonempty_string(source.get("impersonate")):
+        normalized["impersonate"] = impersonate
+    user_agent = _nonempty_string(source.get("user-agent") or source.get("user_agent"))
+    if user_agent:
+        normalized["user-agent"] = user_agent
+    if cf_clearance := _nonempty_string(source.get("cf_clearance")):
+        normalized["cf_clearance"] = cf_clearance
+    if "verify" in source:
+        normalized["verify"] = _normalize_bool(source.get("verify"), True)
+    if "timeout" in source:
+        try:
+            timeout = float(source.get("timeout"))
+        except (TypeError, ValueError):
+            timeout = 0.0
+        if timeout > 0:
+            normalized["timeout"] = int(timeout) if timeout.is_integer() else timeout
+    return normalized
+
+
+def _normalize_grok_console_fingerprint(value: object) -> dict[str, object]:
+    return _normalize_grok_console_profile(value)
+
+
+def _normalize_network_profiles(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    grok_console = _normalize_grok_console_profile(source.get("grok_console"))
+    return {"grok_console": grok_console} if grok_console else {}
 
 
 def _normalize_image_storage_settings(value: object) -> dict[str, object]:
@@ -389,15 +449,36 @@ class ConfigStore:
         data["global_system_prompt"] = self.global_system_prompt
         data["backup"] = self.get_backup_settings()
         data["image_storage"] = self.get_image_storage_settings()
+        data["chatgpt_fingerprint"] = self.chatgpt_fingerprint
+        data["grok_console_fingerprint"] = self.grok_console_fingerprint
+        data["network_profiles"] = self.network_profiles
         data.pop("auth-key", None)
         return data
 
     def get_proxy_settings(self) -> str:
         return str(os.getenv("PROXY_URL") or self.data.get("proxy") or "").strip()
 
+    @property
+    def chatgpt_fingerprint(self) -> dict[str, object]:
+        return _normalize_chatgpt_fingerprint(self.data.get("chatgpt_fingerprint"))
+
+    @property
+    def grok_console_fingerprint(self) -> dict[str, object]:
+        return _normalize_grok_console_fingerprint(self.data.get("grok_console_fingerprint"))
+
+    @property
+    def network_profiles(self) -> dict[str, object]:
+        return _normalize_network_profiles(self.data.get("network_profiles"))
+
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         next_data.update(_persistent_settings(dict(data or {})))
+        if "chatgpt_fingerprint" in next_data:
+            next_data["chatgpt_fingerprint"] = _normalize_chatgpt_fingerprint(next_data.get("chatgpt_fingerprint"))
+        if "grok_console_fingerprint" in next_data:
+            next_data["grok_console_fingerprint"] = _normalize_grok_console_fingerprint(next_data.get("grok_console_fingerprint"))
+        if "network_profiles" in next_data:
+            next_data["network_profiles"] = _normalize_network_profiles(next_data.get("network_profiles"))
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "image_storage" in next_data:
@@ -410,6 +491,13 @@ class ConfigStore:
 
     def get_backup_settings(self) -> dict[str, object]:
         return _normalize_backup_settings(self.data.get("backup"))
+
+    @property
+    def enable_turnstile_solver(self) -> bool:
+        value = self.data.get("enable_turnstile_solver", True)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
 
     def get_image_storage_settings(self) -> dict[str, object]:
         return _normalize_image_storage_settings(self.data.get("image_storage"))

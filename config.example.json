@@ -45,5 +45,22 @@
       "images": false
     }
   },
-  "image_account_concurrency": 3
+  "image_account_concurrency": 3,
+  "network_profiles": {
+    "grok_console": {
+      "impersonate": "edge101",
+      "user-agent": "Mozilla/5.0 (webchat2api grok console)",
+      "verify": true,
+      "timeout": 60,
+      "cf_clearance": ""
+    }
+  },
+  "chatgpt_fingerprint": {
+    "impersonate": "edge101",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+    "sec-ch-ua": "\"Microsoft Edge\";v=\"143\", \"Chromium\";v=\"143\", \"Not A(Brand\";v=\"24\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"Windows\""
+  },
+  "enable_turnstile_solver": true
 }

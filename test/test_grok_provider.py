@@ -106,6 +106,83 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(chunks[1]["choices"][0]["delta"], {})
         self.assertEqual(chunks[1]["choices"][0]["finish_reason"], "stop")
 
+    def test_grok_console_default_network_profile_matches_existing_behavior(self) -> None:
+        with mock.patch.object(grok.config, "data", {}):
+            headers = grok._headers("token-value")
+
+        self.assertEqual(headers["User-Agent"], "Mozilla/5.0 (webchat2api grok console)")
+        self.assertEqual(headers["Cookie"], "sso=token-value")
+        self.assertEqual(headers["Authorization"], "Bearer token-value")
+
+        created: list[dict[str, object]] = []
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                created.append(kwargs)
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("token-value")
+
+        self.assertEqual(created, [{"impersonate": "edge101", "verify": True}])
+        self.assertEqual(client.network_profile.timeout, 60)
+
+    def test_grok_console_uses_configured_network_profile(self) -> None:
+        settings = {
+            "network_profiles": {
+                "grok_console": {
+                    "impersonate": "chrome136",
+                    "user-agent": "Configured Grok UA",
+                    "verify": False,
+                    "timeout": 12.5,
+                }
+            }
+        }
+        created: list[dict[str, object]] = []
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                created.append(kwargs)
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", settings), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("sso=configured-cookie")
+            headers = grok._headers("sso=configured-cookie")
+
+        self.assertEqual(created, [{"impersonate": "chrome136", "verify": False}])
+        self.assertEqual(client.network_profile.timeout, 12.5)
+        self.assertEqual(headers["User-Agent"], "Configured Grok UA")
+        self.assertEqual(headers["Cookie"], "sso=configured-cookie")
+
+    def test_grok_console_session_preserves_proxy_kwargs(self) -> None:
+        created: list[dict[str, object]] = []
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                created.append(kwargs)
+
+            def close(self) -> None:
+                pass
+
+        with (
+            mock.patch.object(grok.config, "data", {}),
+            mock.patch.object(grok.config, "get_proxy_settings", return_value="http://proxy.local:8080"),
+            mock.patch("curl_cffi.requests.Session", FakeSession),
+        ):
+            grok.GrokConsoleClient("token-value")
+
+        self.assertEqual(created, [{"impersonate": "edge101", "verify": True, "proxy": "http://proxy.local:8080"}])
+
 
 if __name__ == "__main__":
     unittest.main()
