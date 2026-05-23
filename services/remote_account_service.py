@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from curl_cffi.requests import Session
+from services.network.client import create_session
 
 from services.account_service import account_service as default_account_service
 from services.config import DATA_DIR
@@ -275,14 +275,18 @@ class RemoteAccountService:
         url = _clean(source.get("url"))
         if not url:
             raise ValueError("url is required")
-        session = Session()
+        session = create_session()
         method = _normalize_method(source.get("method"))
-        if method == "POST":
-            response = session.post(url, headers=self._headers_for_source(source), json={})
-        else:
-            response = session.get(url, headers=self._headers_for_source(source))
-        response.raise_for_status()
-        return response.json()
+        headers = self._headers_for_source(source)
+        try:
+            if method == "POST":
+                response = session.post(url, headers=headers, json={}, timeout=30)
+            else:
+                response = session.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        finally:
+            session.close()
 
     def inject_payload(self, payload: object, *, strategy: str = "merge", source_id: str = "", source_name: str = "", provider_default: str = GPT_PROVIDER, reject_empty_replace: bool = True) -> dict[str, Any]:
         strategy = _normalize_sync_strategy(strategy)

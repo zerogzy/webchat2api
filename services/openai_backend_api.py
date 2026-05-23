@@ -1001,7 +1001,7 @@ class OpenAIBackendAPI:
             context=context,
         )
         ensure_ok(response, context)
-        requirements = self._build_requirements(response.json(), "" if self.access_token else body["p"])
+        requirements = self._build_requirements(response.json(), body.get("p", ""))
         if not requirements.token:
             message = "missing auth chat requirements token" if self.access_token else "missing chat requirements token"
             raise RuntimeError(f"{message}: {requirements.raw_finalize}")
