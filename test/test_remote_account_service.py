@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 from typing import Any
 
@@ -213,6 +214,32 @@ class RemoteAccountServiceTests(unittest.TestCase):
         self.assertIn("old-same", tokens)
         self.assertIn("other", tokens)
         self.assertNotIn("account-secret-token", tokens)
+
+    def test_fetch_source_payload_uses_shared_session_factory_and_closes_session(self) -> None:
+        service = RemoteAccountService(AccountService(MemoryStorage()))
+        response = mock.Mock()
+        response.json.return_value = {"tokens": ["remote-token"]}
+        session = mock.Mock()
+        session.post.return_value = response
+
+        with mock.patch("services.remote_account_service.create_session", return_value=session) as create_session:
+            payload = service.fetch_source_payload({
+                "url": "https://example.test/accounts",
+                "method": "POST",
+                "auth_header": "X-Token",
+                "auth_token": "secret-token",
+            })
+
+        self.assertEqual(payload, {"tokens": ["remote-token"]})
+        create_session.assert_called_once_with()
+        session.post.assert_called_once_with(
+            "https://example.test/accounts",
+            headers={"Accept": "application/json", "X-Token": "secret-token"},
+            json={},
+            timeout=30,
+        )
+        response.raise_for_status.assert_called_once_with()
+        session.close.assert_called_once_with()
 
     def test_sync_source_persists_sanitized_error_and_raises_generic_message(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

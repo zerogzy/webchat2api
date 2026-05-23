@@ -153,6 +153,30 @@ class NetworkProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "turnstile token"):
             client._build_requirements({"token": "requirements-token", "turnstile": {"required": True, "dx": "challenge"}})
 
+    def test_authenticated_chat_requirements_passes_generated_p_to_turnstile_builder(self) -> None:
+        from services.openai_backend_api import ChatRequirements, OpenAIBackendAPI
+
+        client = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
+        client.access_token = "access-token"
+        client.base_url = "https://chatgpt.com"
+        client.user_agent = "Test UA"
+        client.pow_script_sources = []
+        client.pow_data_build = ""
+        response = mock.Mock(status_code=200, headers={})
+        response.json.return_value = {"token": "requirements-token", "turnstile": {"required": True, "dx": "challenge"}}
+        client.session = mock.Mock(headers={})
+        client.session.post.return_value = response
+        client._call_with_retry = lambda callback, context: callback()
+        client._build_requirements = mock.Mock(return_value=ChatRequirements(token="requirements-token"))
+
+        with mock.patch("services.openai_backend_api.build_legacy_requirements_token", return_value="generated-p"):
+            requirements = client._get_chat_requirements()
+
+        self.assertEqual(requirements.token, "requirements-token")
+        client.session.post.assert_called_once()
+        self.assertEqual(client.session.post.call_args.kwargs["json"], {"p": "generated-p"})
+        client._build_requirements.assert_called_once_with(response.json.return_value, "generated-p")
+
     def test_grok_profile_prefers_network_profiles_over_legacy_key(self) -> None:
         profile = build_grok_console_profile({
             "grok_console_fingerprint": {"impersonate": "legacy", "user-agent": "Legacy UA"},
