@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import types
 import unittest
@@ -41,7 +42,32 @@ if "fastapi" not in sys.modules:
 
 conversation = types.ModuleType("services.protocol.conversation")
 conversation.ConversationRequest = object
-conversation.ImageOutput = object
+class FakeImageOutput:
+    def __init__(self, kind: str, model: str, index: int, total: int, text: str = "", data: list[dict[str, object]] | None = None, upstream_event_type: str = "") -> None:
+        self.kind = kind
+        self.model = model
+        self.index = index
+        self.total = total
+        self.text = text
+        self.data = data or []
+        self.upstream_event_type = upstream_event_type
+
+
+class FakeImageGenerationError(Exception):
+    def __init__(self, message: str, status_code: int = 502, error_type: str = "server_error", code: str | None = "upstream_error", param: str | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_type = error_type
+        self.code = code
+        self.param = param
+
+    def to_openai_error(self) -> dict[str, object]:
+        return {"error": {"message": str(self), "type": self.error_type, "param": self.param, "code": self.code}}
+
+
+conversation.ImageOutput = FakeImageOutput
+conversation.ImageGenerationError = FakeImageGenerationError
+conversation.format_image_result = lambda items, prompt, response_format, base_url=None, created=None: {"created": created or 1, "data": items}
 conversation.collect_image_outputs = lambda *args, **kwargs: []
 conversation.collect_text = lambda *args, **kwargs: ""
 conversation.count_message_tokens = lambda *args, **kwargs: 0
@@ -89,13 +115,164 @@ class GrokProviderTests(unittest.TestCase):
             grok.extract_console_text({"output": [{"type": "output_text", "text": "hello"}, {"type": "text", "text": " world"}]}),
             "hello world",
         )
+
+    def test_extract_console_completion_splits_chinese_visible_thinking(self) -> None:
+        response = grok.extract_console_completion({
+            "output_text": "**思考摘要**：先判断问题。\n\n继续分析。\n\n**答案**：最终回答。",
+            "reasoning": {"effort": "high"},
+            "usage": {"output_tokens_details": {"reasoning_tokens": 3}},
+        })
+
+        self.assertEqual(response.content, "最终回答。")
+        self.assertEqual(response.reasoning_content, "先判断问题。\n\n继续分析。")
+        self.assertEqual(response.raw_reasoning, {"effort": "high"})
+        self.assertEqual(response.raw_usage, {"output_tokens_details": {"reasoning_tokens": 3}})
+
+    def test_extract_console_completion_strips_bold_answer_marker_with_inner_colon(self) -> None:
+        response = grok.extract_console_completion({
+            "output_text": "**思考摘要**：先判断问题。\n\n**答案：**  \n8+8等于16。",
+        })
+
+        self.assertEqual(response.content, "8+8等于16。")
+        self.assertEqual(response.reasoning_content, "先判断问题。")
+        self.assertFalse(response.content.startswith("**"))
+
+    def test_extract_console_completion_splits_english_visible_thinking(self) -> None:
+        response = grok.extract_console_completion({
+            "output_text": "**Thinking summary**: inspect inputs\nvalidate route\n\n**Answer**: use console",
+        })
+
+        self.assertEqual(response.content, "use console")
+        self.assertEqual(response.reasoning_content, "inspect inputs\nvalidate route")
+
+    def test_extract_console_completion_keeps_plain_content_unchanged(self) -> None:
+        response = grok.extract_console_completion({"output_text": "plain answer"})
+
+        self.assertEqual(response.content, "plain answer")
+        self.assertEqual(response.reasoning_content, "")
+
+    def test_app_chat_headers_use_grok_app_shape_with_plain_token(self) -> None:
+        with (
+            mock.patch.object(grok, "_grok_console_profile", return_value=types.SimpleNamespace(
+                user_agent="Test UA",
+                cf_clearance="profile-clearance",
+            )),
+            mock.patch.object(grok.uuid, "uuid4", return_value="request-id"),
+        ):
+            headers = grok.app_chat_headers("plain-token")
+
+        self.assertEqual(headers["Accept"], "*/*")
+        self.assertEqual(headers["Accept-Language"], "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7")
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Origin"], "https://grok.com")
+        self.assertEqual(headers["Referer"], "https://grok.com/")
+        self.assertEqual(headers["Sec-Fetch-Dest"], "empty")
+        self.assertEqual(headers["Sec-Fetch-Mode"], "cors")
+        self.assertEqual(headers["Sec-Fetch-Site"], "same-origin")
+        self.assertEqual(headers["User-Agent"], "Test UA")
+        self.assertEqual(headers["x-statsig-id"], grok.GROK_APP_CHAT_STATSIG_ID)
+        self.assertEqual(headers["x-xai-request-id"], "request-id")
+        self.assertEqual(headers["Cookie"], "sso=plain-token; sso-rw=plain-token; cf_clearance=profile-clearance")
+        self.assertNotIn("Authorization", headers)
+
+    def test_app_chat_headers_normalize_cookie_token_without_overriding_clearance(self) -> None:
+        with mock.patch.object(grok, "_grok_console_profile", return_value=types.SimpleNamespace(
+            user_agent="Test UA",
+            cf_clearance="profile-clearance",
+        )):
+            headers = grok.app_chat_headers(" sso=stored ; cf_clearance=stored-clearance ")
+
+        self.assertEqual(headers["Cookie"], "sso=stored; cf_clearance=stored-clearance; sso-rw=stored")
+        self.assertNotIn("Authorization", headers)
+
+    def test_build_app_chat_payload_uses_mode_tier_and_image_flags(self) -> None:
+        spec = resolve_model("grok-4.20-heavy")
+        payload = grok.build_app_chat_payload(
+            spec,
+            {"n": 2},
+            [{"role": "user", "content": "Draw a cat"}],
+            image_generation=True,
+        )
+
+        self.assertEqual(payload["message"], "Draw a cat")
+        self.assertEqual(payload["modeId"], "heavy")
+        self.assertEqual(payload["modelTier"], "heavy")
+        self.assertTrue(payload["preferBest"])
+        self.assertTrue(payload["enableImageGeneration"])
+        self.assertTrue(payload["enableImageStreaming"])
+        self.assertEqual(payload["imageGenerationCount"], 2)
+        self.assertFalse(payload["returnImageBytes"])
+
+    def test_app_chat_reasoning_and_text_extraction(self) -> None:
+        events = grok.app_chat_line_events([
+            b'data: {"result":{"response":{"token":"plan ","isThinking":true}}}',
+            json.dumps({"result": {"response": {"token": "answer", "messageTag": "final"}}}),
+            'data: {"result":{"response":{"finalMetadata":{}}}}',
+        ])
+
+        response = grok.collect_app_chat_response(events)
+
+        self.assertEqual(response, {"content": "answer", "reasoning_content": "plan "})
+
+    def test_collect_app_chat_response_accumulates_final_tag_tokens(self) -> None:
+        events = [
+            {"result": {"response": {"token": "Hello", "messageTag": "final"}}},
+            {"result": {"response": {"token": " world", "messageTag": "final"}}},
+            {"result": {"response": {"isSoftStop": True}}},
+        ]
+
+        response = grok.collect_app_chat_response(events)
+
+        self.assertEqual(response, {"content": "Hello world", "reasoning_content": ""})
+
+    def test_message_tag_final_is_not_app_chat_final_event(self) -> None:
+        self.assertFalse(grok.is_app_chat_final_event({"result": {"response": {"messageTag": "final"}}}))
+        self.assertTrue(grok.is_app_chat_final_event({"result": {"response": {"finalMetadata": {}}}}))
+        self.assertTrue(grok.is_app_chat_final_event({"result": {"response": {"isSoftStop": True}}}))
+
+    def test_extract_app_chat_image_url_from_final_chunk(self) -> None:
+        event = {
+            "result": {
+                "response": {
+                    "cardAttachment": {
+                        "jsonData": {
+                            "image_chunk": {
+                                "progress": 100,
+                                "imageUrl": "generated/cat.png",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.assertEqual(grok.extract_app_chat_image_url(event), "https://assets.grok.com/generated/cat.png")
+
+    def test_extract_app_chat_image_url_from_json_string_final_chunk(self) -> None:
+        event = {
+            "result": {
+                "response": {
+                    "cardAttachment": {
+                        "jsonData": json.dumps({
+                            "image_chunk": {
+                                "progress": 100,
+                                "imageUrl": "/generated/dog.png",
+                            }
+                        })
+                    }
+                }
+            }
+        }
+
+        self.assertEqual(grok.extract_app_chat_image_url(event), "https://assets.grok.com/generated/dog.png")
+
     def test_streaming_grok_chat_completion_returns_openai_chunks(self) -> None:
         body = {
             "model": "grok-4.20-multi-agent",
             "stream": True,
             "messages": [{"role": "user", "content": "Hello"}],
         }
-        with mock.patch.object(grok, "chat_completion", return_value="Hi there"):
+        with mock.patch.object(grok, "console_chat_completion", return_value=grok.GrokConsoleCompletion(content="Hi there")):
             chunks = list(openai_v1_chat_complete.handle(body))
 
         self.assertEqual(len(chunks), 2)
@@ -105,6 +282,102 @@ class GrokProviderTests(unittest.TestCase):
         self.assertIsNone(chunks[0]["choices"][0]["finish_reason"])
         self.assertEqual(chunks[1]["choices"][0]["delta"], {})
         self.assertEqual(chunks[1]["choices"][0]["finish_reason"], "stop")
+
+    def test_console_grok_reasoning_model_uses_console_path(self) -> None:
+        spec = resolve_model("grok-4.20-reasoning")
+
+        self.assertFalse(openai_v1_chat_complete.is_grok_app_chat_model(spec))
+
+    def test_streaming_grok_console_completion_emits_reasoning_content(self) -> None:
+        body = {
+            "model": "grok-4.20-reasoning",
+            "stream": True,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        with mock.patch.object(
+            grok,
+            "console_chat_completion",
+            return_value=grok.GrokConsoleCompletion(content="Hi", reasoning_content="think"),
+        ) as patched_console, mock.patch.object(grok, "app_chat_completion_events") as patched_app_chat:
+            chunks = list(openai_v1_chat_complete.handle(body))
+
+        patched_console.assert_called_once()
+        patched_app_chat.assert_not_called()
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "reasoning_content": "think"})
+        self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": "Hi"})
+        self.assertEqual(chunks[2]["choices"][0]["finish_reason"], "stop")
+
+    def test_streaming_grok_app_chat_completion_emits_reasoning_content(self) -> None:
+        body = {
+            "model": "grok-4.20-heavy",
+            "stream": True,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        events = [
+            {"result": {"response": {"token": "think", "isThinking": True}}},
+            {"result": {"response": {"token": "Hi", "messageTag": "final"}}},
+        ]
+        with mock.patch.object(grok, "app_chat_completion_events", return_value=iter(events)):
+            chunks = list(openai_v1_chat_complete.handle(body))
+
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "reasoning_content": "think"})
+        self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": "Hi"})
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
+
+    def test_non_streaming_grok_app_chat_completion_includes_reasoning_content(self) -> None:
+        body = {
+            "model": "grok-4.20-heavy",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        with mock.patch.object(grok, "app_chat_completion", return_value={"content": "Hi", "reasoning_content": "think"}):
+            response = openai_v1_chat_complete.handle(body)
+
+        message = response["choices"][0]["message"]
+        self.assertEqual(message["content"], "Hi")
+        self.assertEqual(message["reasoning_content"], "think")
+
+    def test_non_streaming_grok_console_completion_includes_reasoning_content(self) -> None:
+        body = {
+            "model": "grok-4.20-reasoning",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        with mock.patch.object(
+            grok,
+            "console_chat_completion",
+            return_value=grok.GrokConsoleCompletion(content="Hi", reasoning_content="think"),
+        ) as patched_console, mock.patch.object(grok, "app_chat_completion") as patched_app_chat:
+            response = openai_v1_chat_complete.handle(body)
+
+        patched_console.assert_called_once()
+        patched_app_chat.assert_not_called()
+        message = response["choices"][0]["message"]
+        self.assertEqual(message["content"], "Hi")
+        self.assertEqual(message["reasoning_content"], "think")
+
+    def test_grok_image_lite_chat_routes_to_app_chat_image_outputs(self) -> None:
+        body = {
+            "model": "grok-imagine-image-lite",
+            "messages": [{"role": "user", "content": "Draw a cat"}],
+        }
+        outputs = [FakeImageOutput(kind="result", model="grok-imagine-image-lite", index=1, total=1, data=[{"url": "https://assets.grok.com/cat.png"}])]
+        result = {"created": 1, "data": [{"b64_json": "abc", "url": "https://assets.grok.com/cat.png"}]}
+        with (
+            mock.patch.object(grok, "app_chat_image_outputs", return_value=iter(outputs)) as patched,
+            mock.patch.object(openai_v1_chat_complete, "collect_image_outputs", return_value=result),
+        ):
+            response = openai_v1_chat_complete.handle(body)
+
+        patched.assert_called_once()
+        self.assertIn("data:image/png;base64,abc", response["choices"][0]["message"]["content"])
+
+    def test_unsupported_grok_image_model_raises_openai_error(self) -> None:
+        spec = resolve_model("grok-imagine-image-pro")
+        with self.assertRaises(FakeImageGenerationError) as context:
+            list(grok.app_chat_image_outputs({"prompt": "Draw"}, spec, "Draw"))
+
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertEqual(context.exception.code, "unsupported_model")
+        self.assertEqual(context.exception.param, "model")
 
     def test_grok_console_default_network_profile_matches_existing_behavior(self) -> None:
         with mock.patch.object(grok.config, "data", {}):

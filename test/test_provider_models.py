@@ -127,6 +127,28 @@ class ProviderModelListTests(unittest.TestCase):
         self.assertEqual(models["gpt-image-2"]["provider"], "gpt")
         self.assertEqual(models["grok-4.3"]["provider"], "grok")
 
+    def test_list_models_includes_new_grok_aliases_and_image_models(self) -> None:
+        with mock.patch.dict(sys.modules, {"services.openai_backend_api": None}):
+            result = openai_v1_models.list_models()
+
+        models = {item["id"]: item for item in result["data"]}
+        for model_id in [
+            "grok-4.20-0309-non-reasoning",
+            "grok-4.20-0309-heavy",
+            "grok-4.20-heavy",
+            "grok-4.3-beta",
+            "grok-imagine-image-lite",
+            "grok-imagine-image",
+            "grok-imagine-image-pro",
+            "grok-imagine-image-edit",
+            "grok-imagine-video",
+        ]:
+            self.assertIn(model_id, models)
+            self.assertEqual(models[model_id]["provider"], "grok")
+        self.assertEqual(models["grok-imagine-image-lite"]["capability"], "image")
+        self.assertEqual(models["grok-imagine-image-edit"]["capability"], "image_edit")
+        self.assertEqual(models["grok-imagine-video"]["capability"], "video")
+
 
 if __name__ == "__main__":
     unittest.main()
