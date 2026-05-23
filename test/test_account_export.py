@@ -49,19 +49,21 @@ if "git" not in sys.modules:
 
 if "fastapi" not in sys.modules:
     fastapi = types.ModuleType("fastapi")
-    fastapi.APIRouter = lambda *args, **kwargs: None
-    fastapi.FastAPI = lambda *args, **kwargs: None
-    fastapi.Header = lambda default=None, **kwargs: default
-    fastapi.HTTPException = type("HTTPException", (Exception,), {})
-    fastapi_concurrency = types.ModuleType("fastapi.concurrency")
-    fastapi_concurrency.run_in_threadpool = lambda func, *args, **kwargs: func(*args, **kwargs)
-    fastapi_responses = types.ModuleType("fastapi.responses")
-    fastapi_responses.JSONResponse = object
-    fastapi_responses.StreamingResponse = object
-    fastapi_responses.Response = lambda *args, **kwargs: {"args": args, "kwargs": kwargs}
     sys.modules.setdefault("fastapi", fastapi)
-    sys.modules.setdefault("fastapi.concurrency", fastapi_concurrency)
-    sys.modules.setdefault("fastapi.responses", fastapi_responses)
+else:
+    fastapi = sys.modules["fastapi"]
+fastapi.APIRouter = getattr(fastapi, "APIRouter", lambda *args, **kwargs: None)
+fastapi.FastAPI = getattr(fastapi, "FastAPI", lambda *args, **kwargs: None)
+fastapi.Header = getattr(fastapi, "Header", lambda default=None, **kwargs: default)
+fastapi.HTTPException = getattr(fastapi, "HTTPException", type("HTTPException", (Exception,), {}))
+fastapi_concurrency = sys.modules.get("fastapi.concurrency") or types.ModuleType("fastapi.concurrency")
+fastapi_concurrency.run_in_threadpool = getattr(fastapi_concurrency, "run_in_threadpool", lambda func, *args, **kwargs: func(*args, **kwargs))
+fastapi_responses = sys.modules.get("fastapi.responses") or types.ModuleType("fastapi.responses")
+fastapi_responses.JSONResponse = getattr(fastapi_responses, "JSONResponse", object)
+fastapi_responses.StreamingResponse = getattr(fastapi_responses, "StreamingResponse", object)
+fastapi_responses.Response = getattr(fastapi_responses, "Response", lambda *args, **kwargs: {"args": args, "kwargs": kwargs})
+sys.modules.setdefault("fastapi.concurrency", fastapi_concurrency)
+sys.modules.setdefault("fastapi.responses", fastapi_responses)
 
 if "pydantic" not in sys.modules:
     pydantic = types.ModuleType("pydantic")
@@ -209,6 +211,8 @@ class AccountExportTests(unittest.TestCase):
             "require_admin",
             "sanitize_cpa_pool",
             "sanitize_cpa_pools",
+            "sanitize_remote_account_source",
+            "sanitize_remote_account_sources",
             "sanitize_sub2api_server",
             "sanitize_sub2api_servers",
         ):
@@ -219,6 +223,9 @@ class AccountExportTests(unittest.TestCase):
         cpa_stub.cpa_config = object()
         cpa_stub.cpa_import_service = object()
         cpa_stub.list_remote_files = lambda *args, **kwargs: []
+        remote_account_stub = types.ModuleType("services.remote_account_service")
+        remote_account_stub.remote_account_config = object()
+        remote_account_stub.remote_account_import_service = object()
         sub2api_stub = types.ModuleType("services.sub2api_service")
         sub2api_stub.list_remote_accounts = lambda *args, **kwargs: []
         sub2api_stub.list_remote_groups = lambda *args, **kwargs: []
@@ -228,6 +235,7 @@ class AccountExportTests(unittest.TestCase):
         sys.modules.setdefault("api.support", support_stub)
         sys.modules.setdefault("services.auth_service", auth_stub)
         sys.modules.setdefault("services.cpa_service", cpa_stub)
+        sys.modules.setdefault("services.remote_account_service", remote_account_stub)
         sys.modules.setdefault("services.sub2api_service", sub2api_stub)
 
         spec = importlib.util.spec_from_file_location("accounts_api_module", "api/accounts.py")

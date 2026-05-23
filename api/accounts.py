@@ -13,11 +13,14 @@ from api.support import (
     require_admin,
     sanitize_cpa_pool,
     sanitize_cpa_pools,
+    sanitize_remote_account_source,
+    sanitize_remote_account_sources,
     sanitize_sub2api_server,
     sanitize_sub2api_servers,
 )
 from services.account_service import account_service
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
+from services.remote_account_service import REMOTE_ACCOUNT_SYNC_FAILED, remote_account_config, remote_account_import_service
 from services.sub2api_service import (
     list_remote_accounts as sub2api_list_remote_accounts,
     list_remote_groups as sub2api_list_remote_groups,
@@ -100,6 +103,42 @@ class Sub2APIServerUpdateRequest(BaseModel):
 
 class Sub2APIImportRequest(BaseModel):
     account_ids: list[str] = Field(default_factory=list)
+
+
+class RemoteAccountSourceCreateRequest(BaseModel):
+    name: str = ""
+    enabled: bool = True
+    url: str = ""
+    method: Literal["GET", "POST"] = "GET"
+    auth_header: str = ""
+    auth_token: str = ""
+    bearer_token: str = ""
+    provider: Literal["", "gpt", "grok"] = ""
+    sync_strategy: Literal["merge", "replace"] = "merge"
+    interval_seconds: int | None = None
+
+
+class RemoteAccountSourceUpdateRequest(BaseModel):
+    name: str | None = None
+    enabled: bool | None = None
+    url: str | None = None
+    method: Literal["GET", "POST"] | None = None
+    auth_header: str | None = None
+    auth_token: str | None = None
+    bearer_token: str | None = None
+    provider: Literal["", "gpt", "grok"] | None = None
+    sync_strategy: Literal["merge", "replace"] | None = None
+    interval_seconds: int | None = None
+
+
+class RemoteAccountInjectRequest(BaseModel):
+    payload: Any | None = None
+    accounts: list[Any] | None = None
+    tokens: list[str] | None = None
+    strategy: Literal["merge", "replace"] = "merge"
+    source_id: str = ""
+    source_name: str = ""
+    provider: Literal["gpt", "grok"] = "gpt"
 
 
 def _account_payload_token(item: dict[str, Any]) -> str:
@@ -313,6 +352,86 @@ def create_router() -> APIRouter:
         if pool is None:
             raise HTTPException(status_code=404, detail={"error": "pool not found"})
         return {"import_job": pool.get("import_job")}
+
+
+    @router.get("/api/remote-account/sources")
+    async def list_remote_account_sources(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"sources": sanitize_remote_account_sources(remote_account_config.list_sources())}
+
+    @router.post("/api/remote-account/sources")
+    async def create_remote_account_source(body: RemoteAccountSourceCreateRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        if not body.url.strip():
+            raise HTTPException(status_code=400, detail={"error": "url is required"})
+        try:
+            source = remote_account_config.add_source(**body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return {"source": sanitize_remote_account_source(source), "sources": sanitize_remote_account_sources(remote_account_config.list_sources())}
+
+    @router.post("/api/remote-account/sources/{source_id}")
+    async def update_remote_account_source(source_id: str, body: RemoteAccountSourceUpdateRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            source = remote_account_config.update_source(source_id, body.model_dump(exclude_none=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        if source is None:
+            raise HTTPException(status_code=404, detail={"error": "source not found"})
+        return {"source": sanitize_remote_account_source(source), "sources": sanitize_remote_account_sources(remote_account_config.list_sources())}
+
+    @router.delete("/api/remote-account/sources/{source_id}")
+    async def delete_remote_account_source(source_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        if not remote_account_config.delete_source(source_id):
+            raise HTTPException(status_code=404, detail={"error": "source not found"})
+        return {"sources": sanitize_remote_account_sources(remote_account_config.list_sources())}
+
+    @router.post("/api/remote-account/sources/{source_id}/sync")
+    async def sync_remote_account_source(source_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        source = remote_account_config.get_source(source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail={"error": "source not found"})
+        try:
+            job = await run_in_threadpool(remote_account_import_service.sync_source, source, remote_account_config)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail={"error": REMOTE_ACCOUNT_SYNC_FAILED}) from exc
+        return {"import_job": job, "source": sanitize_remote_account_source(remote_account_config.get_source(source_id))}
+
+    @router.get("/api/remote-account/sources/{source_id}/sync")
+    async def remote_account_source_sync_progress(source_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        source = remote_account_config.get_source(source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail={"error": "source not found"})
+        return {"import_job": source.get("import_job")}
+
+    @router.post("/api/remote-account/inject")
+    async def inject_remote_accounts(body: RemoteAccountInjectRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        payload = body.payload
+        if payload is None:
+            if body.accounts is not None:
+                payload = {"accounts": body.accounts}
+            elif body.tokens is not None:
+                payload = {"tokens": body.tokens}
+        if payload is None:
+            raise HTTPException(status_code=400, detail={"error": "payload, accounts, or tokens is required"})
+        try:
+            result = remote_account_import_service.inject_payload(
+                payload,
+                strategy=body.strategy,
+                source_id=body.source_id,
+                source_name=body.source_name,
+                provider_default=body.provider,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return result
 
     @router.get("/api/sub2api/servers")
     async def list_sub2api_servers(authorization: str | None = Header(default=None)):

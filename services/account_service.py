@@ -312,6 +312,66 @@ class AccountService:
                             {"added": added, "skipped": skipped})
         return {"added": added, "skipped": skipped, "items": items}
 
+    def replace_account_items_for_remote_source(self, source_id: str, items: list[dict[str, Any]]) -> dict:
+        source_id = _clean_string(source_id)
+        if not source_id:
+            raise ValueError("source_id is required")
+
+        payloads: list[dict[str, Any]] = []
+        seen_tokens: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            access_token = _clean_string(item.get("access_token") or item.get("accessToken"))
+            if not access_token or access_token in seen_tokens:
+                continue
+
+            payload = dict(item)
+            payload["access_token"] = access_token
+            payload.pop("accessToken", None)
+            if _clean_string(payload.get("type")).lower() == "codex":
+                payload.setdefault("export_type", "codex")
+                payload.pop("type", None)
+            payloads.append(payload)
+            seen_tokens.add(access_token)
+
+        if not payloads:
+            raise ValueError("replace requires a non-empty account payload")
+
+        with self._lock:
+            next_accounts = {
+                token: dict(account)
+                for token, account in self._accounts.items()
+                if account.get("remote_source_id") != source_id
+            }
+            removed = len(self._accounts) - len(next_accounts)
+            added = 0
+            skipped = 0
+            for payload in payloads:
+                access_token = payload["access_token"]
+                current = next_accounts.get(access_token)
+                if current is None:
+                    added += 1
+                    current = {}
+                else:
+                    skipped += 1
+                account = self._normalize_account({**current, **payload})
+                if account is not None:
+                    next_accounts[access_token] = account
+
+            self.storage.save_accounts(list(next_accounts.values()))
+            self._accounts = next_accounts
+            for token, count in list(self._image_inflight.items()):
+                if token not in self._accounts:
+                    self._image_inflight.pop(token, None)
+            if self._accounts:
+                self._index %= len(self._accounts)
+            else:
+                self._index = 0
+            log_service.add(LOG_TYPE_ACCOUNT, f"替换远程来源账号，新增 {added} 个，跳过 {skipped} 个，删除 {removed} 个", {"added": added, "skipped": skipped, "removed": removed})
+            items = [dict(item) for item in self._accounts.values()]
+        return {"added": added, "skipped": skipped, "removed": removed, "items": items}
+
     def delete_accounts(self, tokens: list[str]) -> dict:
         target_set = set(token for token in tokens if token)
         if not target_set:

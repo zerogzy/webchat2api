@@ -79,6 +79,19 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
     return [sanitized for server in servers if (sanitized := sanitize_sub2api_server(server)) is not None]
 
 
+def sanitize_remote_account_source(source: dict | None) -> dict | None:
+    if not isinstance(source, dict):
+        return None
+    sanitized = {key: value for key, value in source.items() if key not in {"auth_token", "bearer_token"}}
+    sanitized["has_auth_token"] = bool(str(source.get("auth_token") or "").strip())
+    sanitized["has_bearer_token"] = bool(str(source.get("bearer_token") or "").strip())
+    return sanitized
+
+
+def sanitize_remote_account_sources(sources: list[dict]) -> list[dict]:
+    return [sanitized for source in sources if (sanitized := sanitize_remote_account_source(source)) is not None]
+
+
 def start_limited_account_watcher(stop_event: Event) -> Thread:
     interval_seconds = config.refresh_account_interval_minute * 60
 
