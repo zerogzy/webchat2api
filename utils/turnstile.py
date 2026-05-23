@@ -2,7 +2,7 @@ import base64
 import json
 import random
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from utils.log import logger
 
@@ -89,7 +89,7 @@ def _safe_sorted_keys(keys: set[Any]) -> list[Any]:
 
 def _final_state_diagnostics(
     process_map: Dict[Any, Any],
-    written_keys: set[Any],
+    written_keys: Iterable[Any],
     callable_invocations: list[Dict[str, Any]],
 ) -> Dict[str, Any]:
     candidate_keys = _candidate_output_keys(process_map, written_keys)
@@ -108,7 +108,7 @@ def _final_state_diagnostics(
     }
 
 
-def _candidate_output_keys(process_map: Dict[Any, Any], written_keys: set[Any]) -> set[Any]:
+def _candidate_output_keys(process_map: Dict[Any, Any], written_keys: Iterable[Any]) -> set[Any]:
     return {
         key
         for key in written_keys
@@ -148,25 +148,29 @@ def _fallback_result_candidate(
     token_list: list[Any],
     process_map: Dict[Any, Any],
     result_setter_invoked: bool,
-    written_keys: set[Any],
+    written_keys: list[Any],
 ) -> Optional[str]:
     if result_setter_invoked or _result_setter_instruction_count(token_list, process_map) != 0:
         return None
 
     candidate_keys = _candidate_output_keys(process_map, written_keys)
     fallback_keys = _long_string_keys(process_map, candidate_keys) & _base64ish_string_keys(process_map, candidate_keys)
-    if len(fallback_keys) != 1:
+    p_value = process_map.get(16)
+    fallback_keys = {key for key in fallback_keys if process_map[key] != p_value}
+    if not fallback_keys:
         return None
 
-    fallback_key = next(iter(fallback_keys))
-    return process_map[fallback_key]
+    for fallback_key in reversed(written_keys):
+        if fallback_key in fallback_keys:
+            return process_map[fallback_key]
+    return None
 
 
 def _empty_result_diagnostics(
     token_list: list[Any],
     process_map: Dict[Any, Any],
     result_setter_invoked: bool,
-    written_keys: set[Any],
+    written_keys: Iterable[Any],
     callable_invocations: list[Dict[str, Any]],
 ) -> Dict[str, Any]:
     result_setter_instruction_count = _result_setter_instruction_count(token_list, process_map)
@@ -205,11 +209,13 @@ def solve_turnstile_token(dx: str, p: str) -> Optional[str]:
     start_time = time.time()
     result = ""
     result_setter_invoked = False
-    written_keys: set[Any] = set()
+    written_keys: list[Any] = []
     callable_invocations: list[Dict[str, Any]] = []
 
     def record_write(key: Any) -> None:
-        written_keys.add(key)
+        if key in written_keys:
+            written_keys.remove(key)
+        written_keys.append(key)
 
     def record_callable_invocation(handler: str, target_key: Any, target: Any, args: tuple[Any, ...], raw_args: bool) -> None:
         callable_invocations.append({

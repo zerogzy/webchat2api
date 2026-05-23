@@ -211,7 +211,7 @@ class TurnstileSolverTests(unittest.TestCase):
         self.assertEqual(token, candidate)
         warning.assert_not_called()
 
-    def test_multiple_written_long_base64ish_candidates_refuse_and_log_safely(self) -> None:
+    def test_multiple_written_long_base64ish_candidates_returns_latest_written(self) -> None:
         first_candidate = base64.b64encode(b"secret-generated-token-one").decode()
         second_candidate = base64.b64encode(b"secret-generated-token-two").decode()
         dx = _build_dx([
@@ -222,24 +222,40 @@ class TurnstileSolverTests(unittest.TestCase):
         with mock.patch("utils.turnstile.logger.warning") as warning:
             token = solve_turnstile_token(dx, "secret-p")
 
-        self.assertIsNone(token)
-        warning.assert_called_once()
-        payload = warning.call_args.args[0]
-        self.assertEqual(payload["event"], "turnstile_solve_failed")
-        self.assertEqual(payload["reason"], "empty_result")
-        self.assertEqual(payload["candidate_output_register_count"], 2)
-        self.assertEqual(payload["candidate_output_register_keys"], [30, 40])
-        self.assertEqual(payload["long_string_register_keys"], [30, 40])
-        self.assertEqual(payload["base64ish_string_register_keys"], [30, 40])
-        self.assertNotIn("dx", payload)
-        self.assertNotIn("p", payload)
-        self.assertNotIn("token", payload)
-        self.assertNotIn("secret-p", repr(payload))
-        self.assertNotIn(first_candidate, repr(payload))
-        self.assertNotIn(second_candidate, repr(payload))
-        self.assertNotIn("secret-generated-token-one", repr(payload))
-        self.assertNotIn("secret-generated-token-two", repr(payload))
-        self.assertNotIn(dx, repr(payload))
+        self.assertEqual(token, second_candidate)
+        warning.assert_not_called()
+
+    def test_fallback_selects_rewritten_register_as_latest_candidate(self) -> None:
+        first_candidate = base64.b64encode(b"secret-generated-token-one").decode()
+        second_candidate = base64.b64encode(b"secret-generated-token-two").decode()
+        rewritten_candidate = base64.b64encode(b"secret-generated-token-three").decode()
+        dx = _build_dx([
+            [2, 30, first_candidate],
+            [2, 40, second_candidate],
+            [2, 30, rewritten_candidate],
+        ], "secret-p")
+
+        with mock.patch("utils.turnstile.logger.warning") as warning:
+            token = solve_turnstile_token(dx, "secret-p")
+
+        self.assertEqual(token, rewritten_candidate)
+        warning.assert_not_called()
+
+    def test_fallback_selects_latest_written_and_excludes_p(self) -> None:
+        p_candidate = base64.b64encode(b"secret-p-derived-candidate").decode()
+        first_candidate = base64.b64encode(b"secret-generated-token-one").decode()
+        second_candidate = base64.b64encode(b"secret-generated-token-two").decode()
+        dx = _build_dx([
+            [8, 16.74, 16],
+            [2, 28.21, first_candidate],
+            [2, 30.33, second_candidate],
+        ], p_candidate)
+
+        with mock.patch("utils.turnstile.logger.warning") as warning:
+            token = solve_turnstile_token(dx, p_candidate)
+
+        self.assertEqual(token, second_candidate)
+        warning.assert_not_called()
 
     def test_fallback_ignores_unwritten_base64ish_registers(self) -> None:
         candidate = base64.b64encode(b"secret-generated-token").decode()

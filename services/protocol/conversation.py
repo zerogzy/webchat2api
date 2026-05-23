@@ -12,7 +12,7 @@ import tiktoken
 from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
-from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
+from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI, RetryableTurnstileError
 from utils.helper import IMAGE_MODELS, extract_image_from_message_content
 from utils.log import logger
 
@@ -523,6 +523,10 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             return
         except Exception as exc:
             error_message = str(exc)
+            if token and not emitted and isinstance(exc, RetryableTurnstileError):
+                token = account_service.get_text_access_token(attempted_tokens)
+                if token:
+                    continue
             if token and not emitted and is_token_invalid_error(error_message):
                 account_service.remove_invalid_token(token, "text_stream")
                 token = account_service.get_text_access_token(attempted_tokens)

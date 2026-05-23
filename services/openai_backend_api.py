@@ -26,6 +26,10 @@ class InvalidAccessTokenError(RuntimeError):
     pass
 
 
+class RetryableTurnstileError(RuntimeError):
+    pass
+
+
 class ImagePollTimeoutError(RuntimeError):
     pass
 
@@ -322,7 +326,7 @@ class OpenAIBackendAPI:
                 turnstile_token = solve_turnstile_token(turnstile_info.get("dx", ""), source_p)
                 if turnstile_token is None:
                     logger.warning({"event": "turnstile_solve_failed"})
-                    raise RuntimeError("turnstile token generation returned None")
+                    raise RetryableTurnstileError("turnstile token generation returned None")
             else:
                 raise RuntimeError("chat requirements requires turnstile token, which is not implemented")
 
