@@ -6,7 +6,7 @@ from typing import Any, Iterable, Iterator
 
 from fastapi import HTTPException
 
-from services.models import GROK_PROVIDER, resolve_model
+from services.models import GROK_PROVIDER, resolve_model, is_grok_app_chat_model
 from services.providers import grok
 from services.protocol.conversation import (
     ConversationRequest,
@@ -39,9 +39,14 @@ def completion_response(
     content: str,
     created: int | None = None,
     messages: list[dict[str, Any]] | None = None,
+    reasoning_content: str = "",
 ) -> dict[str, Any]:
     prompt_tokens = count_message_tokens(messages, model) if messages else 0
     completion_tokens = count_text_tokens(content, model) if messages else 0
+    reasoning_tokens = count_text_tokens(reasoning_content, model) if messages and reasoning_content else 0
+    message: dict[str, Any] = {"role": "assistant", "content": content}
+    if reasoning_content:
+        message["reasoning_content"] = reasoning_content
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
@@ -49,13 +54,13 @@ def completion_response(
         "model": model,
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": content},
+            "message": message,
             "finish_reason": "stop",
         }],
         "usage": {
             "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
+            "completion_tokens": completion_tokens + reasoning_tokens,
+            "total_tokens": prompt_tokens + completion_tokens + reasoning_tokens,
         },
     }
 
@@ -76,11 +81,46 @@ def stream_text_chat_completion(backend, messages: list[dict[str, Any]], model: 
     yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
-def stream_grok_chat_completion(body: dict[str, Any], spec, messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
+def stream_grok_app_chat_completion(body: dict[str, Any], spec, messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    content = grok.chat_completion(body, spec, messages)
-    yield completion_chunk(model, {"role": "assistant", "content": content}, None, completion_id, created)
+    sent_role = False
+    for event in grok.app_chat_completion_events(body, spec, messages):
+        token, thinking = grok.extract_app_chat_token(event)
+        if not token:
+            if grok.is_app_chat_final_event(event):
+                break
+            continue
+        if not sent_role:
+            sent_role = True
+            delta: dict[str, Any] = {"role": "assistant"}
+            if thinking:
+                delta["reasoning_content"] = token
+            else:
+                delta["content"] = token
+            yield completion_chunk(model, delta, None, completion_id, created)
+            continue
+        if thinking:
+            yield completion_chunk(model, {"reasoning_content": token}, None, completion_id, created)
+        else:
+            yield completion_chunk(model, {"content": token}, None, completion_id, created)
+    if not sent_role:
+        yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
+    yield completion_chunk(model, {}, "stop", completion_id, created)
+
+
+def stream_grok_chat_completion(body: dict[str, Any], spec, messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
+    if is_grok_app_chat_model(spec):
+        yield from stream_grok_app_chat_completion(body, spec, messages, model)
+        return
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    response = grok.console_chat_completion(body, spec, messages)
+    if response.reasoning_content:
+        yield completion_chunk(model, {"role": "assistant", "reasoning_content": response.reasoning_content}, None, completion_id, created)
+        yield completion_chunk(model, {"content": response.content}, None, completion_id, created)
+    else:
+        yield completion_chunk(model, {"role": "assistant", "content": response.content}, None, completion_id, created)
     yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
@@ -133,6 +173,13 @@ def image_result_content(result: dict[str, Any]) -> str:
 
 def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
     model, prompt, n, images = chat_image_args(body)
+    spec = resolve_model(model)
+    if spec.provider == GROK_PROVIDER:
+        if images:
+            from services.protocol.conversation import ImageGenerationError
+            raise ImageGenerationError("Grok image chat does not support image input", status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model")
+        result = collect_image_outputs(grok.app_chat_image_outputs(body, spec, prompt, n))
+        return completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
     result = collect_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
@@ -145,6 +192,13 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
 
 def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     model, prompt, n, images = chat_image_args(body)
+    spec = resolve_model(model)
+    if spec.provider == GROK_PROVIDER:
+        if images:
+            from services.protocol.conversation import ImageGenerationError
+            raise ImageGenerationError("Grok image chat does not support image input", status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model")
+        yield from stream_image_chat_completion(grok.app_chat_image_outputs(body, spec, prompt, n), model)
+        return
     image_outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
@@ -195,6 +249,20 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     model, messages = text_chat_parts(body)
     spec = resolve_model(model)
     if spec.provider == GROK_PROVIDER:
-        return completion_response(model, grok.chat_completion(body, spec, messages), messages=messages)
+        if is_grok_app_chat_model(spec):
+            response = grok.app_chat_completion(body, spec, messages)
+            return completion_response(
+                model,
+                response.get("content", ""),
+                messages=messages,
+                reasoning_content=response.get("reasoning_content", ""),
+            )
+        response = grok.console_chat_completion(body, spec, messages)
+        return completion_response(
+            model,
+            response.content,
+            messages=messages,
+            reasoning_content=response.reasoning_content,
+        )
     request = ConversationRequest(model=model, messages=messages)
     return completion_response(model, collect_text(text_backend(), request), messages=messages)
