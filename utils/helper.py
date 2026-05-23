@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import hashlib
 import json
@@ -9,9 +11,10 @@ from typing import Any, Iterator
 
 from curl_cffi import requests
 from fastapi import HTTPException
+from services.models import IMAGE_MODEL_IDS
 from utils.log import logger
 
-IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
+IMAGE_MODELS = IMAGE_MODEL_IDS
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 SUPPORTED_JSON_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
