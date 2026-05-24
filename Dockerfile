@@ -21,25 +21,43 @@ ARG TARGETARCH
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    CHROMIUM_PATH=/usr/bin/chromium \
+    BRIDGE_PORT=3080
 
 WORKDIR /app
 
-# 安装系统依赖
-# - git: Git 存储后端需要
-# - libpq-dev: PostgreSQL 客户端库
-# - gcc: 编译 psycopg2-binary 需要
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     libpq-dev \
     gcc \
     openssl \
+    curl \
+    chromium \
+    fonts-liberation \
+    libnss3 \
+    libxss1 \
+    libasound2 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
+
+COPY services/browser_bridge/package.json services/browser_bridge/package-lock.json /app/services/browser_bridge/
+RUN cd /app/services/browser_bridge && npm ci --omit=dev && cd /app
 
 COPY main.py ./
 COPY config.example.json ./config.json
@@ -50,6 +68,8 @@ COPY utils ./utils
 COPY scripts ./scripts
 COPY --from=web-build /app/web/out ./web_dist
 
+RUN chmod +x /app/scripts/entrypoint.sh
+
 EXPOSE 83
 
-CMD ["uv", "run", "python", "main.py"]
+CMD ["/app/scripts/entrypoint.sh"]

@@ -57,7 +57,7 @@ if "PIL" not in sys.modules:
 
 from services.network.client import build_session_kwargs
 from services.network.headers import build_chatgpt_web_headers, build_grok_console_headers
-from services.network.profiles import build_chatgpt_web_profile, build_grok_console_profile
+from services.network.profiles import build_chatgpt_web_profile, build_grok_app_chat_profile, build_grok_console_profile
 
 
 class NetworkProfileTests(unittest.TestCase):
@@ -195,6 +195,72 @@ class NetworkProfileTests(unittest.TestCase):
         })
 
         self.assertEqual(profile.cf_clearance, "profile-clearance")
+
+    def test_grok_app_chat_profile_prefers_app_profile_with_console_fallback(self) -> None:
+        profile = build_grok_app_chat_profile({
+            "network_profiles": {
+                "grok_console": {
+                    "impersonate": "console-browser",
+                    "user-agent": "Console UA",
+                    "verify": False,
+                    "timeout": 12,
+                    "cf_clearance": "console-clearance",
+                },
+                "grok_app_chat": {
+                    "browser": "app-browser",
+                    "user-agent": "App UA",
+                    "cf_cookies": "cf_bm=profile-bm",
+                    "cf_clearance": "app-clearance",
+                    "sec-ch-ua": "app sec ua",
+                    "sec-ch-ua-mobile": "?1",
+                    "sec-ch-ua-platform": '"Linux"',
+                    "statsig_id": "statsig-profile",
+                },
+            },
+        })
+
+        self.assertEqual(profile.impersonate, "app-browser")
+        self.assertEqual(profile.user_agent, "App UA")
+        self.assertFalse(profile.verify)
+        self.assertEqual(profile.timeout, 12)
+        self.assertEqual(profile.cf_cookies, "cf_bm=profile-bm")
+        self.assertEqual(profile.cf_clearance, "app-clearance")
+        self.assertEqual(profile.sec_ch_ua, "app sec ua")
+        self.assertEqual(profile.sec_ch_ua_mobile, "?1")
+        self.assertEqual(profile.sec_ch_ua_platform, '"Linux"')
+        self.assertEqual(profile.statsig_id, "statsig-profile")
+
+    def test_grok_app_chat_profile_derives_client_hints_from_user_agent(self) -> None:
+        profile = build_grok_app_chat_profile({
+            "network_profiles": {
+                "grok_app_chat": {
+                    "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+                    "cf_cookies": "cf_bm=profile-bm",
+                },
+            },
+        })
+
+        self.assertEqual(profile.impersonate, "chrome141")
+        self.assertEqual(profile.sec_ch_ua, '"Chromium";v="141", "Google Chrome";v="141", "Not.A/Brand";v="99"')
+        self.assertEqual(profile.sec_ch_ua_mobile, "?0")
+        self.assertEqual(profile.sec_ch_ua_platform, '"Linux"')
+
+    def test_grok_app_chat_profile_keeps_explicit_client_hints(self) -> None:
+        profile = build_grok_app_chat_profile({
+            "network_profiles": {
+                "grok_app_chat": {
+                    "browser": "chrome141",
+                    "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+                    "sec-ch-ua": "explicit sec ua",
+                    "sec-ch-ua-mobile": "?1",
+                    "sec-ch-ua-platform": '"ExplicitOS"',
+                },
+            },
+        })
+
+        self.assertEqual(profile.sec_ch_ua, "explicit sec ua")
+        self.assertEqual(profile.sec_ch_ua_mobile, "?1")
+        self.assertEqual(profile.sec_ch_ua_platform, '"ExplicitOS"')
 
     def test_grok_console_headers_include_sso_and_cf_clearance_cookies(self) -> None:
         profile = build_grok_console_profile({

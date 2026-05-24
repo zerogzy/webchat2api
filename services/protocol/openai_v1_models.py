@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.models import GPT_PROVIDER, gpt_fallback_model_metadata, grok_model_metadata
-
-IMAGE_MODEL_IDS = {"gpt-image-2", "codex-gpt-image-2"}
+from services.models import GPT_PROVIDER, GPT_IMAGE_MODEL_IDS, gpt_fallback_model_metadata, grok_model_metadata
 
 
 def _append_model(data: list[dict[str, Any]], seen: set[str], item: dict[str, Any]) -> None:
@@ -73,7 +71,7 @@ def list_models() -> dict[str, Any]:
             _append_model(normalized_data, seen, _with_provider(item, GPT_PROVIDER))
     for item in gpt_fallback_model_metadata():
         _append_model(normalized_data, seen, item)
-    for model in sorted(IMAGE_MODEL_IDS):
+    for model in sorted(GPT_IMAGE_MODEL_IDS):
         _append_model(normalized_data, seen, {
             "id": model,
             "object": "model",

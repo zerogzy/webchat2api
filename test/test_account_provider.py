@@ -71,7 +71,7 @@ if "fastapi.responses" not in sys.modules:
 
 from services.account_service import AccountService
 import services.account_service as account_service_module
-from services.models import GROK_PROVIDER, GPT_PROVIDER
+from services.models import GROK_PROVIDER, GPT_PROVIDER, resolve_model
 
 account_service_module.log_service.add = lambda *args, **kwargs: None
 
@@ -117,6 +117,109 @@ class AccountProviderTests(unittest.TestCase):
 
         self.assertEqual(service.get_text_access_token(provider=GPT_PROVIDER), "gpt-token")
         self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
+
+    def test_grok_account_normalizes_simple_sso_cookie_token(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": " sso=grok-token ", "provider": "grok"},
+        ])
+
+        [account] = service.list_accounts()
+        self.assertEqual(account["access_token"], "grok-token")
+        self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
+
+    def test_grok_account_normalizes_case_insensitive_spaced_sso_token(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": " SSO  =  grok-token ", "provider": "grok"},
+        ])
+
+        [account] = service.list_accounts()
+        self.assertEqual(account["access_token"], "grok-token")
+        self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
+
+    def test_grok_account_preserves_spaced_sso_cookie_header_token(self) -> None:
+        cookie_token = " SSO  =  grok-token ; other=value "
+        service = AccountService(MemoryStorage([{"access_token": cookie_token, "provider": "grok"}]))
+
+        [account] = service.list_accounts()
+        self.assertEqual(account["access_token"], "SSO  =  grok-token ; other=value")
+
+    def test_grok_account_preserves_full_cookie_header_token(self) -> None:
+        cookie_token = " sso=grok-token ; other=value "
+        service = AccountService(MemoryStorage([{"access_token": cookie_token, "provider": "grok"}]))
+
+        [account] = service.list_accounts()
+        self.assertEqual(account["access_token"], "sso=grok-token ; other=value")
+
+    def test_grok_account_cloudflare_fields_are_optional_metadata(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "grok-token", "provider": "grok"},
+        ])
+
+        [account] = service.list_accounts()
+        self.assertEqual(account["access_token"], "grok-token")
+        self.assertEqual(account["cf_cookies"], "")
+        self.assertIsNone(account["user_agent"])
+        self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
+
+    def test_selects_grok_app_chat_token_by_tier_semantics(self) -> None:
+        basic_service = AccountService(MemoryStorage())
+        basic_service.add_account_items([
+            {"access_token": "basic-token", "provider": "grok", "tier": "free"},
+            {"access_token": "super-token", "provider": "grok", "tier": "premium"},
+            {"access_token": "heavy-token", "provider": "grok", "tier": "heavy"},
+        ])
+        super_service = AccountService(MemoryStorage())
+        super_service.add_account_items([
+            {"access_token": "basic-token", "provider": "grok", "tier": "free"},
+            {"access_token": "super-token", "provider": "grok", "tier": "premium"},
+            {"access_token": "heavy-token", "provider": "grok", "tier": "heavy"},
+        ])
+        heavy_service = AccountService(MemoryStorage())
+        heavy_service.add_account_items([
+            {"access_token": "basic-token", "provider": "grok", "tier": "free"},
+            {"access_token": "super-token", "provider": "grok", "tier": "premium"},
+            {"access_token": "heavy-token", "provider": "grok", "tier": "heavy"},
+        ])
+
+        self.assertEqual(basic_service.get_grok_app_chat_access_token(resolve_model("grok-4.20-0309-non-reasoning")), "basic-token")
+        self.assertEqual(super_service.get_grok_app_chat_access_token(resolve_model("grok-4.20-0309")), "super-token")
+        self.assertEqual(heavy_service.get_grok_app_chat_access_token(resolve_model("grok-4.20-0309-heavy")), "heavy-token")
+
+    def test_prefer_best_grok_app_chat_selection_tries_heavy_super_basic(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "basic-token", "provider": "grok", "tier": "basic", "cf_cookies": "cf_bm=value", "user_agent": "Test UA"},
+            {"access_token": "super-token", "provider": "grok", "tier": "super"},
+        ])
+
+        [account] = [item for item in service.list_accounts() if item["access_token"] == "basic-token"]
+        self.assertEqual(account["cf_cookies"], "cf_bm=value")
+        self.assertEqual(account["user_agent"], "Test UA")
+        self.assertEqual(service.get_grok_app_chat_access_token(resolve_model("grok-4.20-fast")), "super-token")
+
+    def test_grok_app_chat_selection_uses_capabilities_and_status(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "disabled-heavy", "provider": "grok", "tier": "heavy", "status": "禁用"},
+            {"access_token": "image-heavy", "provider": "grok", "tier": "heavy", "capabilities": ["image"]},
+            {"access_token": "chat-heavy", "provider": "grok", "tier": "heavy", "capabilities": "chat,heavy"},
+        ])
+
+        self.assertEqual(service.get_grok_app_chat_access_token(resolve_model("grok-4.20-heavy")), "chat-heavy")
+
+    def test_grok_app_chat_selection_falls_back_to_provider_round_robin(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "gpt-token", "provider": "gpt"},
+            {"access_token": "unknown-tier", "provider": "grok", "tier": "enterprise"},
+            {"access_token": "plain-grok", "provider": "grok"},
+        ])
+
+        self.assertEqual(service.get_grok_app_chat_access_token(resolve_model("grok-4.20-0309-heavy")), "unknown-tier")
+        self.assertEqual(service.get_grok_app_chat_access_token(resolve_model("grok-4.20-0309-heavy")), "plain-grok")
 
     def test_image_and_refresh_candidates_ignore_grok_accounts(self) -> None:
         service = AccountService(MemoryStorage())

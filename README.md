@@ -16,14 +16,17 @@
 
 - OpenAI 风格 API：将 GPT/ChatGPT Web 与 Grok/xAI Web 能力包装为 `/v1/models`、`/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`、`/v1/responses`、`/v1/messages` 等接口
 - GPT/Grok 文本模型：`/v1/models` 优先通过 `provider=gpt` 账号动态拉取 GPT 模型，并合并静态 Grok 模型；`/v1/chat/completions` 按 `model` 自动分发到 GPT 或 Grok 服务商账号
+- Grok app-chat：支持通过 grok.com app-chat 路径访问带 `mode_id` 的 Grok 模型，并可走 Browser Bridge 用真实 Chromium 代理请求
+- Grok 图片生成：`grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro` 通过 app-chat 图片能力生成图片；`grok-imagine-image-edit` 和 `grok-imagine-video` 已列出但暂未实现
+- tier 感知账号选择：Grok app-chat 会按模型所需 `basic`、`super`、`heavy` tier 和账号 `capabilities` 优先选择匹配账号，未匹配时再回退到普通 Grok 轮换
 - Web 管理后台：账号池、用户 API Key、代理、日志、图片任务、图片文件和系统配置管理
 - 远程账号注入：管理员可配置远程账号来源、手动同步来源，或通过 `/api/remote-account/inject` 注入账号；响应会隐藏来源鉴权 Token 和账号凭据
 - 账号服务商：账号 `provider` 选择 `gpt` 或 `grok`，账号 `type` 仍表示套餐或订阅类型
 - 试验页：文生文聊天、文本模型批量可用性测试、文生图/图生图切换、图片队列和图片历史
 - 文生文聊天历史：保存在浏览器本地，刷新页面后仍保留
 - 图片账号轮换：图片生成/编辑遇到失效账号时，会跳过该账号并尝试下一个可用账号
-- 网络配置：ChatGPT Web 与 Grok Console 请求已拆分为可配置网络 profile，支持独立的指纹、TLS impersonate、超时和代理组合
-- Grok Cloudflare Cookie：`network_profiles.grok_console.cf_clearance` 可补充 `cf_clearance` Cookie，用于需要 Cloudflare clearance 的 Grok Console 请求
+- 网络配置：ChatGPT Web、Grok Console 与 Grok app-chat 请求使用可配置网络 profile，支持独立的指纹、TLS impersonate、超时、代理和 Cloudflare Cookie
+- Grok 防护处理：支持手动 `cf_clearance`、FlareSolverr clearance 刷新，以及可选 Browser Bridge 浏览器路径；这些都是尽力而为，不保证绕过所有 Cloudflare/WAF 挑战
 - GPT Turnstile：默认启用 `enable_turnstile_solver`，会在 ChatGPT 返回 Turnstile 要求时尝试生成 Sentinel Turnstile Token；该能力依赖上游挑战和求解结果，真实 GPT Turnstile 仍可能失败
 - 账号导出：仅导出 TXT，并按 GPT/Grok 服务商分别下载为 `webchat2api-gpt.txt` / `webchat2api_grok.txt`；文件内容每行一个 `access_token` 或 `sso` 凭据
 - 部署方式：Docker CLI、Docker Compose
@@ -88,7 +91,7 @@ docker run -d \
 - API Base URL：`http://localhost:83/v1`
 - 默认登录密钥：`admin`
 
-当前 dev 分支已完成容器部署验证：本地镜像重建后容器 `dev-webchat2api` 运行在 `8083 -> 83`，`data/` 目录通过 bind mount 持久化账号数据，`/health` 和 OpenAI 风格 API 检查通过，管理员鉴权、远程账号 merge、远程来源同步和来源范围 replace 已验证，响应未泄漏 Token。
+Docker 镜像内置 Chromium、Node.js、npm 和 Grok Browser Bridge。容器启动时，`scripts/entrypoint.sh` 会先在 `BRIDGE_PORT` 上启动 `services/browser_bridge/server.js`，默认端口为 `3080`，并短暂探测 `/health`；即使 Bridge 未就绪，也会继续启动 FastAPI。
 
 生产环境请立即修改默认密钥：
 
@@ -141,6 +144,17 @@ npm install
 npm run dev
 ```
 
+## Grok Browser Bridge、防护与账号 tier
+
+Grok Console 与 grok.com app-chat 是不同上游路径。本项目没有接入官方 xAI API，也不声称提供官方兼容能力。Console 路径可使用 `network_profiles.grok_console.cf_clearance` 附加手动 Cookie；app-chat 路径可使用 `network_profiles.grok_app_chat` 覆盖 UA、impersonate、`cf_clearance`、`cf_cookies`、`sec-ch-ua`、`x-statsig-id` 等字段。
+
+如配置 `flaresolverr_url`，直接 app-chat 请求遇到 Cloudflare 或 403 时会尝试通过 FlareSolverr 刷新 clearance 并重试。Browser Bridge 是独立浏览器路径，后端会优先使用 `browser_bridge_url`，未配置时会探测 `http://127.0.0.1:3080/health`。Browser Bridge 的接口是 `POST /api/chat {sso,payload}` 和 `GET /health`，请求会经真实 Chromium 页面发往 grok.com。
+
+> [!WARNING]
+> Cloudflare、WAF、账号风控和上游配额都可能变化。手动 clearance、FlareSolverr 和 Browser Bridge 都是尽力而为，不能保证长期可用。
+
+Grok app-chat 模型会按所需账号层级选号：`basic` 可跑 lite 和 fast，`super` 可跑 auto、expert、图片标准和 pro，`heavy` 优先用于 heavy 模型。账号可额外设置 `capabilities` 缩小可用范围。`grok-imagine-image` 和 `grok-imagine-image-pro` 如果账号没有对应 tier、图片权限或剩余额度，可能返回 `403` 或 `429`，这通常是上游账号限制，不一定是 Cloudflare 或 WAF 问题。
+
 ## API 示例
 
 所有 AI 接口均使用 Bearer Token 鉴权：
@@ -168,7 +182,7 @@ curl http://localhost:83/v1/models \
   -H "Authorization: Bearer admin"
 ```
 
-`/v1/models` 会优先使用已导入的 `provider=gpt` 账号动态拉取 GPT 模型；如果没有可用 GPT 账号或拉取失败，会回退到匿名/内置 GPT 模型。Grok 当前使用内置模型列表，因为现有 Grok token/cookie 无法访问 `console.x.ai` 或 `api.x.ai` 的模型列表端点。Grok 示例模型包括 `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent`。
+`/v1/models` 会优先使用已导入的 `provider=gpt` 账号动态拉取 GPT 模型；如果没有可用 GPT 账号或拉取失败，会回退到匿名/内置 GPT 模型。Grok 当前使用内置模型列表，因为现有 Grok token/cookie 无法访问 `console.x.ai` 或 `api.x.ai` 的模型列表端点。Grok 示例模型包括 `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent`、`grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`。
 
 聊天接口：
 
@@ -198,7 +212,7 @@ curl http://localhost:83/v1/chat/completions \
   }'
 ```
 
-图片生成接口：
+GPT 图片生成接口：
 
 ```bash
 curl http://localhost:83/v1/images/generations \
@@ -212,7 +226,21 @@ curl http://localhost:83/v1/images/generations \
   }'
 ```
 
-ChatGPT 图片生成/编辑仍只使用 GPT 服务商账号，不声明 Grok 图片能力。
+Grok 图片生成接口，经 grok.com app-chat 路径。`grok-imagine-image-lite` 通常需要 basic 及以上账号，`grok-imagine-image` 和 `grok-imagine-image-pro` 通常需要 super 及以上账号，并受上游图片配额限制：
+
+```bash
+curl http://localhost:83/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer admin" \
+  -d '{
+    "model": "grok-imagine-image-lite",
+    "prompt": "一只漂浮在太空里的猫",
+    "n": 1,
+    "response_format": "b64_json"
+  }'
+```
+
+当前 Grok app-chat 图片生成支持 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`。`grok-imagine-image-edit` 和 `grok-imagine-video` 暂未支持，请不要把它们当成可用的图生图或视频接口。ChatGPT 图片生成/编辑仍使用 GPT 服务商账号。
 
 账号导入说明：
 
@@ -261,11 +289,16 @@ cp config.example.json config.json
 | `WEBCHAT2API_AUTH_KEY` | 空 | 兼容旧配置的登录密钥覆盖项 |
 | `WEBCHAT2API_BASE_URL` | 空 | 生成图片访问 URL 时使用的外部基础地址 |
 | `PROXY_URL` | 空 | 上游请求使用的 HTTP/HTTPS/SOCKS 代理 |
-| `network_profiles` | 见 `config.example.json` | ChatGPT Web 和 Grok Console 网络 profile，当前包含 `grok_console` |
+| `network_profiles` | 见 `config.example.json` | ChatGPT Web、Grok Console 和 Grok app-chat 网络 profile |
 | `network_profiles.grok_console.cf_clearance` | 空 | Grok Console 请求附加的 Cloudflare `cf_clearance` Cookie |
+| `network_profiles.grok_app_chat` | 空 | Grok app-chat 请求 profile，可配置 `user-agent`、`impersonate`、`timeout`、`cf_clearance`、`cf_cookies`、`sec-ch-ua`、`x-statsig-id` 等字段 |
 | `chatgpt_fingerprint` | 见 `config.example.json` | ChatGPT Web 请求指纹，可配置 UA、impersonate 和 `sec-ch-ua` 等字段 |
 | `grok_console_fingerprint` | 空 | 旧版 Grok Console 指纹配置，仍兼容；同名字段会被 `network_profiles.grok_console` 覆盖 |
 | `enable_turnstile_solver` | `true` | ChatGPT Turnstile 要求出现时尝试求解，不保证所有真实挑战都能通过 |
+| `flaresolverr_url` | 空 | FlareSolverr 服务地址，配置后可为 Grok app-chat 尝试刷新 Cloudflare clearance |
+| `flaresolverr_timeout_sec` | `60` | FlareSolverr 单次求解超时时间，单位秒 |
+| `browser_bridge_url` | 空 | Grok Browser Bridge 地址；留空时后端会探测 `http://127.0.0.1:3080` |
+| `BRIDGE_PORT` | `3080` | Docker 入口脚本启动 Browser Bridge 使用的端口 |
 | `STORAGE_BACKEND` | `json` | 存储后端：`json`、`sqlite`、`postgres`、`git` |
 | `DATABASE_URL` | 空 | SQLite/PostgreSQL 连接字符串 |
 | `GIT_REPO_URL` | 空 | Git 存储后端仓库地址 |

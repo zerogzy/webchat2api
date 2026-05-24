@@ -1,0 +1,9 @@
+{
+  "name": "grok-browser-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser bridge for grok.com app-chat API (bypasses CF Bot Management)",
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}
