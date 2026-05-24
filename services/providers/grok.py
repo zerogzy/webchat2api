@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -13,8 +14,9 @@ from fastapi import HTTPException
 from services.config import config
 from services.models import GROK_PROVIDER, ModelSpec, is_supported_grok_app_chat_image_model
 from services.network.client import create_session
+from services.network.flaresolverr import FlareSolverrClearanceProvider
 from services.network.headers import build_grok_console_headers
-from services.network.profiles import build_grok_console_profile
+from services.network.profiles import build_grok_app_chat_profile, build_grok_console_profile, infer_chromium_impersonate
 from services.protocol.conversation import ImageGenerationError, ImageOutput, format_image_result
 from utils.log import logger
 
@@ -24,6 +26,11 @@ APP_CHAT_BASE_URL = "https://grok.com"
 APP_CHAT_NEW_CONVERSATION_URL = f"{APP_CHAT_BASE_URL}/rest/app-chat/conversations/new"
 GROK_ASSET_BASE_URL = "https://assets.grok.com/"
 GROK_APP_CHAT_STATSIG_ID = "0196a8f6-0501-79f8-8d74-a2f2c0f5f5f5"
+_APP_CHAT_CLEARANCE_LOCK = threading.Lock()
+
+_BRIDGE_DEFAULT_URL = "http://127.0.0.1:3080"
+_bridge_detected_url: str | None = None
+_bridge_probed = False
 
 
 class GrokConsoleError(RuntimeError):
@@ -206,6 +213,31 @@ def _grok_console_profile():
     return build_grok_console_profile(config.data)
 
 
+def _account_text(account: dict[str, Any] | None, *keys: str) -> str:
+    if not isinstance(account, dict):
+        return ""
+    for key in keys:
+        value = account.get(key)
+        if isinstance(value, dict):
+            continue
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _app_chat_profile_value(profile: object, account: dict[str, Any] | None, field: str, *account_keys: str) -> str:
+    return _account_text(account, *account_keys) or str(getattr(profile, field, "") or "")
+
+
+def _app_chat_impersonate(profile: object, account: dict[str, Any] | None) -> str:
+    return _account_text(account, "impersonate", "browser") or str(getattr(profile, "impersonate", "") or "")
+
+
+def _grok_app_chat_profile():
+    return build_grok_app_chat_profile(config.data)
+
+
 def _headers(access_token: str) -> dict[str, str]:
     return build_grok_console_headers(_grok_console_profile(), access_token=access_token, base_url=CONSOLE_BASE_URL)
 
@@ -292,42 +324,110 @@ class GrokConsoleClient:
         return data
 
 
-def _app_chat_cookie(access_token: str, cf_clearance: str = "") -> str:
+def _cookie_items(cookie_header: str) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
+    for fragment in str(cookie_header or "").split(";"):
+        name, separator, value = fragment.strip().partition("=")
+        clean_name = " ".join(name.strip().split())
+        clean_value = " ".join(value.strip().split())
+        if separator and clean_name:
+            items.append((clean_name, clean_value))
+    return items
+
+
+def _set_cookie(cookies: list[tuple[str, str]], name: str, value: str) -> None:
+    for index, (existing_name, _) in enumerate(cookies):
+        if existing_name == name:
+            cookies[index] = (name, value)
+            return
+    cookies.append((name, value))
+
+
+def _app_chat_cookie(access_token: str, cf_clearance: str = "", cf_cookies: str = "") -> str:
     token = str(access_token or "").strip()
-    cookies: dict[str, str] = {}
-    if token:
-        if "=" in token:
-            for fragment in token.split(";"):
-                name, separator, value = fragment.strip().partition("=")
-                if separator and name.strip():
-                    cookies[name.strip()] = value.strip()
-        else:
-            cookies["sso"] = token
-            cookies["sso-rw"] = token
-    if cookies.get("sso") and not cookies.get("sso-rw"):
-        cookies["sso-rw"] = cookies["sso"]
-    clearance = str(cf_clearance or "").strip()
-    if clearance and "cf_clearance" not in cookies:
-        cookies["cf_clearance"] = clearance
-    return "; ".join(f"{name}={value}" for name, value in cookies.items())
+    cookies: list[tuple[str, str]] = []
+    sso_value = ""
+    for name, value in _cookie_items(token):
+        if name == "sso":
+            sso_value = value
+            break
+    if not sso_value and token and "=" not in token:
+        sso_value = " ".join(token.split())
+    if sso_value:
+        cookies.extend((name, value) for name, value in _cookie_items(token) if name not in {"sso", "sso-rw"})
+        cookies.insert(0, ("sso-rw", sso_value))
+        cookies.insert(0, ("sso", sso_value))
+    else:
+        cookies.extend(_cookie_items(token))
+    for name, value in _cookie_items(cf_cookies):
+        if name not in {"sso", "sso-rw"}:
+            _set_cookie(cookies, name, value)
+    clearance = " ".join(str(cf_clearance or "").strip().split())
+    if clearance:
+        _set_cookie(cookies, "cf_clearance", clearance)
+    return "; ".join(f"{name}={value}" for name, value in cookies)
 
 
-def app_chat_headers(access_token: str) -> dict[str, str]:
-    profile = _grok_console_profile()
+def _extract_raw_sso(access_token: str) -> str:
+    token = str(access_token or "").strip()
+    for name, value in _cookie_items(token):
+        if name == "sso":
+            return value
+    if token and "=" not in token:
+        return " ".join(token.split())
+    return token
+
+
+def _detect_bridge_url() -> str:
+    configured = config.browser_bridge_url
+    if configured:
+        return configured
+    global _bridge_detected_url, _bridge_probed
+    if _bridge_probed:
+        return _bridge_detected_url or ""
+    _bridge_probed = True
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{_BRIDGE_DEFAULT_URL}/health", timeout=2) as r:
+            if r.status == 200:
+                _bridge_detected_url = _BRIDGE_DEFAULT_URL
+                logger.info({"event": "browser_bridge_detected", "url": _BRIDGE_DEFAULT_URL})
+                return _BRIDGE_DEFAULT_URL
+    except Exception:
+        pass
+    _bridge_detected_url = ""
+    return ""
+
+
+def app_chat_headers(access_token: str, account: dict[str, Any] | None = None) -> dict[str, str]:
+    profile = _grok_app_chat_profile()
     headers = {
         "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
         "Content-Type": "application/json",
         "Origin": APP_CHAT_BASE_URL,
         "Referer": f"{APP_CHAT_BASE_URL}/",
+        "Priority": "u=1, i",
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",
-        "User-Agent": profile.user_agent,
-        "x-statsig-id": GROK_APP_CHAT_STATSIG_ID,
+        "User-Agent": _app_chat_profile_value(profile, account, "user_agent", "user_agent", "user-agent"),
+        "x-statsig-id": _app_chat_profile_value(profile, account, "statsig_id", "statsig_id", "x-statsig-id"),
         "x-xai-request-id": str(uuid.uuid4()),
     }
-    cookie = _app_chat_cookie(access_token, profile.cf_clearance)
+    sec_ch_ua = _app_chat_profile_value(profile, account, "sec_ch_ua", "sec_ch_ua", "sec-ch-ua")
+    sec_ch_ua_mobile = _app_chat_profile_value(profile, account, "sec_ch_ua_mobile", "sec_ch_ua_mobile", "sec-ch-ua-mobile")
+    sec_ch_ua_platform = _app_chat_profile_value(profile, account, "sec_ch_ua_platform", "sec_ch_ua_platform", "sec-ch-ua-platform")
+    if sec_ch_ua:
+        headers["Sec-Ch-Ua"] = sec_ch_ua
+    if sec_ch_ua_mobile:
+        headers["Sec-Ch-Ua-Mobile"] = sec_ch_ua_mobile
+    if sec_ch_ua_platform:
+        headers["Sec-Ch-Ua-Platform"] = sec_ch_ua_platform
+    cf_clearance = _app_chat_profile_value(profile, account, "cf_clearance", "cf_clearance")
+    cf_cookies = _app_chat_profile_value(profile, account, "cf_cookies", "cf_cookies")
+    cookie = _app_chat_cookie(access_token, cf_clearance, cf_cookies)
     if cookie:
         headers["Cookie"] = cookie
     return headers
@@ -354,18 +454,45 @@ def build_app_chat_payload(
     if not message:
         raise HTTPException(status_code=400, detail={"error": "Grok app-chat requires a user text message"})
     payload: dict[str, Any] = {
-        "message": message,
-        "modeId": spec.mode_id or spec.upstream_model or spec.id,
+        "collectionIds": [],
+        "connectors": [],
+        "deviceEnvInfo": {
+            "darkModeEnabled": False,
+            "devicePixelRatio": 2,
+            "screenHeight": 1329,
+            "screenWidth": 2056,
+            "viewportHeight": 1083,
+            "viewportWidth": 2056,
+        },
+        "disableMemory": True,
+        "disableSearch": False,
+        "disableSelfHarmShortCircuit": False,
+        "disableTextFollowUps": False,
         "enableImageGeneration": image_generation,
         "enableImageStreaming": image_generation,
+        "enableSideBySide": True,
+        "fileAttachments": [],
+        "forceConcise": False,
+        "forceSideBySide": False,
+        "imageAttachments": [],
         "imageGenerationCount": int(body.get("n") or 1) if image_generation else 0,
+        "isAsyncChat": False,
+        "message": message,
+        "modeId": spec.mode_id or spec.upstream_model or spec.id,
+        "responseMetadata": {},
+        "returnImageBytes": False,
+        "returnRawGrokInXaiRequest": False,
+        "searchAllConnectors": False,
         "sendFinalMetadata": True,
         "temporary": True,
-        "fileAttachments": [],
-        "toolOverrides": {},
-        "disableSearch": True,
-        "disableMemory": True,
-        "returnImageBytes": False,
+        "toolOverrides": {
+            "imageGen": False,
+            "webSearch": False,
+            "xSearch": False,
+            "xMediaSearch": False,
+            "trendsSearch": False,
+            "xPostAnalyze": False,
+        },
     }
     if spec.model_tier:
         payload["modelTier"] = spec.model_tier
@@ -462,11 +589,35 @@ def collect_app_chat_response(events: Iterable[dict[str, Any]]) -> dict[str, str
     return {"content": "".join(content_parts), "reasoning_content": "".join(reasoning_parts)}
 
 
+def classify_app_chat_upstream_error(upstream_status: int, access_token: str | None = None) -> GrokConsoleError:
+    status = int(upstream_status)
+    feedback_status = _feedback_status(status)
+    if access_token and feedback_status:
+        from services.account_service import account_service
+
+        account_service.update_account(access_token, {"status": feedback_status})
+    if status == 401:
+        return GrokConsoleError("Grok app-chat authentication failed (HTTP 401)", 401, status)
+    if status == 403:
+        return GrokConsoleError(
+            "Grok app-chat forbidden (HTTP 403)",
+            403,
+            status,
+        )
+    if status == 429:
+        return GrokConsoleError("Grok app-chat rate limited (HTTP 429)", 429, status)
+    if status in {408, 504}:
+        return GrokConsoleError(f"Grok app-chat upstream timeout (HTTP {status})", _openai_status(status), status)
+    return GrokConsoleError(f"Grok app-chat upstream error (HTTP {status})", _openai_status(status), status)
+
+
 class GrokAppChatClient:
-    def __init__(self, access_token: str) -> None:
+    def __init__(self, access_token: str, account: dict[str, Any] | None = None) -> None:
         self.access_token = access_token
-        self.network_profile = _grok_console_profile()
-        self.session = create_session(impersonate=self.network_profile.impersonate, verify=self.network_profile.verify)
+        self.account = account if isinstance(account, dict) else None
+        self.network_profile = _grok_app_chat_profile()
+        impersonate = _app_chat_impersonate(self.network_profile, self.account)
+        self.session = create_session(impersonate=impersonate, verify=self.network_profile.verify)
 
     def close(self) -> None:
         self.session.close()
@@ -497,12 +648,75 @@ class GrokAppChatClient:
 
         return retry_call(fn, policy=api_policy, deadline=deadline, on_retry=on_retry)
 
+    def _refresh_clearance(self) -> bool:
+        if not config.flaresolverr_url:
+            return False
+        with _APP_CHAT_CLEARANCE_LOCK:
+            clearance = FlareSolverrClearanceProvider().solve()
+            if clearance is None:
+                return False
+            current_profiles = config.network_profiles
+            app_profile = dict(current_profiles.get("grok_app_chat") or {})
+            solved_impersonate = infer_chromium_impersonate(clearance.user_agent)
+            app_profile.update({
+                "browser": solved_impersonate or app_profile.get("browser") or app_profile.get("impersonate"),
+                "cf_cookies": clearance.cf_cookies,
+                "cf_clearance": clearance.cf_clearance,
+                "impersonate": solved_impersonate or app_profile.get("impersonate") or app_profile.get("browser"),
+                "user-agent": clearance.user_agent,
+            })
+            next_profiles = dict(current_profiles)
+            next_profiles["grok_app_chat"] = app_profile
+            config.update({"network_profiles": next_profiles})
+            self.network_profile = _grok_app_chat_profile()
+            headers = app_chat_headers(self.access_token, self.account)
+            session_headers = getattr(self.session, "headers", None)
+            if hasattr(session_headers, "update"):
+                session_headers.update(headers)
+            return True
+
+    def _try_browser_bridge(self, payload: dict[str, Any]) -> list[str] | None:
+        bridge_url = _detect_bridge_url()
+        if not bridge_url:
+            return None
+        sso = _extract_raw_sso(self.access_token)
+        if not sso:
+            return None
+        import urllib.request
+        import urllib.error
+        bridge_body = json.dumps({"sso": sso, "payload": payload}).encode()
+        req = urllib.request.Request(
+            f"{bridge_url}/api/chat",
+            data=bridge_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                if resp.status != 200:
+                    logger.warning({"event": "browser_bridge_error", "status": resp.status})
+                    return None
+                return resp.read().decode("utf-8", errors="replace").splitlines()
+        except urllib.error.HTTPError as exc:
+            msg = f"Grok app-chat forbidden (HTTP {exc.code}): account may lack required tier" if exc.code == 403 else f"Grok app-chat via bridge failed (HTTP {exc.code})"
+            raise GrokConsoleError(msg, _openai_status(exc.code), exc.code)
+        except (urllib.error.URLError, OSError, TimeoutError):
+            global _bridge_probed
+            _bridge_probed = False
+            logger.warning({"event": "browser_bridge_unavailable"})
+            return None
+
     def stream_events(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        bridge_lines = self._try_browser_bridge(payload)
+        if bridge_lines is not None:
+            yield from app_chat_line_events(bridge_lines)
+            return
+        response = None
         try:
             response = self._call_with_retry(
                 lambda: self.session.post(
                     APP_CHAT_NEW_CONVERSATION_URL,
-                    headers=app_chat_headers(self.access_token),
+                    headers=app_chat_headers(self.access_token, self.account),
                     json=payload,
                     timeout=self.network_profile.timeout,
                     stream=True,
@@ -511,21 +725,35 @@ class GrokAppChatClient:
             )
         except requests.exceptions.RequestException as exc:
             raise GrokConsoleError(f"Grok app-chat upstream request failed: {exc}", 502) from exc
+        if response.status_code == 403 and self._refresh_clearance():
+            try:
+                response = self._call_with_retry(
+                    lambda: self.session.post(
+                        APP_CHAT_NEW_CONVERSATION_URL,
+                        headers=app_chat_headers(self.access_token, self.account),
+                        json=payload,
+                        timeout=self.network_profile.timeout,
+                        stream=True,
+                    ),
+                    context="app_chat_flaresolverr",
+                )
+            except requests.exceptions.RequestException as exc:
+                raise GrokConsoleError(f"Grok app-chat upstream request failed: {exc}", 502) from exc
         if response.status_code >= 400:
-            status = int(response.status_code)
-            raise GrokConsoleError(f"Grok app-chat upstream error (HTTP {status})", _openai_status(status), status)
+            raise classify_app_chat_upstream_error(int(response.status_code), self.access_token)
         yield from app_chat_line_events(response.iter_lines())
 
 
 def app_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     from services.account_service import account_service
 
-    access_token = account_service.get_text_access_token(provider=GROK_PROVIDER)
+    access_token = account_service.get_grok_app_chat_access_token(spec)
     if not access_token:
         raise HTTPException(status_code=503, detail={"error": "no available Grok account"})
+    account = account_service.get_account(access_token)
     payload = build_app_chat_payload(spec, body, messages)
     try:
-        with GrokAppChatClient(access_token) as client:
+        with GrokAppChatClient(access_token, account) as client:
             yield from client.stream_events(payload)
     except GrokConsoleError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"error": str(exc)}) from exc
@@ -538,8 +766,14 @@ def app_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[di
 
 def app_chat_image_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n: int = 1) -> Iterator[ImageOutput]:
     if not is_supported_grok_app_chat_image_model(spec.id):
+        if spec.capability == "video":
+            detail = f"Grok video generation is not yet supported: {spec.id}"
+        elif spec.capability == "image_edit":
+            detail = f"Grok image editing is not yet supported: {spec.id}"
+        else:
+            detail = f"unsupported Grok image model: {spec.id}"
         raise ImageGenerationError(
-            f"unsupported Grok image model: {spec.id}",
+            detail,
             status_code=400,
             error_type="invalid_request_error",
             code="unsupported_model",
@@ -552,12 +786,13 @@ def app_chat_image_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n
 
     from services.account_service import account_service
 
-    access_token = account_service.get_text_access_token(provider=GROK_PROVIDER)
+    access_token = account_service.get_grok_app_chat_access_token(spec)
     if not access_token:
         raise ImageGenerationError("no available Grok account", status_code=503, code="no_available_account")
+    account = account_service.get_account(access_token)
     image_items: list[dict[str, Any]] = []
     try:
-        with GrokAppChatClient(access_token) as client:
+        with GrokAppChatClient(access_token, account) as client:
             for event in client.stream_events(payload):
                 token, thinking = extract_app_chat_token(event)
                 if token and not thinking:
@@ -573,7 +808,7 @@ def app_chat_image_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n
     if image_items:
         yield ImageOutput(kind="result", model=spec.id, index=1, total=n, data=format_image_result(image_items, prompt, "url")["data"])
         return
-    raise ImageGenerationError("Grok image generation did not return an image", status_code=502)
+    raise ImageGenerationError("Grok image generation did not return an image", status_code=502, code="image_generation_failed")
 
 
 def console_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> GrokConsoleCompletion:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from threading import Condition, Lock
@@ -12,7 +13,7 @@ from services.log_service import (
     LOG_TYPE_ACCOUNT,
     log_service,
 )
-from services.models import GPT_PROVIDER, GROK_PROVIDER, normalize_provider
+from services.models import GPT_PROVIDER, GROK_PROVIDER, ModelSpec, normalize_provider
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
@@ -49,6 +50,70 @@ def _format_timestamp(value: Any) -> str:
 
 def _nested_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+GROK_TIER_ALIASES = {
+    "free": "basic",
+    "basic": "basic",
+    "premium": "super",
+    "super": "super",
+    "heavy": "heavy",
+}
+GROK_UNAVAILABLE_STATUSES = {"禁用", "异常", "限流", "disabled", "abnormal", "limited"}
+
+
+def _normalize_grok_tier(value: Any) -> str:
+    return GROK_TIER_ALIASES.get(str(value or "").strip().lower().replace("_", "-"), "")
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items = value.replace(";", ",").split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        return []
+    return [item for item in (_clean_string(raw).lower() for raw in raw_items) if item]
+
+
+def _normalize_grok_access_token(value: Any) -> str:
+    token = _clean_string(value)
+    simple_sso = re.fullmatch(r"sso\s*=\s*(.+)", token, flags=re.IGNORECASE)
+    if simple_sso and ";" not in token:
+        return simple_sso.group(1).strip()
+    return token
+
+
+def _grok_tier_matches(account_tier: str, requested_tier: str) -> bool:
+    if not account_tier or not requested_tier:
+        return False
+    if requested_tier == "heavy":
+        return account_tier == "heavy"
+    if requested_tier == "super":
+        return account_tier in {"super", "heavy"}
+    if requested_tier == "basic":
+        return account_tier in {"basic", "super", "heavy"}
+    return False
+
+
+def _grok_requested_tiers(spec: ModelSpec) -> list[str]:
+    if spec.prefer_best:
+        return ["heavy", "super", "basic"]
+    requested = _normalize_grok_tier(spec.model_tier)
+    return [requested] if requested else []
+
+
+def _grok_account_has_capability(account: dict, spec: ModelSpec) -> bool:
+    capabilities = set(account.get("capabilities") or [])
+    if not capabilities:
+        return True
+    requested = {str(spec.capability or "chat").lower()}
+    if spec.mode_id:
+        requested.add(str(spec.mode_id).lower())
+    if spec.model_tier:
+        normalized_tier = _normalize_grok_tier(spec.model_tier)
+        requested.add(normalized_tier or str(spec.model_tier).lower())
+    return bool(capabilities & requested)
 
 
 class AccountService:
@@ -92,12 +157,13 @@ class AccountService:
     def _normalize_account(self, item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
-        access_token = item.get("access_token") or ""
+        provider = normalize_provider(item.get("provider"))
+        access_token = _normalize_grok_access_token(item.get("access_token") or "") if provider == GROK_PROVIDER else item.get("access_token") or ""
         if not access_token:
             return None
         normalized = dict(item)
         normalized["access_token"] = access_token
-        normalized["provider"] = normalize_provider(normalized.get("provider"))
+        normalized["provider"] = provider
         normalized["type"] = normalized.get("type") or "free"
         normalized["status"] = normalized.get("status") or "正常"
         normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
@@ -108,6 +174,17 @@ class AccountService:
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
+        if normalized["provider"] == GROK_PROVIDER:
+            raw_tier = normalized.get("tier") or normalized.get("model_tier")
+            normalized_tier = _normalize_grok_tier(raw_tier) or _clean_string(raw_tier) or None
+            normalized["tier"] = normalized_tier
+            if "model_tier" in normalized:
+                normalized["model_tier"] = normalized_tier
+            normalized["app_chat"] = bool(normalized.get("app_chat"))
+            normalized["capabilities"] = _normalize_string_list(normalized.get("capabilities"))
+            cf_cookies = normalized.get("cf_cookies")
+            normalized["cf_cookies"] = cf_cookies if isinstance(cf_cookies, dict) else _clean_string(cf_cookies)
+            normalized["user_agent"] = _clean_string(normalized.get("user_agent")) or None
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
         normalized["last_used_at"] = normalized.get("last_used_at")
@@ -185,11 +262,40 @@ class AccountService:
                    and (token := account.get("access_token") or "")
                    and token not in excluded
             ]
-            if not candidates:
-                return ""
-            access_token = candidates[self._index % len(candidates)]
-            self._index += 1
-            return access_token
+            return self._next_text_token(candidates)
+
+    def _next_text_token(self, candidates: list[str]) -> str:
+        if not candidates:
+            return ""
+        access_token = candidates[self._index % len(candidates)]
+        self._index += 1
+        return access_token
+
+    def get_grok_app_chat_access_token(self, spec: ModelSpec, excluded_tokens: set[str] | None = None) -> str:
+        requested_tiers = _grok_requested_tiers(spec)
+        if not requested_tiers:
+            return self.get_text_access_token(excluded_tokens=excluded_tokens, provider=GROK_PROVIDER)
+        excluded = set(excluded_tokens or set())
+        with self._lock:
+            accounts = [
+                account
+                for account in self._accounts.values()
+                if normalize_provider(account.get("provider")) == GROK_PROVIDER
+                   and account.get("status") not in GROK_UNAVAILABLE_STATUSES
+                   and account.get("access_token")
+                   and account.get("access_token") not in excluded
+                   and _grok_account_has_capability(account, spec)
+            ]
+            for requested_tier in requested_tiers:
+                tiered_candidates = [
+                    account.get("access_token") or ""
+                    for account in accounts
+                    if _grok_tier_matches(_normalize_grok_tier(account.get("tier") or account.get("model_tier")), requested_tier)
+                ]
+                token = self._next_text_token([candidate for candidate in tiered_candidates if candidate])
+                if token:
+                    return token
+        return self.get_text_access_token(excluded_tokens=excluded_tokens, provider=GROK_PROVIDER)
 
     def mark_text_used(self, access_token: str) -> None:
         if not access_token:
@@ -276,7 +382,10 @@ class AccountService:
         for item in items:
             if not isinstance(item, dict):
                 continue
+            provider = normalize_provider(item.get("provider"))
             access_token = _clean_string(item.get("access_token") or item.get("accessToken"))
+            if provider == GROK_PROVIDER:
+                access_token = _normalize_grok_access_token(access_token)
             if not access_token or access_token in seen_tokens:
                 continue
 
@@ -322,7 +431,10 @@ class AccountService:
         for item in items:
             if not isinstance(item, dict):
                 continue
+            provider = normalize_provider(item.get("provider"))
             access_token = _clean_string(item.get("access_token") or item.get("accessToken"))
+            if provider == GROK_PROVIDER:
+                access_token = _normalize_grok_access_token(access_token)
             if not access_token or access_token in seen_tokens:
                 continue
 

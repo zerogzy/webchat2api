@@ -49,7 +49,7 @@ GPT_FALLBACK_MODEL_IDS = (
 GROK_MODEL_SPECS = (
     ModelSpec("grok-4.3", GROK_PROVIDER, "xai", "grok-4.3", "high"),
     ModelSpec("grok-4", GROK_PROVIDER, "xai", "grok-4", "high"),
-    ModelSpec("grok-4.20", GROK_PROVIDER, "xai", "grok-4.20", "high"),
+    ModelSpec("grok-4.20", GROK_PROVIDER, "xai", "grok-4.20-reasoning"),
     ModelSpec("grok-4.20-reasoning", GROK_PROVIDER, "xai", "grok-4.20-reasoning"),
     ModelSpec("grok-4.20-non-reasoning", GROK_PROVIDER, "xai", "grok-4.20-non-reasoning"),
     ModelSpec("grok-4.20-multi-agent", GROK_PROVIDER, "xai", "grok-4.20-multi-agent"),
@@ -78,7 +78,7 @@ GROK_MODEL_SPECS = (
 GPT_IMAGE_MODEL_IDS = {"gpt-image-2", "codex-gpt-image-2"}
 GROK_IMAGE_MODEL_IDS = {spec.id for spec in GROK_MODEL_SPECS if spec.capability in {"image", "image_edit", "video"}}
 IMAGE_MODEL_IDS = GPT_IMAGE_MODEL_IDS | GROK_IMAGE_MODEL_IDS
-SUPPORTED_GROK_APP_CHAT_IMAGE_MODEL_IDS = {"grok-imagine-image-lite"}
+SUPPORTED_GROK_APP_CHAT_IMAGE_MODEL_IDS = {spec.id for spec in GROK_MODEL_SPECS if spec.capability == "image"}
 
 MODEL_REGISTRY = {spec.id: spec for spec in GROK_MODEL_SPECS}
 for model_id in GPT_FALLBACK_MODEL_IDS:
