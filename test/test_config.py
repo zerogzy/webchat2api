@@ -241,6 +241,13 @@ class ConfigLoadingTests(unittest.TestCase):
                         "cf_clearance": "profile-clearance",
                         "cookie": "drop-me",
                     },
+                    "grok_app_chat": {
+                        "browser": "chrome136",
+                        "user-agent": "App UA",
+                        "cf_cookies": "cf_bm=profile-bm",
+                        "sec-ch-ua": "app sec ua",
+                        "statsig_id": "statsig-profile",
+                    },
                     "unknown_provider": {"user-agent": "Ignore Me"},
                 },
                 "unknown_fingerprint": {"user-agent": "Ignore Me"},
@@ -250,6 +257,10 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(result["grok_console_fingerprint"]["user-agent"], "Legacy UA")
             self.assertEqual(result["network_profiles"]["grok_console"]["impersonate"], "chrome137")
             self.assertEqual(result["network_profiles"]["grok_console"]["cf_clearance"], "profile-clearance")
+            self.assertEqual(result["network_profiles"]["grok_app_chat"]["browser"], "chrome136")
+            self.assertEqual(result["network_profiles"]["grok_app_chat"]["cf_cookies"], "cf_bm=profile-bm")
+            self.assertEqual(result["network_profiles"]["grok_app_chat"]["sec-ch-ua"], "app sec ua")
+            self.assertEqual(result["network_profiles"]["grok_app_chat"]["statsig_id"], "statsig-profile")
             self.assertNotIn("cookie", result["chatgpt_fingerprint"])
             self.assertNotIn("cookie", result["grok_console_fingerprint"])
             self.assertNotIn("cookie", result["network_profiles"]["grok_console"])
@@ -259,7 +270,27 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertIn("grok_console_fingerprint", settings)
             self.assertIn("network_profiles", settings)
             self.assertEqual(settings["network_profiles"]["grok_console"]["cf_clearance"], "profile-clearance")
+            self.assertEqual(settings["network_profiles"]["grok_app_chat"]["cf_cookies"], "cf_bm=profile-bm")
             self.assertNotIn("unknown_fingerprint", settings)
+
+    def test_flaresolverr_settings_persist_with_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = self._isolated_store(
+                Path(tmp_dir),
+                env={"STORAGE_BACKEND": "json", "LOGIN_SECRET": "env-auth", "PROXY_URL": None},
+            )
+
+            self.assertEqual(store.flaresolverr_url, "")
+            self.assertEqual(store.flaresolverr_timeout_sec, 60)
+            result = store.update({"flaresolverr_url": " http://solver.local/ ", "flaresolverr_timeout_sec": "90"})
+
+            self.assertEqual(store.flaresolverr_url, "http://solver.local")
+            self.assertEqual(store.flaresolverr_timeout_sec, 90)
+            self.assertEqual(result["flaresolverr_url"], "http://solver.local")
+            self.assertEqual(result["flaresolverr_timeout_sec"], 90)
+            settings = json.loads((Path(tmp_dir) / "data" / "settings.json").read_text(encoding="utf-8"))
+            self.assertEqual(settings["flaresolverr_url"], " http://solver.local/ ")
+            self.assertEqual(settings["flaresolverr_timeout_sec"], "90")
 
 
 if __name__ == "__main__":
