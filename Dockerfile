@@ -56,8 +56,8 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY services/browser_bridge/package.json /app/services/browser_bridge/package.json
-RUN cd /app/services/browser_bridge && npm install --production && cd /app
+COPY services/browser_bridge/package.json services/browser_bridge/package-lock.json /app/services/browser_bridge/
+RUN cd /app/services/browser_bridge && npm ci --omit=dev && cd /app
 
 COPY main.py ./
 COPY config.example.json ./config.json

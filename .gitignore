@@ -39,6 +39,7 @@ logs.jsonl
 web/.next/
 web/out/
 web/node_modules/
+services/browser_bridge/node_modules/
 web/tsconfig.tsbuildinfo
 web/next-env.d.ts
 web_dist/
