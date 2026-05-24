@@ -43,6 +43,9 @@ web/next-env.d.ts
 web/tsconfig.tsbuildinfo
 web_dist/
 
+# Browser bridge build artifacts
+services/browser_bridge/node_modules
+
 # Non-runtime repository files
 assets
 README.md

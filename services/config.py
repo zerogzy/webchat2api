@@ -59,7 +59,10 @@ PERSISTENT_CONFIG_KEYS = {
     "chatgpt_fingerprint",
     "grok_console_fingerprint",
     "network_profiles",
+    "flaresolverr_url",
+    "flaresolverr_timeout_sec",
     "enable_turnstile_solver",
+    "browser_bridge_url",
 }
 
 
@@ -144,16 +147,19 @@ def _normalize_chatgpt_fingerprint(value: object) -> dict[str, object]:
     }
 
 
-def _normalize_grok_console_profile(value: object) -> dict[str, object]:
+def _normalize_grok_network_profile(value: object) -> dict[str, object]:
     source = value if isinstance(value, dict) else {}
     normalized: dict[str, object] = {}
     if impersonate := _nonempty_string(source.get("impersonate")):
         normalized["impersonate"] = impersonate
+    if browser := _nonempty_string(source.get("browser")):
+        normalized["browser"] = browser
     user_agent = _nonempty_string(source.get("user-agent") or source.get("user_agent"))
     if user_agent:
         normalized["user-agent"] = user_agent
-    if cf_clearance := _nonempty_string(source.get("cf_clearance")):
-        normalized["cf_clearance"] = cf_clearance
+    for key in ("cf_clearance", "cf_cookies", "sec-ch-ua", "sec_ch_ua", "sec-ch-ua-mobile", "sec_ch_ua_mobile", "sec-ch-ua-platform", "sec_ch_ua_platform", "statsig_id", "x-statsig-id"):
+        if text := _nonempty_string(source.get(key)):
+            normalized[key] = text
     if "verify" in source:
         normalized["verify"] = _normalize_bool(source.get("verify"), True)
     if "timeout" in source:
@@ -166,14 +172,28 @@ def _normalize_grok_console_profile(value: object) -> dict[str, object]:
     return normalized
 
 
+def _normalize_grok_console_profile(value: object) -> dict[str, object]:
+    normalized = _normalize_grok_network_profile(value)
+    normalized.pop("browser", None)
+    for key in ("cf_cookies", "sec-ch-ua", "sec_ch_ua", "sec-ch-ua-mobile", "sec_ch_ua_mobile", "sec-ch-ua-platform", "sec_ch_ua_platform", "statsig_id", "x-statsig-id"):
+        normalized.pop(key, None)
+    return normalized
+
+
 def _normalize_grok_console_fingerprint(value: object) -> dict[str, object]:
     return _normalize_grok_console_profile(value)
 
 
 def _normalize_network_profiles(value: object) -> dict[str, object]:
     source = value if isinstance(value, dict) else {}
+    normalized: dict[str, object] = {}
     grok_console = _normalize_grok_console_profile(source.get("grok_console"))
-    return {"grok_console": grok_console} if grok_console else {}
+    if grok_console:
+        normalized["grok_console"] = grok_console
+    grok_app_chat = _normalize_grok_network_profile(source.get("grok_app_chat"))
+    if grok_app_chat:
+        normalized["grok_app_chat"] = grok_app_chat
+    return normalized
 
 
 def _normalize_image_storage_settings(value: object) -> dict[str, object]:
@@ -424,6 +444,21 @@ class ConfigStore:
         ).strip().rstrip("/")
 
     @property
+    def flaresolverr_url(self) -> str:
+        return str(self.data.get("flaresolverr_url") or "").strip().rstrip("/")
+
+    @property
+    def flaresolverr_timeout_sec(self) -> int:
+        try:
+            return max(1, int(self.data.get("flaresolverr_timeout_sec", 60)))
+        except (TypeError, ValueError):
+            return 60
+
+    @property
+    def browser_bridge_url(self) -> str:
+        return str(self.data.get("browser_bridge_url") or "").strip().rstrip("/")
+
+    @property
     def app_version(self) -> str:
         try:
             value = VERSION_FILE.read_text(encoding="utf-8").strip()
@@ -452,6 +487,9 @@ class ConfigStore:
         data["chatgpt_fingerprint"] = self.chatgpt_fingerprint
         data["grok_console_fingerprint"] = self.grok_console_fingerprint
         data["network_profiles"] = self.network_profiles
+        data["flaresolverr_url"] = self.flaresolverr_url
+        data["flaresolverr_timeout_sec"] = self.flaresolverr_timeout_sec
+        data["browser_bridge_url"] = self.browser_bridge_url
         data.pop("auth-key", None)
         return data
 
