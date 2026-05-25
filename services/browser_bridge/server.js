@@ -23,11 +23,27 @@ const MAX_PAGES = parseInt(process.env.BRIDGE_MAX_PAGES || "10", 10);
 const PAGE_IDLE_MS = parseInt(process.env.BRIDGE_PAGE_IDLE_MS || "300000", 10); // 5 min
 const NAV_TIMEOUT = 45000;
 const REQ_TIMEOUT = 120000;
+const PAGE_READY_TIMEOUT = 15000;
+
+const ERROR_STATUS = {
+  invalid_json: 400,
+  invalid_request: 400,
+  bridge_unavailable: 503,
+  navigation_timeout: 504,
+  sso_unavailable: 401,
+  page_not_prepared: 503,
+  page_busy: 429,
+  request_timeout: 504,
+};
+
+let lastBridgeErrorCode = null;
+let lastBridgeError = null;
+let lastBridgeErrorAt = null;
 
 /** @type {import('playwright').Browser | null} */
 let browser = null;
 
-/** @typedef {{ page: import('playwright').Page, context: import('playwright').BrowserContext, sso: string, ready: boolean, busy: boolean, lastUsed: number, queue: Array<{payload: object, resolve: Function, reject: Function}> }} PageSlot */
+/** @typedef {{ page: import('playwright').Page, context: import('playwright').BrowserContext, sso: string, ready: boolean, preparing: boolean, busy: boolean, lastUsed: number, queue: Array<{payload: object, resolve: Function, reject: Function}>, last_error_code: string | null, last_error: string | null, last_error_at: string | null, last_ready_at: string | null, user_authenticated: boolean }} PageSlot */
 
 /** @type {Map<string, PageSlot>} */
 const pages = new Map();
@@ -50,8 +66,10 @@ async function ensureBrowser() {
       ],
     });
   } catch (err) {
-    log(`Failed to launch browser: ${err.message}`);
-    throw err;
+    const message = `Failed to launch browser: ${err.message}`;
+    log(message);
+    setBridgeError("bridge_unavailable", message);
+    throw new BridgeError("bridge_unavailable", message);
   }
   browser.on("disconnected", () => {
     log("Browser disconnected, clearing pages");
@@ -68,9 +86,15 @@ async function ensureBrowser() {
 
 async function getOrCreatePage(sso) {
   let slot = pages.get(sso);
-  if (slot && slot.ready) {
-    slot.lastUsed = Date.now();
-    return slot;
+  if (slot) {
+    if (slot.ready) {
+      slot.lastUsed = Date.now();
+      return slot;
+    }
+    if (slot.preparing) {
+      throw new BridgeError("page_not_prepared", "Bridge page is still preparing");
+    }
+    await destroyPage(sso);
   }
 
   // Evict oldest idle page if at capacity
@@ -115,6 +139,12 @@ async function getOrCreatePage(sso) {
     busy: false,
     lastUsed: Date.now(),
     queue: [],
+    preparing: true,
+    last_error_code: null,
+    last_error: null,
+    last_error_at: null,
+    last_ready_at: null,
+    user_authenticated: false,
   };
   pages.set(sso, slot);
 
@@ -144,28 +174,65 @@ async function getOrCreatePage(sso) {
     }
   });
 
-  // Navigate to grok.com to establish CF session
+  try {
+    await preparePage(slot);
+    log(`Page ready for SSO ...${sso.slice(-8)}`);
+    return slot;
+  } catch (err) {
+    const bridgeErr = err instanceof BridgeError
+      ? err
+      : new BridgeError("page_not_prepared", err.message || "Page preparation failed");
+    setSlotError(slot, bridgeErr.code, bridgeErr.message);
+    log(`Page preparation failed for SSO ...${sso.slice(-8)}: ${bridgeErr.message}`);
+    await destroyPage(sso);
+    throw bridgeErr;
+  }
+}
+
+async function preparePage(slot) {
+  const { context, page, sso } = slot;
+
+  // Navigate only to DOM readiness; grok.com keeps long-lived requests open.
   log(`Navigating to grok.com for SSO ...${sso.slice(-8)}`);
   try {
     await page.goto("https://grok.com/", {
-      waitUntil: "networkidle",
+      waitUntil: "domcontentloaded",
       timeout: NAV_TIMEOUT,
     });
-  } catch (e) {
-    log(`Navigation warning: ${e.message}`);
-    // Page may still be usable even if networkidle times out
+  } catch (err) {
+    throw new BridgeError(
+      "navigation_timeout",
+      `Navigation to grok.com timed out or failed: ${err.message}`
+    );
   }
-  await page.waitForTimeout(2000);
 
-  // Verify SSO is valid (x-userid cookie should be set)
+  try {
+    await page.locator("textarea, [contenteditable]").first().waitFor({
+      state: "visible",
+      timeout: PAGE_READY_TIMEOUT,
+    });
+  } catch (err) {
+    throw new BridgeError(
+      "page_not_prepared",
+      `Grok composer was not ready: ${err.message}`
+    );
+  }
+
   const cookies = await context.cookies("https://grok.com");
   const hasUserId = cookies.some((c) => c.name === "x-userid");
   if (!hasUserId) {
-    log(`SSO ...${sso.slice(-8)} did not produce x-userid, may be invalid`);
+    throw new BridgeError(
+      "sso_unavailable",
+      "SSO cookie did not authenticate with grok.com"
+    );
   }
 
   slot.ready = true;
-  log(`Page ready for SSO ...${sso.slice(-8)}`);
+  slot.preparing = false;
+  slot.user_authenticated = true;
+  slot.last_ready_at = new Date().toISOString();
+  clearSlotError(slot);
+  clearBridgeError();
   return slot;
 }
 
@@ -182,8 +249,17 @@ async function destroyPage(sso) {
 
 async function sendMessage(sso, payload) {
   const slot = await getOrCreatePage(sso);
+  if (!slot.ready) {
+    throw new BridgeError("page_not_prepared", "Bridge page is not prepared");
+  }
+  if (slot.preparing) {
+    throw new BridgeError("page_not_prepared", "Bridge page is still preparing");
+  }
+  if (!slot.user_authenticated) {
+    throw new BridgeError("sso_unavailable", "SSO is not authenticated with grok.com");
+  }
   if (slot.busy) {
-    return { status: 429, body: '{"error":"Bridge page busy, retry later"}' };
+    throw new BridgeError("page_busy", "Bridge page busy, retry later");
   }
 
   slot.busy = true;
@@ -191,26 +267,39 @@ async function sendMessage(sso, payload) {
 
   try {
     const result = await new Promise(async (resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("Bridge request timeout"));
+      let timeout = null;
+      const rejectRequest = (e) => {
+        if (timeout) clearTimeout(timeout);
+        reject(e);
+      };
+
+      timeout = setTimeout(() => {
+        const idx = slot.queue.findIndex((q) => q.reject === rejectRequest);
+        if (idx >= 0) slot.queue.splice(idx, 1);
+        reject(new BridgeError("request_timeout", "Bridge request timeout"));
       }, REQ_TIMEOUT);
 
       slot.queue.push({
         payload,
-        resolve: (r) => { clearTimeout(timeout); resolve(r); },
-        reject: (e) => { clearTimeout(timeout); reject(e); },
+        resolve: (r) => {
+          if (timeout) clearTimeout(timeout);
+          resolve(r);
+        },
+        reject: rejectRequest,
       });
 
       try {
         await triggerSend(slot);
       } catch (err) {
-        clearTimeout(timeout);
-        const idx = slot.queue.findIndex((q) => q.reject);
+        if (timeout) clearTimeout(timeout);
+        const idx = slot.queue.findIndex((q) => q.reject === rejectRequest);
         if (idx >= 0) slot.queue.splice(idx, 1);
         reject(err);
       }
     });
 
+    clearSlotError(slot);
+    clearBridgeError();
     return result;
   } finally {
     slot.busy = false;
@@ -222,15 +311,22 @@ async function triggerSend(slot) {
 
   try {
     await page.goto("https://grok.com/", {
-      waitUntil: "networkidle",
-      timeout: 30000,
+      waitUntil: "domcontentloaded",
+      timeout: NAV_TIMEOUT,
     });
-  } catch (e) {
-    log(`Re-navigation warning: ${e.message}`);
+  } catch (err) {
+    throw new BridgeError(
+      "navigation_timeout",
+      `Re-navigation to grok.com timed out or failed: ${err.message}`
+    );
   }
 
   const inputLocator = page.locator("textarea, [contenteditable]").first();
-  await inputLocator.waitFor({ state: "visible", timeout: 15000 });
+  try {
+    await inputLocator.waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT });
+  } catch (err) {
+    throw new BridgeError("page_not_prepared", `Grok composer was not ready: ${err.message}`);
+  }
   await inputLocator.click();
   await page.keyboard.type("x", { delay: 30 });
   await page.waitForTimeout(300);
@@ -268,6 +364,75 @@ function log(msg) {
   console.log(`[${ts}] [bridge] ${msg}`);
 }
 
+class BridgeError extends Error {
+  constructor(code, message, status) {
+    super(message);
+    this.name = "BridgeError";
+    this.code = code;
+    this.status = status || ERROR_STATUS[code] || 502;
+  }
+}
+
+function setBridgeError(code, message) {
+  lastBridgeErrorCode = code;
+  lastBridgeError = message;
+  lastBridgeErrorAt = new Date().toISOString();
+}
+
+function clearBridgeError() {
+  lastBridgeErrorCode = null;
+  lastBridgeError = null;
+  lastBridgeErrorAt = null;
+}
+
+function setSlotError(slot, code, message) {
+  slot.last_error_code = code;
+  slot.last_error = message;
+  slot.last_error_at = new Date().toISOString();
+  setBridgeError(code, message);
+}
+
+function clearSlotError(slot) {
+  slot.last_error_code = null;
+  slot.last_error = null;
+  slot.last_error_at = null;
+}
+
+function jsonError(code, message) {
+  return { error: message, code };
+}
+
+function healthPayload() {
+  let readyPages = 0;
+  let busyPages = 0;
+  let preparingPages = 0;
+
+  for (const slot of pages.values()) {
+    if (slot.ready) readyPages += 1;
+    if (slot.busy) busyPages += 1;
+    if (slot.preparing) preparingPages += 1;
+  }
+
+  const hasUnreadyPage = pages.size > readyPages;
+  const browserConnected = !!(browser && browser.isConnected());
+  const status = lastBridgeErrorCode || preparingPages > 0 || hasUnreadyPage
+    ? "degraded"
+    : "ok";
+
+  return {
+    status,
+    pages: pages.size,
+    browser_connected: browserConnected,
+    max_pages: MAX_PAGES,
+    ready_pages: readyPages,
+    busy_pages: busyPages,
+    preparing_pages: preparingPages,
+    last_error_code: lastBridgeErrorCode,
+    last_error: lastBridgeError,
+    last_error_at: lastBridgeErrorAt,
+  };
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -294,11 +459,7 @@ function respond(res, status, obj) {
 
 const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/health") {
-    return respond(res, 200, {
-      status: "ok",
-      pages: pages.size,
-      browser_connected: !!(browser && browser.isConnected()),
-    });
+    return respond(res, 200, healthPayload());
   }
 
   if (req.method === "POST" && req.url === "/api/chat") {
@@ -306,15 +467,15 @@ const server = http.createServer(async (req, res) => {
     try {
       body = await readBody(req);
     } catch (e) {
-      return respond(res, 400, { error: "Invalid JSON body" });
+      return respond(res, 400, jsonError("invalid_json", "Invalid JSON body"));
     }
 
     const { sso, payload } = body;
     if (!sso || typeof sso !== "string") {
-      return respond(res, 400, { error: "Missing or invalid 'sso' field" });
+      return respond(res, 400, jsonError("invalid_request", "Missing or invalid 'sso' field"));
     }
     if (!payload || typeof payload !== "object") {
-      return respond(res, 400, { error: "Missing or invalid 'payload' field" });
+      return respond(res, 400, jsonError("invalid_request", "Missing or invalid 'payload' field"));
     }
 
     try {
@@ -322,6 +483,7 @@ const server = http.createServer(async (req, res) => {
       if (result.status >= 400) {
         return respond(res, result.status, {
           error: `Upstream returned ${result.status}`,
+          code: "upstream_error",
           body: result.body,
         });
       }
@@ -333,12 +495,20 @@ const server = http.createServer(async (req, res) => {
       });
       res.end(result.body);
     } catch (err) {
-      log(`Destroying broken page for SSO ...${sso.slice(-8)}: ${err.message}`);
-      await destroyPage(sso);
-      return respond(res, 502, { error: err.message });
+      const bridgeErr = err instanceof BridgeError
+        ? err
+        : new BridgeError("page_not_prepared", err.message || "Bridge page failed");
+      if (bridgeErr.code !== "page_busy") {
+        setBridgeError(bridgeErr.code, bridgeErr.message);
+      }
+      log(`Request failed for SSO ...${sso.slice(-8)}: ${bridgeErr.message}`);
+      if (bridgeErr.code !== "page_busy") {
+        await destroyPage(sso);
+      }
+      return respond(res, bridgeErr.status, jsonError(bridgeErr.code, bridgeErr.message));
     }
   } else {
-    respond(res, 404, { error: "Not found" });
+    respond(res, 404, jsonError("invalid_request", "Not found"));
   }
 });
 
