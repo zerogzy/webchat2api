@@ -106,6 +106,28 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(payload["input"][0]["content"], [{"type": "input_text", "text": "Hello"}])
         self.assertEqual(payload["input"][1]["content"], [{"type": "output_text", "text": "Hi"}])
 
+    def test_build_console_payload_defaults_web_search_tool(self) -> None:
+        spec = resolve_model("grok-4.3")
+        payload = grok.build_console_payload(
+            spec,
+            {},
+            [{"role": "user", "content": "Search the web."}],
+        )
+
+        self.assertEqual(payload["tools"], [{"type": "web_search"}])
+
+    def test_build_console_payload_preserves_supported_search_tools(self) -> None:
+        spec = resolve_model("grok-4.3")
+        web_search = {"type": "web_search", "allowed_websites": ["example.com"]}
+        x_search = {"type": "x_search", "post_favorite_count": 10}
+        payload = grok.build_console_payload(
+            spec,
+            {"tools": [web_search, {"type": "image_generation"}, x_search]},
+            [{"role": "user", "content": "Search the web."}],
+        )
+
+        self.assertEqual(payload["tools"], [web_search, x_search])
+
     def test_extract_console_text_from_common_shapes(self) -> None:
         self.assertEqual(grok.extract_console_text({"output_text": "direct"}), "direct")
         self.assertEqual(

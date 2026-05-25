@@ -57,6 +57,7 @@ _ANSWER_SUMMARY_RE = re.compile(
     r"^\s*(?:\*\*)?\s*(?:答案|回答|answer|final\s+answer|response)\s*(?:\*\*\s*[:：]|[:：]\s*(?:\*\*)?)\s*(.*)$",
     re.IGNORECASE,
 )
+_CONSOLE_SEARCH_TOOL_TYPES = {"web_search", "x_search"}
 
 
 def split_visible_console_reasoning(text: str) -> tuple[str, str]:
@@ -136,6 +137,19 @@ def build_console_input(messages: list[dict[str, Any]]) -> tuple[str, list[dict[
     return "\n\n".join(instructions).strip(), input_items
 
 
+def _console_search_tools(tools: object) -> list[dict[str, Any]]:
+    search_tools: list[dict[str, Any]] = []
+    if isinstance(tools, list):
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            if str(tool.get("type") or "") in _CONSOLE_SEARCH_TOOL_TYPES:
+                search_tools.append(dict(tool))
+    if not any(tool.get("type") == "web_search" for tool in search_tools):
+        search_tools.append({"type": "web_search"})
+    return search_tools
+
+
 def build_console_payload(spec: ModelSpec, body: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
     instructions, input_items = build_console_input(messages)
     if not input_items:
@@ -143,6 +157,7 @@ def build_console_payload(spec: ModelSpec, body: dict[str, Any], messages: list[
     payload: dict[str, Any] = {
         "model": spec.upstream_model or spec.id,
         "input": input_items,
+        "tools": _console_search_tools(body.get("tools")),
     }
     request_instructions = str(body.get("instructions") or "").strip()
     merged_instructions = "\n\n".join(item for item in [request_instructions, instructions] if item)
