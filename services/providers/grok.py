@@ -24,6 +24,7 @@ CONSOLE_BASE_URL = "https://console.x.ai"
 CONSOLE_RESPONSES_URL = f"{CONSOLE_BASE_URL}/v1/responses"
 APP_CHAT_BASE_URL = "https://grok.com"
 APP_CHAT_NEW_CONVERSATION_URL = f"{APP_CHAT_BASE_URL}/rest/app-chat/conversations/new"
+APP_CHAT_RATE_LIMITS_URL = f"{APP_CHAT_BASE_URL}/rest/rate-limits"
 GROK_ASSET_BASE_URL = "https://assets.grok.com/"
 GROK_APP_CHAT_STATSIG_ID = "0196a8f6-0501-79f8-8d74-a2f2c0f5f5f5"
 _APP_CHAT_CLEARANCE_LOCK = threading.Lock()
@@ -951,15 +952,39 @@ class GrokAppChatClient:
         deadline = time.monotonic() + 60.0
 
         def on_retry(attempt, status_code, exc):
+            error = "Grok app-chat rate-limit validation failed" if context == "app_chat_rate_limits" and exc else str(exc) if exc else None
             logger.warning({
                 "event": "grok_app_chat_retry",
                 "context": context,
                 "attempt": attempt,
                 "status_code": status_code,
-                "error": str(exc) if exc else None,
+                "error": error,
             })
 
         return retry_call(fn, policy=api_policy, deadline=deadline, on_retry=on_retry)
+
+    def validate_rate_limits(self) -> dict[str, Any]:
+        try:
+            response = self._call_with_retry(
+                lambda: self.session.post(
+                    APP_CHAT_RATE_LIMITS_URL,
+                    headers=app_chat_headers(self.access_token, self.account),
+                    json={},
+                    timeout=self.network_profile.timeout,
+                ),
+                context="app_chat_rate_limits",
+            )
+        except requests.exceptions.RequestException as exc:
+            raise GrokConsoleError("Grok app-chat rate-limit validation failed", 502) from exc
+        if response.status_code >= 400:
+            raise classify_app_chat_upstream_error(int(response.status_code))
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise GrokConsoleError("Grok app-chat rate-limit validation returned an invalid response", 502) from exc
+        if not isinstance(data, dict):
+            raise GrokConsoleError("Grok app-chat rate-limit validation returned an invalid response", 502)
+        return data
 
     def _refresh_clearance(self) -> bool:
         if not config.flaresolverr_url:
@@ -1087,6 +1112,11 @@ class GrokAppChatClient:
                 raise
             logger.info({"event": "grok_app_chat_direct_fallback_to_bridge", "status": status})
             yield from app_chat_line_events(bridge_lines)
+
+
+def validate_grok_access_token(access_token: str, account: dict[str, Any] | None = None) -> dict[str, Any]:
+    with GrokAppChatClient(access_token, account) as client:
+        return client.validate_rate_limits()
 
 
 def app_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
