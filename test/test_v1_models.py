@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
 import unittest
+from typing import Any
 
-import requests
+requests: Any = None
+if importlib.util.find_spec("requests") is not None:
+    requests = importlib.import_module("requests")
 
 from services.protocol import openai_v1_models
 
@@ -19,6 +24,7 @@ class ModelListTests(unittest.TestCase):
         print("function result:")
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
+    @unittest.skipIf(requests is None, "requests is not installed")
     def test_list_models_http(self):
         """测试通过 HTTP 接口获取模型列表。"""
         response = requests.get(

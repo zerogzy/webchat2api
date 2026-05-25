@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 
-import requests
+requests: Any = None
+if importlib.util.find_spec("requests") is not None:
+    requests = importlib.import_module("requests")
 
 from test.utils import save_image
 from utils.log import logger
@@ -35,6 +40,7 @@ def summarize_chunk(chunk: dict[str, object]) -> dict[str, object]:
     }
 
 
+@unittest.skipIf(requests is None, "requests is not installed")
 class ImageEditsTests(unittest.TestCase):
     def test_image_edit_http(self):
         """测试图片编辑的非流式 HTTP 调用。"""

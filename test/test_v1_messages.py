@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
 import time
 import unittest
+from typing import Any
 
-import requests
+requests: Any = None
+if importlib.util.find_spec("requests") is not None:
+    requests = importlib.import_module("requests")
 
 AUTH_KEY = "webchat2api"
 BASE_URL = "http://localhost:83"
 MODEL = "auto"
 
 
+@unittest.skipIf(requests is None, "requests is not installed")
 class AnthropicMessagesTests(unittest.TestCase):
     @staticmethod
     def _headers() -> dict[str, str]:
