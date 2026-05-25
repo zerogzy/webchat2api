@@ -173,6 +173,9 @@ def build_console_payload(spec: ModelSpec, body: dict[str, Any], messages: list[
         if body.get(key) is not None:
             target_key = "max_output_tokens" if key == "max_tokens" else key
             payload[target_key] = body[key]
+    for key in ("tool_choice", "parallel_tool_calls"):
+        if body.get(key) is not None:
+            payload[key] = body[key]
     reasoning_effort = str(body.get("reasoning_effort") or spec.default_reasoning_effort or "").strip().lower()
     if reasoning_effort and reasoning_effort != "none":
         payload["reasoning"] = {"effort": "high" if reasoning_effort == "xhigh" else reasoning_effort}

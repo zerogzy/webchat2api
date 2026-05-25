@@ -7,6 +7,8 @@ from typing import Any, Iterable, Iterator
 
 from fastapi import HTTPException
 
+from services.models import GROK_PROVIDER, is_grok_app_chat_model, resolve_model
+from services.providers import grok
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
@@ -150,6 +152,29 @@ def stream_text_response(backend, body: dict[str, Any]) -> Iterator[dict[str, An
     yield response_completed(response_id, model, created, [item])
 
 
+def stream_grok_console_response(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    model = str(body.get("model") or "auto").strip() or "auto"
+    spec = resolve_model(model)
+    if is_grok_app_chat_model(spec):
+        raise HTTPException(status_code=501, detail={"error": "Grok app-chat is not supported on /v1/responses"})
+    messages = messages_from_input(body.get("input"), body.get("instructions"))
+    if not messages:
+        raise HTTPException(status_code=400, detail={"error": "input text is required"})
+    response_id = f"resp_{uuid.uuid4().hex}"
+    item_id = f"msg_{uuid.uuid4().hex}"
+    created = int(time.time())
+    yield response_created(response_id, model, created)
+    yield {"type": "response.output_item.added", "output_index": 0, "item": text_output_item("", item_id, "in_progress")}
+    completion = grok.console_chat_completion(body, spec, messages)
+    text = completion.content
+    if text:
+        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 0, "content_index": 0, "delta": text}
+    yield {"type": "response.output_text.done", "item_id": item_id, "output_index": 0, "content_index": 0, "text": text}
+    item = text_output_item(text, item_id, "completed")
+    yield {"type": "response.output_item.done", "output_index": 0, "item": item}
+    yield response_completed(response_id, model, created, [item])
+
+
 def stream_image_response(image_outputs: Iterable[ImageOutput], prompt: str, model: str) -> Iterator[dict[str, Any]]:
     response_id = f"resp_{uuid.uuid4().hex}"
     created = int(time.time())
@@ -186,6 +211,11 @@ def collect_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     if is_text_response_request(body):
+        model = str(body.get("model") or "auto").strip() or "auto"
+        spec = resolve_model(model)
+        if spec.provider == GROK_PROVIDER:
+            yield from stream_grok_console_response(body)
+            return
         yield from stream_text_response(text_backend(), body)
         return
 
