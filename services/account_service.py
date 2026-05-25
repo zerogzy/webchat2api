@@ -154,6 +154,35 @@ class AccountService:
             return True
         return int(account.get("quota") or 0) > 0
 
+    @staticmethod
+    def _normalize_account_type(value: Any) -> str | None:
+        text = _clean_string(value)
+        if not text:
+            return None
+        normalized = re.sub(r"[^a-z0-9]+", "", text.lower())
+        if normalized in {"prolite", "pluslite"}:
+            return "ProLite"
+        return text
+
+    @classmethod
+    def _search_account_type(cls, payload: Any) -> str | None:
+        if isinstance(payload, dict):
+            for key in ("type", "account_type", "plan_type", "plan", "tier"):
+                if key in payload:
+                    account_type = cls._normalize_account_type(payload.get(key))
+                    if account_type:
+                        return account_type
+            for value in payload.values():
+                account_type = cls._search_account_type(value)
+                if account_type:
+                    return account_type
+        elif isinstance(payload, (list, tuple, set)):
+            for value in payload:
+                account_type = cls._search_account_type(value)
+                if account_type:
+                    return account_type
+        return None
+
     def _normalize_account(self, item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
@@ -164,9 +193,11 @@ class AccountService:
         normalized = dict(item)
         normalized["access_token"] = access_token
         normalized["provider"] = provider
-        normalized["type"] = normalized.get("type") or "free"
+        account_type = self._normalize_account_type(normalized.get("type")) or self._search_account_type(normalized) or "free"
+        normalized["type"] = account_type
         normalized["status"] = normalized.get("status") or "正常"
-        normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
+        quota_value = normalized.get("quota")
+        normalized["quota"] = max(0, int(quota_value if quota_value is not None else 0))
         normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))
         normalized["email"] = normalized.get("email") or None
         normalized["user_id"] = normalized.get("user_id") or None
@@ -585,8 +616,9 @@ class AccountService:
         account = self.get_account(access_token) or {}
         if normalize_provider(account.get("provider")) != GPT_PROVIDER:
             return dict(account) if account else None
+        from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
+
         try:
-            from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
             with OpenAIBackendAPI(access_token) as backend:
                 result = backend.get_user_info()
         except InvalidAccessTokenError:
