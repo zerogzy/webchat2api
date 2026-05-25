@@ -107,7 +107,7 @@ docker run -d \
 
 ### Docker Compose 部署
 
-`docker-compose.yml` 使用本地镜像 `webchat2api:latest`。请先按上面的命令构建镜像，再启动服务：
+`docker-compose.yml` 使用本地镜像 `webchat2api:latest`。请先按上面的命令构建镜像，再启动服务。普通 Compose 文件仍是跨平台默认选择，即使没有显式 `networks:` 配置，Docker Compose 也会自动创建默认 bridge 网络：
 
 ```bash
 docker compose up -d
@@ -126,6 +126,28 @@ docker logs -f webchat2api
 docker restart webchat2api
 docker compose down
 ```
+
+Linux 服务器如果需要绕过 Docker 默认 bridge 网络，让容器直接使用宿主机网络，可改用独立的 `docker-compose.host.yml`。该文件使用 `network_mode: host`，只适用于 Linux Docker Engine，不适用于 Docker Desktop 的常规跨平台场景。它不是覆盖文件，不要和 `docker-compose.yml` 叠加使用。
+
+> [!WARNING]
+> host 网络模式会让服务直接暴露在宿主机网络的 `83` 端口，Docker `ports` 无法限制访问范围。启动前必须设置强随机 `LOGIN_SECRET`，并用宿主机防火墙、安全组或反向代理访问控制限制入口。
+
+```bash
+export LOGIN_SECRET=your-strong-random-secret
+docker compose -f docker-compose.host.yml up -d
+docker logs -f webchat2api
+docker compose -f docker-compose.host.yml down
+```
+
+如需重新构建镜像后再启动：
+
+```bash
+docker build -t webchat2api:latest .
+export LOGIN_SECRET=your-strong-random-secret
+docker compose -f docker-compose.host.yml up -d
+```
+
+host 网络模式下没有 `ports` 映射，服务会直接监听宿主机的 `83` 端口。若宿主机代理监听在 loopback，可在 `docker-compose.host.yml` 中设置 `PROXY_URL: http://127.0.0.1:7890`。
 
 ### 本地开发
 

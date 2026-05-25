@@ -1,0 +1,20 @@
+name: webchat2api
+
+services:
+  webchat2api:
+    image: webchat2api:latest
+    container_name: webchat2api
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data:/app/data
+      # Optional local override: cp config.example.json config.json, then uncomment.
+      # Do not bind config.json read-only if you need Web UI settings saves.
+      # - ./config.json:/app/config.json
+    environment:
+      LOGIN_SECRET: ${LOGIN_SECRET:?set LOGIN_SECRET before starting}
+      STORAGE_BACKEND: json
+      # Host network mode shares the Linux host network namespace.
+      # If your host proxy listens on loopback, use http://127.0.0.1:7890.
+      # PROXY_URL: http://127.0.0.1:7890
+      # WEBCHAT2API_BASE_URL: https://your-domain.com
