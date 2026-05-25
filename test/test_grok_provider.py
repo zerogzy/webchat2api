@@ -611,7 +611,7 @@ class GrokProviderTests(unittest.TestCase):
         self.assertIn("data:image/png;base64,abc", response["choices"][0]["message"]["content"])
 
     def test_unsupported_grok_image_model_raises_openai_error(self) -> None:
-        spec = resolve_model("grok-imagine-image-pro")
+        spec = resolve_model("grok-imagine-image-edit")
         with self.assertRaises(FakeImageGenerationError) as context:
             list(grok.app_chat_image_outputs({"prompt": "Draw"}, spec, "Draw"))
 
