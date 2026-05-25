@@ -406,6 +406,29 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": "Hi"})
         self.assertEqual(chunks[2]["choices"][0]["finish_reason"], "stop")
 
+    def test_streaming_grok_console_completion_includes_usage_when_requested(self) -> None:
+        body = {
+            "model": "grok-4.20-reasoning",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        with (
+            mock.patch.object(
+                grok,
+                "console_chat_completion",
+                return_value=grok.GrokConsoleCompletion(content="Hi", reasoning_content="think"),
+            ),
+            mock.patch.object(openai_v1_chat_complete, "count_message_tokens", return_value=11),
+            mock.patch.object(openai_v1_chat_complete, "count_text_tokens", side_effect=[2, 3]),
+        ):
+            chunks = list(openai_v1_chat_complete.handle(body))
+
+        self.assertIsNone(chunks[0]["usage"])
+        self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(chunks[-1]["choices"], [])
+        self.assertEqual(chunks[-1]["usage"], {"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16})
+
     def test_streaming_grok_app_chat_completion_emits_reasoning_content(self) -> None:
         body = {
             "model": "grok-4.20-heavy",
@@ -422,6 +445,51 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "reasoning_content": "think"})
         self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": "Hi"})
         self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
+
+    def test_streaming_grok_app_chat_completion_includes_usage_when_requested(self) -> None:
+        body = {
+            "model": "grok-4.20-heavy",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        events = [
+            {"result": {"response": {"token": "think", "isThinking": True}}},
+            {"result": {"response": {"token": "Hi"}}},
+            {"result": {"response": {"token": " there", "messageTag": "final"}}},
+        ]
+        with (
+            mock.patch.object(grok, "app_chat_completion_events", return_value=iter(events)),
+            mock.patch.object(openai_v1_chat_complete, "count_message_tokens", return_value=7),
+            mock.patch.object(openai_v1_chat_complete, "count_text_tokens", side_effect=[4, 2]),
+        ):
+            chunks = list(openai_v1_chat_complete.handle(body))
+
+        self.assertIsNone(chunks[0]["usage"])
+        self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(chunks[-1]["choices"], [])
+        self.assertEqual(chunks[-1]["usage"], {"prompt_tokens": 7, "completion_tokens": 6, "total_tokens": 13})
+
+    def test_streaming_text_completion_includes_usage_when_requested(self) -> None:
+        body = {
+            "model": "auto",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        with (
+            mock.patch.object(openai_v1_chat_complete, "ConversationRequest", return_value=object()),
+            mock.patch.object(openai_v1_chat_complete, "stream_text_deltas", return_value=iter(["Hi", " there"])),
+            mock.patch.object(openai_v1_chat_complete, "count_message_tokens", return_value=5),
+            mock.patch.object(openai_v1_chat_complete, "count_text_tokens", return_value=8),
+        ):
+            chunks = list(openai_v1_chat_complete.handle(body))
+
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "content": "Hi"})
+        self.assertIsNone(chunks[0]["usage"])
+        self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(chunks[-1]["choices"], [])
+        self.assertEqual(chunks[-1]["usage"], {"prompt_tokens": 5, "completion_tokens": 8, "total_tokens": 13})
 
     def test_non_streaming_grok_app_chat_completion_includes_reasoning_content(self) -> None:
         body = {
