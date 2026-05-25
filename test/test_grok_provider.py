@@ -1,90 +1,33 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any, cast
+
+from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_tiktoken_stub
+
+install_curl_cffi_stub()
+install_fastapi_stubs()
+install_pil_stub()
+install_pybase64_stub()
+install_tiktoken_stub()
+
 import json
 import sys
 import types
 import unittest
 from unittest import mock
 
-if "curl_cffi" not in sys.modules:
-    curl_cffi = types.ModuleType("curl_cffi")
-    requests_module = types.SimpleNamespace(
-        Session=object,
-        Response=object,
-        exceptions=types.SimpleNamespace(RequestException=Exception),
-    )
-    curl_cffi.requests = requests_module
-    sys.modules["curl_cffi"] = curl_cffi
-    sys.modules["curl_cffi.requests"] = requests_module
-
-if "tiktoken" not in sys.modules:
-    tiktoken = types.ModuleType("tiktoken")
-
-    class FakeEncoding:
-        def encode(self, text: str) -> list[str]:
-            return list(text)
-
-    tiktoken.get_encoding = lambda name: FakeEncoding()
-    tiktoken.encoding_for_model = lambda model: FakeEncoding()
-    sys.modules["tiktoken"] = tiktoken
-
-if "fastapi" not in sys.modules:
-    fastapi = types.ModuleType("fastapi")
-
-    class HTTPException(Exception):
-        def __init__(self, status_code: int, detail: object = None) -> None:
-            super().__init__(detail)
-            self.status_code = status_code
-            self.detail = detail
-
-    fastapi.HTTPException = HTTPException
-    sys.modules["fastapi"] = fastapi
-
-conversation = types.ModuleType("services.protocol.conversation")
-conversation.ConversationRequest = object
-class FakeImageOutput:
-    def __init__(self, kind: str, model: str, index: int, total: int, text: str = "", data: list[dict[str, object]] | None = None, upstream_event_type: str = "") -> None:
-        self.kind = kind
-        self.model = model
-        self.index = index
-        self.total = total
-        self.text = text
-        self.data = data or []
-        self.upstream_event_type = upstream_event_type
-
-
-class FakeImageGenerationError(Exception):
-    def __init__(self, message: str, status_code: int = 502, error_type: str = "server_error", code: str | None = "upstream_error", param: str | None = None) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.error_type = error_type
-        self.code = code
-        self.param = param
-
-    def to_openai_error(self) -> dict[str, object]:
-        return {"error": {"message": str(self), "type": self.error_type, "param": self.param, "code": self.code}}
-
-
-conversation.ImageOutput = FakeImageOutput
-conversation.ImageGenerationError = FakeImageGenerationError
-conversation.format_image_result = lambda items, prompt, response_format, base_url=None, created=None: {"created": created or 1, "data": items}
-conversation.collect_image_outputs = lambda *args, **kwargs: []
-conversation.collect_text = lambda *args, **kwargs: ""
-conversation.count_message_tokens = lambda *args, **kwargs: 0
-conversation.count_text_tokens = lambda *args, **kwargs: 0
-conversation.encode_images = lambda images: []
-conversation.normalize_messages = lambda messages, system=None: messages
-conversation.stream_image_outputs_with_pool = lambda *args, **kwargs: iter(())
-conversation.stream_text_deltas = lambda *args, **kwargs: iter(())
-conversation.text_backend = lambda: object()
-sys.modules["services.protocol.conversation"] = conversation
-
-from fastapi import HTTPException
+HTTPException = cast(type[Exception], getattr(sys.modules["fastapi"], "HTTPException"))
 
 from services.models import resolve_model
 from services.network import flaresolverr
 from services.protocol import openai_v1_chat_complete, openai_v1_response
+from services.protocol.conversation import ImageGenerationError, ImageOutput
 from services.providers import grok
+
+
+def _chat_chunks(chunks: object) -> list[Mapping[str, Any]]:
+    return cast(list[Mapping[str, Any]], list(cast(Any, chunks)))
 
 
 class GrokProviderTests(unittest.TestCase):
@@ -467,7 +410,7 @@ class GrokProviderTests(unittest.TestCase):
             mock.patch.object(grok, "console_chat_completion_events", return_value=iter(events)) as patched_stream,
             mock.patch.object(grok, "console_chat_completion") as patched_blocking,
         ):
-            chunks = list(openai_v1_chat_complete.handle(body))
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
 
         patched_stream.assert_called_once()
         patched_blocking.assert_not_called()
@@ -500,7 +443,7 @@ class GrokProviderTests(unittest.TestCase):
             mock.patch.object(grok, "app_chat_completion_events") as patched_app_chat,
             mock.patch.object(grok, "console_chat_completion") as patched_blocking,
         ):
-            chunks = list(openai_v1_chat_complete.handle(body))
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
 
         patched_console.assert_called_once()
         patched_app_chat.assert_not_called()
@@ -526,7 +469,7 @@ class GrokProviderTests(unittest.TestCase):
             mock.patch.object(openai_v1_chat_complete, "count_message_tokens", return_value=11),
             mock.patch.object(openai_v1_chat_complete, "count_text_tokens", side_effect=[2, 3]),
         ):
-            chunks = list(openai_v1_chat_complete.handle(body))
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
 
         patched_console.assert_called_once()
         patched_blocking.assert_not_called()
@@ -547,7 +490,7 @@ class GrokProviderTests(unittest.TestCase):
             {"result": {"response": {"token": "Hi", "messageTag": "final"}}},
         ]
         with mock.patch.object(grok, "app_chat_completion_events", return_value=iter(events)):
-            chunks = list(openai_v1_chat_complete.handle(body))
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
 
         self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "reasoning_content": "think"})
         self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": "Hi"})
@@ -570,7 +513,7 @@ class GrokProviderTests(unittest.TestCase):
             mock.patch.object(openai_v1_chat_complete, "count_message_tokens", return_value=7),
             mock.patch.object(openai_v1_chat_complete, "count_text_tokens", side_effect=[4, 2]),
         ):
-            chunks = list(openai_v1_chat_complete.handle(body))
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
 
         self.assertIsNone(chunks[0]["usage"])
         self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], "stop")
@@ -585,12 +528,13 @@ class GrokProviderTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "Hello"}],
         }
         with (
+            mock.patch.object(openai_v1_chat_complete, "text_backend", return_value=object()),
             mock.patch.object(openai_v1_chat_complete, "ConversationRequest", return_value=object()),
             mock.patch.object(openai_v1_chat_complete, "stream_text_deltas", return_value=iter(["Hi", " there"])),
             mock.patch.object(openai_v1_chat_complete, "count_message_tokens", return_value=5),
             mock.patch.object(openai_v1_chat_complete, "count_text_tokens", return_value=8),
         ):
-            chunks = list(openai_v1_chat_complete.handle(body))
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
 
         self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "content": "Hi"})
         self.assertIsNone(chunks[0]["usage"])
@@ -674,6 +618,7 @@ class GrokProviderTests(unittest.TestCase):
             "input": "Hello",
         }
         with (
+            mock.patch.object(openai_v1_response, "text_backend", return_value=object()),
             mock.patch.object(openai_v1_response, "ConversationRequest", lambda **kwargs: kwargs),
             mock.patch.object(openai_v1_response, "stream_text_deltas", return_value=iter(["generic"])) as patched_stream,
             mock.patch.object(grok, "console_chat_completion") as patched_console,
@@ -700,7 +645,7 @@ class GrokProviderTests(unittest.TestCase):
             "model": "grok-imagine-image-lite",
             "messages": [{"role": "user", "content": "Draw a cat"}],
         }
-        outputs = [FakeImageOutput(kind="result", model="grok-imagine-image-lite", index=1, total=1, data=[{"url": "https://assets.grok.com/cat.png"}])]
+        outputs = [ImageOutput(kind="result", model="grok-imagine-image-lite", index=1, total=1, data=[{"url": "https://assets.grok.com/cat.png"}])]
         result = {"created": 1, "data": [{"b64_json": "abc", "url": "https://assets.grok.com/cat.png"}]}
         with (
             mock.patch.object(grok, "app_chat_image_outputs", return_value=iter(outputs)) as patched,
@@ -713,7 +658,7 @@ class GrokProviderTests(unittest.TestCase):
 
     def test_unsupported_grok_image_model_raises_openai_error(self) -> None:
         spec = resolve_model("grok-imagine-image-edit")
-        with self.assertRaises(FakeImageGenerationError) as context:
+        with self.assertRaises(ImageGenerationError) as context:
             list(grok.app_chat_image_outputs({"prompt": "Draw"}, spec, "Draw"))
 
         self.assertEqual(context.exception.status_code, 400)
