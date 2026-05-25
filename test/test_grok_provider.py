@@ -950,6 +950,48 @@ class TestBrowserBridge(unittest.TestCase):
         self.assertIn("account may lack required tier", str(ctx.exception))
 
     @mock.patch("services.providers.grok.config")
+    def test_app_chat_prefers_direct_when_bridge_is_auto_detected(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = ""
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        direct_event = {"result": {"response": {"token": "hi"}}}
+        with (
+            mock.patch.object(client, "_stream_direct_events", return_value=iter([direct_event])) as direct,
+            mock.patch.object(client, "_try_browser_bridge") as bridge,
+        ):
+            self.assertEqual(list(client.stream_events({"message": "test"})), [direct_event])
+        direct.assert_called_once()
+        bridge.assert_not_called()
+
+    @mock.patch("services.providers.grok.config")
+    def test_app_chat_uses_explicit_bridge_before_direct(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = "http://bridge.local"
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        with (
+            mock.patch.object(client, "_try_browser_bridge", return_value=['{"result":{"response":{"token":"hi"}}}']) as bridge,
+            mock.patch.object(client, "_stream_direct_events") as direct,
+        ):
+            events = list(client.stream_events({"message": "test"}))
+        self.assertEqual(events, [{"result": {"response": {"token": "hi"}}}])
+        bridge.assert_called_once()
+        direct.assert_not_called()
+
+    @mock.patch("services.providers.grok.config")
+    def test_app_chat_falls_back_to_bridge_after_direct_403(self, mock_config):
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
+        mock_config.browser_bridge_url = ""
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        with (
+            mock.patch.object(client, "_stream_direct_events", side_effect=GrokConsoleError("forbidden", 403, 403)) as direct,
+            mock.patch.object(client, "_try_browser_bridge", return_value=['{"result":{"response":{"token":"hi"}}}']) as bridge,
+        ):
+            events = list(client.stream_events({"message": "test"}))
+        self.assertEqual(events, [{"result": {"response": {"token": "hi"}}}])
+        direct.assert_called_once()
+        bridge.assert_called_once()
+
+    @mock.patch("services.providers.grok.config")
     def test_detect_bridge_url_auto_probes(self, mock_config):
         import services.providers.grok as grok_mod
         mock_config.browser_bridge_url = ""

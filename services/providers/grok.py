@@ -721,12 +721,7 @@ class GrokAppChatClient:
             logger.warning({"event": "browser_bridge_unavailable"})
             return None
 
-    def stream_events(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        bridge_lines = self._try_browser_bridge(payload)
-        if bridge_lines is not None:
-            yield from app_chat_line_events(bridge_lines)
-            return
-        response = None
+    def _stream_direct_events(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
         try:
             response = self._call_with_retry(
                 lambda: self.session.post(
@@ -757,6 +752,26 @@ class GrokAppChatClient:
         if response.status_code >= 400:
             raise classify_app_chat_upstream_error(int(response.status_code), self.access_token)
         yield from app_chat_line_events(response.iter_lines())
+
+    def stream_events(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        bridge_first = bool(config.browser_bridge_url)
+        if bridge_first:
+            bridge_lines = self._try_browser_bridge(payload)
+            if bridge_lines is not None:
+                yield from app_chat_line_events(bridge_lines)
+                return
+        try:
+            yield from self._stream_direct_events(payload)
+            return
+        except GrokConsoleError as exc:
+            status = exc.upstream_status or exc.status_code
+            if bridge_first or status not in {403, 408, 502, 503, 504}:
+                raise
+            bridge_lines = self._try_browser_bridge(payload)
+            if bridge_lines is None:
+                raise
+            logger.info({"event": "grok_app_chat_direct_fallback_to_bridge", "status": status})
+            yield from app_chat_line_events(bridge_lines)
 
 
 def app_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
