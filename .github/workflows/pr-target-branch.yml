@@ -113,9 +113,14 @@ jobs:
                   name: wrongTargetBranchLabel,
                 });
               } catch (error) {
-                if (error.status !== 404) {
-                  throw error;
+                if (error.status === 404) {
+                  return;
                 }
+                if (error.status === 403) {
+                  core.info(`Could not remove ${wrongTargetBranchLabel} label: ${error.message}`);
+                  return;
+                }
+                throw error;
               }
             };
 
