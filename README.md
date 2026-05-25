@@ -148,7 +148,7 @@ npm run dev
 
 Grok Console 与 grok.com app-chat 是不同上游路径。本项目没有接入官方 xAI API，也不声称提供官方兼容能力。Console 路径可使用 `network_profiles.grok_console.cf_clearance` 附加手动 Cookie；app-chat 路径可使用 `network_profiles.grok_app_chat` 覆盖 UA、impersonate、`cf_clearance`、`cf_cookies`、`sec-ch-ua`、`x-statsig-id` 等字段。
 
-如配置 `flaresolverr_url`，直接 app-chat 请求遇到 Cloudflare 或 403 时会尝试通过 FlareSolverr 刷新 clearance 并重试。Browser Bridge 是独立浏览器路径，后端会优先使用 `browser_bridge_url`，未配置时会探测 `http://127.0.0.1:3080/health`。Browser Bridge 的接口是 `POST /api/chat {sso,payload}` 和 `GET /health`，请求会经真实 Chromium 页面发往 grok.com。
+如配置 `flaresolverr_url`，直接 app-chat 请求遇到 Cloudflare 或 403 时会尝试通过 FlareSolverr 刷新 clearance 并重试。Browser Bridge 是独立浏览器路径；显式配置 `browser_bridge_url` 时，后端会优先使用该 Bridge。未配置时，app-chat 默认先走直接请求；直接请求遇到 `403`、`408`、`502`、`503`、`504` 时，才会尝试探测并回退到 `http://127.0.0.1:3080/health` 对应的 Browser Bridge。Browser Bridge 的接口是 `POST /api/chat {sso,payload}` 和 `GET /health`，请求会经真实 Chromium 页面发往 grok.com。
 
 > [!WARNING]
 > Cloudflare、WAF、账号风控和上游配额都可能变化。手动 clearance、FlareSolverr 和 Browser Bridge 都是尽力而为，不能保证长期可用。
