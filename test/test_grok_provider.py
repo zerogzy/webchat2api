@@ -130,6 +130,17 @@ class GrokProviderTests(unittest.TestCase):
 
         self.assertEqual(payload["tools"], [web_search, x_search])
 
+    def test_build_console_payload_appends_web_search_to_x_search_only(self) -> None:
+        spec = resolve_model("grok-4.3")
+        x_search = {"type": "x_search", "post_favorite_count": 10}
+        payload = grok.build_console_payload(
+            spec,
+            {"tools": [{"type": "image_generation"}, x_search]},
+            [{"role": "user", "content": "Search X and the web."}],
+        )
+
+        self.assertEqual(payload["tools"], [x_search, {"type": "web_search"}])
+
     def test_build_console_payload_preserves_response_tool_controls(self) -> None:
         spec = resolve_model("grok-4.3")
         payload = grok.build_console_payload(
@@ -308,6 +319,24 @@ class GrokProviderTests(unittest.TestCase):
 
         self.assertEqual(headers["Cookie"], "sso=stored; sso-rw=stored; cf_clearance=profile-clearance")
         self.assertNotIn("Authorization", headers)
+
+    def test_build_app_chat_payload_enables_web_search_for_text(self) -> None:
+        spec = resolve_model("grok-4.20-heavy")
+        payload = grok.build_app_chat_payload(
+            spec,
+            {},
+            [{"role": "user", "content": "Search the web"}],
+        )
+
+        self.assertFalse(payload["disableSearch"])
+        self.assertEqual(payload["toolOverrides"], {
+            "imageGen": False,
+            "webSearch": True,
+            "xSearch": False,
+            "xMediaSearch": False,
+            "trendsSearch": False,
+            "xPostAnalyze": False,
+        })
 
     def test_build_app_chat_payload_uses_mode_tier_and_image_flags(self) -> None:
         spec = resolve_model("grok-4.20-heavy")

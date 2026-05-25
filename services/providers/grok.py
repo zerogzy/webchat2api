@@ -800,7 +800,7 @@ def build_app_chat_payload(
         "temporary": True,
         "toolOverrides": {
             "imageGen": False,
-            "webSearch": False,
+            "webSearch": not image_generation,
             "xSearch": False,
             "xMediaSearch": False,
             "trendsSearch": False,
