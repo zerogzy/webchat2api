@@ -24,6 +24,7 @@ CONSOLE_BASE_URL = "https://console.x.ai"
 CONSOLE_RESPONSES_URL = f"{CONSOLE_BASE_URL}/v1/responses"
 APP_CHAT_BASE_URL = "https://grok.com"
 APP_CHAT_NEW_CONVERSATION_URL = f"{APP_CHAT_BASE_URL}/rest/app-chat/conversations/new"
+APP_CHAT_RATE_LIMITS_URL = f"{APP_CHAT_BASE_URL}/rest/rate-limits"
 GROK_ASSET_BASE_URL = "https://assets.grok.com/"
 GROK_APP_CHAT_STATSIG_ID = "0196a8f6-0501-79f8-8d74-a2f2c0f5f5f5"
 _APP_CHAT_CLEARANCE_LOCK = threading.Lock()
@@ -34,10 +35,26 @@ _bridge_probed = False
 
 
 class GrokConsoleError(RuntimeError):
-    def __init__(self, message: str, status_code: int = 502, upstream_status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        upstream_status: int | None = None,
+        code: str | None = None,
+        extra_detail: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.upstream_status = upstream_status
+        self.code = code
+        self.extra_detail = extra_detail or {}
+
+    def to_http_detail(self) -> dict[str, Any]:
+        detail: dict[str, Any] = {"error": str(self)}
+        if self.code:
+            detail["code"] = self.code
+        detail.update(self.extra_detail)
+        return detail
 
 
 @dataclass(frozen=True)
@@ -49,6 +66,12 @@ class GrokConsoleCompletion:
     raw_response: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class GrokConsoleStreamDelta:
+    content: str = ""
+    reasoning_content: str = ""
+
+
 _THINKING_SUMMARY_RE = re.compile(
     r"^\s*(?:\*\*)?\s*(?:思考摘要|思考总结|thinking\s+summary|thought\s+summary|reasoning\s+summary|thinking|reasoning)\s*(?:\*\*\s*[:：]|[:：]\s*(?:\*\*)?)\s*(.*)$",
     re.IGNORECASE,
@@ -57,6 +80,7 @@ _ANSWER_SUMMARY_RE = re.compile(
     r"^\s*(?:\*\*)?\s*(?:答案|回答|answer|final\s+answer|response)\s*(?:\*\*\s*[:：]|[:：]\s*(?:\*\*)?)\s*(.*)$",
     re.IGNORECASE,
 )
+_CONSOLE_SEARCH_TOOL_TYPES = {"web_search", "x_search"}
 
 
 def split_visible_console_reasoning(text: str) -> tuple[str, str]:
@@ -136,6 +160,19 @@ def build_console_input(messages: list[dict[str, Any]]) -> tuple[str, list[dict[
     return "\n\n".join(instructions).strip(), input_items
 
 
+def _console_search_tools(tools: object) -> list[dict[str, Any]]:
+    search_tools: list[dict[str, Any]] = []
+    if isinstance(tools, list):
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            if str(tool.get("type") or "") in _CONSOLE_SEARCH_TOOL_TYPES:
+                search_tools.append(dict(tool))
+    if not any(tool.get("type") == "web_search" for tool in search_tools):
+        search_tools.append({"type": "web_search"})
+    return search_tools
+
+
 def build_console_payload(spec: ModelSpec, body: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
     instructions, input_items = build_console_input(messages)
     if not input_items:
@@ -143,6 +180,7 @@ def build_console_payload(spec: ModelSpec, body: dict[str, Any], messages: list[
     payload: dict[str, Any] = {
         "model": spec.upstream_model or spec.id,
         "input": input_items,
+        "tools": _console_search_tools(body.get("tools")),
     }
     request_instructions = str(body.get("instructions") or "").strip()
     merged_instructions = "\n\n".join(item for item in [request_instructions, instructions] if item)
@@ -152,6 +190,9 @@ def build_console_payload(spec: ModelSpec, body: dict[str, Any], messages: list[
         if body.get(key) is not None:
             target_key = "max_output_tokens" if key == "max_tokens" else key
             payload[target_key] = body[key]
+    for key in ("tool_choice", "parallel_tool_calls"):
+        if body.get(key) is not None:
+            payload[key] = body[key]
     reasoning_effort = str(body.get("reasoning_effort") or spec.default_reasoning_effort or "").strip().lower()
     if reasoning_effort and reasoning_effort != "none":
         payload["reasoning"] = {"effort": "high" if reasoning_effort == "xhigh" else reasoning_effort}
@@ -209,6 +250,125 @@ def extract_console_completion(payload: dict[str, Any]) -> GrokConsoleCompletion
     )
 
 
+def _text_field(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, dict):
+        return ""
+    for key in ("text", "content", "output_text", "reasoning_content", "summary_text"):
+        text = value.get(key)
+        if isinstance(text, str) and text:
+            return text
+    return ""
+
+
+def extract_console_stream_delta(event: dict[str, Any]) -> GrokConsoleStreamDelta:
+    event_type = str(event.get("type") or "").lower()
+    if event_type and "delta" not in event_type:
+        return GrokConsoleStreamDelta()
+    text = _text_field(event.get("delta"))
+    if not text:
+        text = _text_field(event)
+    if not text:
+        return GrokConsoleStreamDelta()
+    if "reasoning" in event_type or "thinking" in event_type:
+        return GrokConsoleStreamDelta(reasoning_content=text)
+    return GrokConsoleStreamDelta(content=text)
+
+
+def _parse_console_stream_payload(payload: str, current_event: str) -> dict[str, Any] | None:
+    if not payload:
+        return None
+    try:
+        event = json.loads(payload)
+    except json.JSONDecodeError:
+        logger.warning({"event": "grok_console_stream_invalid_json"})
+        return None
+    if not isinstance(event, dict):
+        return None
+    if current_event and not event.get("type"):
+        event = {"type": current_event, **event}
+    return event
+
+
+def _iter_console_stream_events(lines: Iterable[object]) -> Iterator[dict[str, Any]]:
+    current_event = ""
+    data_lines: list[str] = []
+
+    def flush_data() -> dict[str, Any] | None:
+        nonlocal current_event
+        if not data_lines:
+            current_event = ""
+            return None
+        payload = "\n".join(data_lines).strip()
+        data_lines.clear()
+        event = _parse_console_stream_payload(payload, current_event)
+        current_event = ""
+        return event
+
+    for raw_line in lines:
+        if raw_line is None:
+            continue
+        line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
+        line = line.rstrip("\r\n")
+        if not line.strip():
+            event = flush_data()
+            if event is not None:
+                yield event
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            event = flush_data()
+            if event is not None:
+                yield event
+            current_event = line[6:]
+            if current_event.startswith(" "):
+                current_event = current_event[1:]
+            current_event = current_event.strip()
+            continue
+        if line.startswith("data:"):
+            payload = line[5:]
+            if payload.startswith(" "):
+                payload = payload[1:]
+            if payload.strip() == "[DONE]":
+                event = flush_data()
+                if event is not None:
+                    yield event
+                break
+            data_lines.append(payload)
+            continue
+        line = line.strip()
+        if line.startswith("{"):
+            event = flush_data()
+            if event is not None:
+                yield event
+            event = _parse_console_stream_payload(line, current_event)
+            if event is not None:
+                yield event
+
+    event = flush_data()
+    if event is not None:
+        yield event
+
+
+def _raise_for_console_stream_event(event: dict[str, Any]) -> None:
+    event_type = str(event.get("type") or "").lower()
+    if event_type not in {"error", "response.failed", "response.error", "response.incomplete", "response.cancelled"}:
+        return
+    error = event.get("error")
+    response = event.get("response")
+    if not error and isinstance(response, dict):
+        error = response.get("error") or response.get("incomplete_details")
+    if isinstance(error, dict):
+        message = str(error.get("message") or error.get("code") or error.get("reason") or event_type)
+    elif error:
+        message = str(error)
+    else:
+        message = event_type
+    raise GrokConsoleError(f"Grok upstream stream error: {message}", 502)
+
+
 def _grok_console_profile():
     return build_grok_console_profile(config.data)
 
@@ -258,6 +418,50 @@ def _feedback_status(upstream_status: int) -> str | None:
     if upstream_status in {402, 429}:
         return "限流"
     return None
+
+
+def _console_upstream_error_detail(response: object | None) -> str:
+    if response is None:
+        return ""
+    json_data: object = None
+    json_method = getattr(response, "json", None)
+    if callable(json_method):
+        try:
+            json_data = json_method()
+        except Exception:
+            json_data = None
+    if isinstance(json_data, dict):
+        error = json_data.get("error")
+        if isinstance(error, dict):
+            for key in ("message", "code", "reason", "type"):
+                value = error.get(key)
+                if value:
+                    return str(value)
+        elif error:
+            return str(error)
+        for key in ("message", "detail", "code", "reason"):
+            value = json_data.get(key)
+            if value:
+                return str(value)
+    text = getattr(response, "text", "") or ""
+    if not text:
+        content = getattr(response, "content", b"")
+        if isinstance(content, bytes):
+            text = content.decode("utf-8", errors="replace")
+    return str(text).strip()[:400]
+
+
+def _raise_console_upstream_error(access_token: str, upstream_status: int, response: object | None = None) -> None:
+    feedback_status = _feedback_status(upstream_status)
+    if feedback_status:
+        from services.account_service import account_service
+
+        account_service.update_account(access_token, {"status": feedback_status})
+    message = f"Grok upstream error (HTTP {upstream_status})"
+    detail = _console_upstream_error_detail(response)
+    if detail:
+        message = f"{message}: {detail}"
+    raise GrokConsoleError(message, _openai_status(upstream_status), upstream_status)
 
 
 class GrokConsoleClient:
@@ -310,18 +514,38 @@ class GrokConsoleClient:
         except requests.exceptions.RequestException as exc:
             raise GrokConsoleError(f"Grok upstream request failed: {exc}", 502) from exc
         if response.status_code >= 400:
-            status = int(response.status_code)
-            feedback_status = _feedback_status(status)
-            if feedback_status:
-                from services.account_service import account_service
-
-                account_service.update_account(self.access_token, {"status": feedback_status})
-            message = f"Grok upstream error (HTTP {status})"
-            raise GrokConsoleError(message, _openai_status(status), status)
+            _raise_console_upstream_error(self.access_token, int(response.status_code), response)
         data = response.json()
         if not isinstance(data, dict):
             raise GrokConsoleError("Grok upstream returned an invalid response", 502)
         return data
+
+    def stream_response(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        stream_payload = dict(payload)
+        stream_payload["stream"] = True
+        try:
+            response = self._call_with_retry(
+                lambda: self.session.post(
+                    CONSOLE_RESPONSES_URL,
+                    headers=_headers(self.access_token),
+                    json=stream_payload,
+                    timeout=self.network_profile.timeout,
+                    stream=True,
+                ),
+                context="stream_response",
+            )
+        except requests.exceptions.RequestException as exc:
+            raise GrokConsoleError(f"Grok upstream request failed: {exc}", 502) from exc
+        if response.status_code >= 400:
+            _raise_console_upstream_error(self.access_token, int(response.status_code), response)
+        try:
+            for event in _iter_console_stream_events(response.iter_lines()):
+                _raise_for_console_stream_event(event)
+                yield event
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
 
 
 def _cookie_items(cookie_header: str) -> list[tuple[str, str]]:
@@ -397,6 +621,96 @@ def _detect_bridge_url() -> str:
         pass
     _bridge_detected_url = ""
     return ""
+
+
+_BRIDGE_HEALTH_TIMEOUT = 2
+_BRIDGE_EXPLICIT_CHAT_TIMEOUT = 55
+_BRIDGE_ERROR_STATUS = {
+    "invalid_json": 400,
+    "invalid_request": 400,
+    "bridge_unavailable": 503,
+    "browser_bridge_unavailable": 503,
+    "navigation_timeout": 504,
+    "sso_unavailable": 401,
+    "page_not_prepared": 503,
+    "page_busy": 429,
+    "request_timeout": 504,
+    "upstream_error": 502,
+}
+
+
+def _browser_bridge_error_code(code: object | None) -> str:
+    normalized = str(code or "browser_bridge_unavailable").strip() or "browser_bridge_unavailable"
+    if normalized == "bridge_unavailable":
+        normalized = "browser_bridge_unavailable"
+    return normalized if normalized.startswith("grok_") else f"grok_{normalized}"
+
+
+def _parse_bridge_json_response(response: object) -> dict[str, Any]:
+    reader = getattr(response, "read", None)
+    if not callable(reader):
+        return {}
+    try:
+        raw = reader()
+    except Exception:
+        return {}
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        text = str(raw or "")
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _bridge_error_from_payload(
+    payload: dict[str, Any] | None,
+    upstream_status: int | None = None,
+    default_code: str = "browser_bridge_unavailable",
+) -> GrokConsoleError:
+    data = payload if isinstance(payload, dict) else {}
+    raw_code = data.get("code") or data.get("last_error_code") or default_code
+    bridge_code = str(raw_code or default_code)
+    status = _BRIDGE_ERROR_STATUS.get(bridge_code, _openai_status(upstream_status or 503))
+    message = str(data.get("error") or data.get("last_error") or "Browser Bridge is unavailable")
+    if bridge_code == "navigation_timeout":
+        message = f"Grok app-chat navigation timed out via Browser Bridge: {message}"
+    elif bridge_code == "sso_unavailable":
+        message = f"Grok app-chat authentication failed via Browser Bridge: {message}"
+    elif bridge_code == "page_not_prepared":
+        message = f"Grok app-chat Browser Bridge page was not prepared: {message}"
+    elif bridge_code in {"bridge_unavailable", "browser_bridge_unavailable"}:
+        message = f"Grok app-chat Browser Bridge unavailable: {message}"
+    else:
+        message = f"Grok app-chat via Browser Bridge failed: {message}"
+    return GrokConsoleError(
+        message,
+        status,
+        upstream_status,
+        code=_browser_bridge_error_code(bridge_code),
+        extra_detail={"bridge_code": bridge_code},
+    )
+
+
+def _preflight_browser_bridge_health(bridge_url: str) -> None:
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"{bridge_url}/health", timeout=_BRIDGE_HEALTH_TIMEOUT) as response:
+            health = _parse_bridge_json_response(response)
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise GrokConsoleError(
+            f"Grok app-chat Browser Bridge unavailable: {exc}",
+            503,
+            None,
+            code="grok_browser_bridge_unavailable",
+            extra_detail={"bridge_code": "browser_bridge_unavailable"},
+        ) from exc
+    if health.get("status") != "ok":
+        raise _bridge_error_from_payload(health, 503, "browser_bridge_unavailable")
 
 
 def app_chat_headers(access_token: str, account: dict[str, Any] | None = None) -> dict[str, str]:
@@ -487,7 +801,7 @@ def build_app_chat_payload(
         "temporary": True,
         "toolOverrides": {
             "imageGen": False,
-            "webSearch": False,
+            "webSearch": not image_generation,
             "xSearch": False,
             "xMediaSearch": False,
             "trendsSearch": False,
@@ -638,15 +952,39 @@ class GrokAppChatClient:
         deadline = time.monotonic() + 60.0
 
         def on_retry(attempt, status_code, exc):
+            error = "Grok app-chat rate-limit validation failed" if context == "app_chat_rate_limits" and exc else str(exc) if exc else None
             logger.warning({
                 "event": "grok_app_chat_retry",
                 "context": context,
                 "attempt": attempt,
                 "status_code": status_code,
-                "error": str(exc) if exc else None,
+                "error": error,
             })
 
         return retry_call(fn, policy=api_policy, deadline=deadline, on_retry=on_retry)
+
+    def validate_rate_limits(self) -> dict[str, Any]:
+        try:
+            response = self._call_with_retry(
+                lambda: self.session.post(
+                    APP_CHAT_RATE_LIMITS_URL,
+                    headers=app_chat_headers(self.access_token, self.account),
+                    json={},
+                    timeout=self.network_profile.timeout,
+                ),
+                context="app_chat_rate_limits",
+            )
+        except requests.exceptions.RequestException as exc:
+            raise GrokConsoleError("Grok app-chat rate-limit validation failed", 502) from exc
+        if response.status_code >= 400:
+            raise classify_app_chat_upstream_error(int(response.status_code))
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise GrokConsoleError("Grok app-chat rate-limit validation returned an invalid response", 502) from exc
+        if not isinstance(data, dict):
+            raise GrokConsoleError("Grok app-chat rate-limit validation returned an invalid response", 502)
+        return data
 
     def _refresh_clearance(self) -> bool:
         if not config.flaresolverr_url:
@@ -676,6 +1014,7 @@ class GrokAppChatClient:
             return True
 
     def _try_browser_bridge(self, payload: dict[str, Any]) -> list[str] | None:
+        configured_bridge = bool(config.browser_bridge_url)
         bridge_url = _detect_bridge_url()
         if not bridge_url:
             return None
@@ -684,6 +1023,8 @@ class GrokAppChatClient:
             return None
         import urllib.request
         import urllib.error
+        if configured_bridge:
+            _preflight_browser_bridge_health(bridge_url)
         bridge_body = json.dumps({"sso": sso, "payload": payload}).encode()
         req = urllib.request.Request(
             f"{bridge_url}/api/chat",
@@ -691,27 +1032,36 @@ class GrokAppChatClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        timeout = _BRIDGE_EXPLICIT_CHAT_TIMEOUT if configured_bridge else 120
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 if resp.status != 200:
                     logger.warning({"event": "browser_bridge_error", "status": resp.status})
+                    if configured_bridge:
+                        raise _bridge_error_from_payload(_parse_bridge_json_response(resp), resp.status)
                     return None
                 return resp.read().decode("utf-8", errors="replace").splitlines()
         except urllib.error.HTTPError as exc:
+            payload = _parse_bridge_json_response(exc)
+            if payload.get("code"):
+                raise _bridge_error_from_payload(payload, exc.code) from exc
             msg = f"Grok app-chat forbidden (HTTP {exc.code}): account may lack required tier" if exc.code == 403 else f"Grok app-chat via bridge failed (HTTP {exc.code})"
-            raise GrokConsoleError(msg, _openai_status(exc.code), exc.code)
-        except (urllib.error.URLError, OSError, TimeoutError):
+            raise GrokConsoleError(msg, _openai_status(exc.code), exc.code) from exc
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
             global _bridge_probed
             _bridge_probed = False
             logger.warning({"event": "browser_bridge_unavailable"})
+            if configured_bridge:
+                raise GrokConsoleError(
+                    f"Grok app-chat Browser Bridge unavailable: {exc}",
+                    503,
+                    None,
+                    code="grok_browser_bridge_unavailable",
+                    extra_detail={"bridge_code": "browser_bridge_unavailable"},
+                ) from exc
             return None
 
-    def stream_events(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        bridge_lines = self._try_browser_bridge(payload)
-        if bridge_lines is not None:
-            yield from app_chat_line_events(bridge_lines)
-            return
-        response = None
+    def _stream_direct_events(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
         try:
             response = self._call_with_retry(
                 lambda: self.session.post(
@@ -743,6 +1093,31 @@ class GrokAppChatClient:
             raise classify_app_chat_upstream_error(int(response.status_code), self.access_token)
         yield from app_chat_line_events(response.iter_lines())
 
+    def stream_events(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        bridge_first = bool(config.browser_bridge_url)
+        if bridge_first:
+            bridge_lines = self._try_browser_bridge(payload)
+            if bridge_lines is not None:
+                yield from app_chat_line_events(bridge_lines)
+                return
+        try:
+            yield from self._stream_direct_events(payload)
+            return
+        except GrokConsoleError as exc:
+            status = exc.upstream_status or exc.status_code
+            if bridge_first or status not in {403, 408, 502, 503, 504}:
+                raise
+            bridge_lines = self._try_browser_bridge(payload)
+            if bridge_lines is None:
+                raise
+            logger.info({"event": "grok_app_chat_direct_fallback_to_bridge", "status": status})
+            yield from app_chat_line_events(bridge_lines)
+
+
+def validate_grok_access_token(access_token: str, account: dict[str, Any] | None = None) -> dict[str, Any]:
+    with GrokAppChatClient(access_token, account) as client:
+        return client.validate_rate_limits()
+
 
 def app_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     from services.account_service import account_service
@@ -756,7 +1131,7 @@ def app_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messages: 
         with GrokAppChatClient(access_token, account) as client:
             yield from client.stream_events(payload)
     except GrokConsoleError as exc:
-        raise HTTPException(status_code=exc.status_code, detail={"error": str(exc)}) from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
     account_service.mark_text_used(access_token)
 
 
@@ -822,12 +1197,33 @@ def console_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: lis
         with GrokConsoleClient(access_token) as client:
             response_json = client.create_response(payload)
     except GrokConsoleError as exc:
-        raise HTTPException(status_code=exc.status_code, detail={"error": str(exc)}) from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
     account_service.mark_text_used(access_token)
     completion = extract_console_completion(response_json)
     if not completion.content and not completion.reasoning_content:
         raise HTTPException(status_code=502, detail={"error": "Grok upstream response did not contain text"})
     return completion
+
+
+def console_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    from services.account_service import account_service
+
+    access_token = account_service.get_text_access_token(provider=GROK_PROVIDER)
+    if not access_token:
+        raise HTTPException(status_code=503, detail={"error": "no available Grok account"})
+    payload = build_console_payload(spec, body, messages)
+    mark_used = False
+    try:
+        with GrokConsoleClient(access_token) as client:
+            for event in client.stream_response(payload):
+                mark_used = True
+                yield event
+            mark_used = True
+    except GrokConsoleError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
+    finally:
+        if mark_used:
+            account_service.mark_text_used(access_token)
 
 
 def chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> str:

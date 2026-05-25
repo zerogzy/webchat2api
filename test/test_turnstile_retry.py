@@ -1,64 +1,17 @@
 from __future__ import annotations
 
-import sys
 import types
 import unittest
+from typing import Any
 from unittest import mock
 
-if "curl_cffi" not in sys.modules:
-    curl_cffi = types.ModuleType("curl_cffi")
-    requests_module = types.SimpleNamespace(
-        Session=object,
-        Response=object,
-        exceptions=types.SimpleNamespace(RequestException=Exception),
-    )
-    curl_cffi.requests = requests_module
-    sys.modules["curl_cffi"] = curl_cffi
-    sys.modules["curl_cffi.requests"] = requests_module
+from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_tiktoken_stub
 
-if "pybase64" not in sys.modules:
-    pybase64 = types.ModuleType("pybase64")
-    pybase64.b64encode = lambda value: value
-    pybase64.b64decode = lambda value: value
-    sys.modules["pybase64"] = pybase64
-
-if "fastapi" not in sys.modules:
-    fastapi = types.ModuleType("fastapi")
-
-    class HTTPException(Exception):
-        def __init__(self, status_code: int, detail: object = None) -> None:
-            super().__init__(detail)
-            self.status_code = status_code
-            self.detail = detail
-
-    fastapi.HTTPException = HTTPException
-    concurrency = types.ModuleType("fastapi.concurrency")
-    concurrency.run_in_threadpool = lambda func, *args, **kwargs: func(*args, **kwargs)
-    responses = types.ModuleType("fastapi.responses")
-
-    class JSONResponse:
-        pass
-
-    class StreamingResponse:
-        pass
-
-    responses.JSONResponse = JSONResponse
-    responses.StreamingResponse = StreamingResponse
-    fastapi.concurrency = concurrency
-    fastapi.responses = responses
-    sys.modules["fastapi"] = fastapi
-    sys.modules["fastapi.concurrency"] = concurrency
-    sys.modules["fastapi.responses"] = responses
-
-if "PIL" not in sys.modules:
-    pil = types.ModuleType("PIL")
-    pil.Image = object
-    sys.modules["PIL"] = pil
-
-if "tiktoken" not in sys.modules:
-    tiktoken = types.ModuleType("tiktoken")
-    tiktoken.get_encoding = lambda name: types.SimpleNamespace(encode=lambda text: list(text))
-    sys.modules["tiktoken"] = tiktoken
+install_curl_cffi_stub()
+install_fastapi_stubs()
+install_pil_stub()
+install_pybase64_stub()
+install_tiktoken_stub()
 
 from services.openai_backend_api import RetryableTurnstileError
 from services.protocol import conversation
@@ -93,7 +46,7 @@ class TurnstileRetryTests(unittest.TestCase):
             model="auto",
             messages=[{"role": "user", "content": "hello"}],
         )
-        initial_backend = types.SimpleNamespace(access_token="first-token")
+        initial_backend: Any = types.SimpleNamespace(access_token="first-token")
 
         with (
             mock.patch.object(conversation, "OpenAIBackendAPI", FakeBackend),

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
 import time
 import unittest
+from typing import Any
 
-import requests
+requests: Any = None
+if importlib.util.find_spec("requests") is not None:
+    requests = importlib.import_module("requests")
 
 from test.utils import save_image
 
@@ -12,6 +17,7 @@ AUTH_KEY = "webchat2api"
 BASE_URL = "http://localhost:83"
 
 
+@unittest.skipIf(requests is None, "requests is not installed")
 class ImageGenerationsTests(unittest.TestCase):
     def test_image_generation_http(self):
         """测试图片生成的非流式 HTTP 调用。"""

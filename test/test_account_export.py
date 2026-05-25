@@ -55,7 +55,7 @@ else:
 fastapi.APIRouter = getattr(fastapi, "APIRouter", lambda *args, **kwargs: None)
 fastapi.FastAPI = getattr(fastapi, "FastAPI", lambda *args, **kwargs: None)
 fastapi.Header = getattr(fastapi, "Header", lambda default=None, **kwargs: default)
-fastapi.HTTPException = getattr(fastapi, "HTTPException", type("HTTPException", (Exception,), {}))
+fastapi.HTTPException = getattr(fastapi, "HTTPException", type("HTTPException", (Exception,), {"__init__": lambda self, status_code=500, detail=None, **kwargs: (Exception.__init__(self, detail), setattr(self, "status_code", status_code), setattr(self, "detail", detail), setattr(self, "headers", kwargs.get("headers")))[0]}))
 fastapi_concurrency = sys.modules.get("fastapi.concurrency") or types.ModuleType("fastapi.concurrency")
 fastapi_concurrency.run_in_threadpool = getattr(fastapi_concurrency, "run_in_threadpool", lambda func, *args, **kwargs: func(*args, **kwargs))
 fastapi_responses = sys.modules.get("fastapi.responses") or types.ModuleType("fastapi.responses")
@@ -72,7 +72,8 @@ if "pydantic" not in sys.modules:
         pass
 
     pydantic.BaseModel = BaseModelStub
-    pydantic.Field = lambda default_factory=None, default=None, **kwargs: default_factory() if default_factory else default
+    pydantic.ConfigDict = lambda **kwargs: dict(kwargs)
+    pydantic.Field = lambda default=..., default_factory=None, **kwargs: default_factory() if default_factory else default
     sys.modules["pydantic"] = pydantic
 
 from services.account_service import AccountService

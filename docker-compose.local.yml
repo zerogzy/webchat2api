@@ -19,5 +19,6 @@ services:
       LOGIN_SECRET: admin
       STORAGE_BACKEND: sqlite
       DATABASE_URL: sqlite:////app/data/accounts.db
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    # 仅当 bridge 网络中的容器需要访问宿主机代理时取消注释。
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"

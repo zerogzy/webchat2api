@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
 import time
 import unittest
+from typing import Any
 
-import requests
+requests: Any = None
+if importlib.util.find_spec("requests") is not None:
+    requests = importlib.import_module("requests")
 
 from utils.helper import save_images_from_text
 
@@ -12,6 +17,7 @@ AUTH_KEY = "webchat2api"
 BASE_URL = "http://localhost:83"
 
 
+@unittest.skipIf(requests is None, "requests is not installed")
 class ChatCompletionsTests(unittest.TestCase):
     def test_text_completion_http(self):
         """测试文本对话的非流式 HTTP 调用。"""

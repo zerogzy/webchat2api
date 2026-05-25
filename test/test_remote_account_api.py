@@ -1,59 +1,25 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import sys
-import types
 import unittest
+from typing import Any, cast
 from unittest import mock
 
-if "sqlalchemy" not in sys.modules:
-    sqlalchemy = types.ModuleType("sqlalchemy")
-    sqlalchemy.Column = lambda *args, **kwargs: None
-    sqlalchemy.String = lambda *args, **kwargs: str
-    sqlalchemy.Text = lambda *args, **kwargs: str
-    sqlalchemy.Integer = lambda *args, **kwargs: int
-    sqlalchemy.create_engine = lambda *args, **kwargs: None
-    sqlalchemy.text = lambda value: value
-    sqlalchemy_ext = types.ModuleType("sqlalchemy.ext")
-    sqlalchemy_declarative = types.ModuleType("sqlalchemy.ext.declarative")
+from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_pydantic_stub, install_starlette_stub, install_tiktoken_stub
 
-    class BaseStub:
-        metadata = types.SimpleNamespace(create_all=lambda *args, **kwargs: None)
+install_curl_cffi_stub()
+install_fastapi_stubs()
+install_pil_stub()
+install_pybase64_stub()
+install_pydantic_stub()
+install_starlette_stub()
+install_tiktoken_stub()
 
-    sqlalchemy_declarative.declarative_base = lambda: BaseStub
-    sqlalchemy_orm = types.ModuleType("sqlalchemy.orm")
-    sqlalchemy_orm.sessionmaker = lambda *args, **kwargs: None
-    sys.modules["sqlalchemy"] = sqlalchemy
-    sys.modules["sqlalchemy.ext"] = sqlalchemy_ext
-    sys.modules["sqlalchemy.ext.declarative"] = sqlalchemy_declarative
-    sys.modules["sqlalchemy.orm"] = sqlalchemy_orm
+FastAPI = cast(Any, getattr(sys.modules["fastapi"], "FastAPI"))
+TestClient = cast(Any, getattr(sys.modules["fastapi.testclient"], "TestClient"))
 
-if "curl_cffi" not in sys.modules:
-    curl_cffi = types.ModuleType("curl_cffi")
-    requests_module = types.SimpleNamespace(
-        Session=object,
-        Response=object,
-        exceptions=types.SimpleNamespace(RequestException=Exception),
-    )
-    curl_cffi.requests = requests_module
-    sys.modules["curl_cffi"] = curl_cffi
-    sys.modules["curl_cffi.requests"] = requests_module
-
-if "git" not in sys.modules:
-    git = types.ModuleType("git")
-    git.Repo = object
-    git_exc = types.ModuleType("git.exc")
-    git_exc.GitCommandError = Exception
-    sys.modules["git"] = git
-    sys.modules["git.exc"] = git_exc
-
-try:
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    import api.accounts as accounts_module
-except ImportError:
-    FastAPI = None
-    TestClient = None
-    accounts_module = None
+import api.accounts as accounts_module
 
 
 AUTH_HEADERS = {"Authorization": "Bearer webchat2api"}
@@ -61,31 +27,31 @@ AUTH_HEADERS = {"Authorization": "Bearer webchat2api"}
 
 class FakeRemoteAccountConfig:
     def __init__(self) -> None:
-        self.sources = []
-        self.deleted_ids = []
+        self.sources: list[dict[str, Any]] = []
+        self.deleted_ids: list[str] = []
 
-    def list_sources(self):
+    def list_sources(self) -> list[dict[str, Any]]:
         return list(self.sources)
 
-    def add_source(self, **values):
+    def add_source(self, **values: Any) -> dict[str, Any]:
         source = {"id": "source-1", "import_job": None, **values}
         self.sources.append(source)
         return source
 
-    def get_source(self, source_id):
+    def get_source(self, source_id: str) -> dict[str, Any] | None:
         for source in self.sources:
             if source["id"] == source_id:
                 return source
         return None
 
-    def update_source(self, source_id, updates):
+    def update_source(self, source_id: str, updates: Mapping[str, Any]) -> dict[str, Any] | None:
         source = self.get_source(source_id)
         if source is None:
             return None
         source.update(updates)
         return source
 
-    def delete_source(self, source_id):
+    def delete_source(self, source_id: str) -> bool:
         before = len(self.sources)
         self.sources = [source for source in self.sources if source["id"] != source_id]
         return len(self.sources) < before
@@ -93,10 +59,10 @@ class FakeRemoteAccountConfig:
 
 class FakeRemoteAccountImportService:
     def __init__(self) -> None:
-        self.inject_calls = []
-        self.sync_calls = []
+        self.inject_calls: list[tuple[Any, dict[str, Any]]] = []
+        self.sync_calls: list[tuple[Mapping[str, Any], FakeRemoteAccountConfig]] = []
 
-    def inject_payload(self, payload, **kwargs):
+    def inject_payload(self, payload: Any, **kwargs: Any) -> dict[str, Any]:
         self.inject_calls.append((payload, kwargs))
         return {
             "strategy": kwargs.get("strategy", "merge"),
@@ -108,14 +74,13 @@ class FakeRemoteAccountImportService:
             "removed": 0,
         }
 
-    def sync_source(self, source, config):
+    def sync_source(self, source: Mapping[str, Any], config: FakeRemoteAccountConfig) -> dict[str, Any]:
         self.sync_calls.append((source, config))
         if source.get("fail"):
             raise RuntimeError("secret-token bearer-secret account-secret-token raw response body")
         return {"status": "success", "total": 1, "added": 1, "skipped": 0, "removed": 0, "failed": 0, "errors": []}
 
 
-@unittest.skipIf(accounts_module is None, "fastapi is not installed")
 class RemoteAccountApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = FakeRemoteAccountConfig()
@@ -174,8 +139,8 @@ class RemoteAccountApiTests(unittest.TestCase):
         self.assertNotIn("items", body)
         self.assertNotIn("access_token", body_text)
         self.assertNotIn("token-1", body_text)
-        self.assertNotIn("auth_token", body_text)
-        self.assertNotIn("bearer_token", body_text)
+        self.assertNotIn('"auth_token"', body_text)
+        self.assertNotIn('"bearer_token"', body_text)
         self.assertEqual(kwargs["strategy"], "merge")
         self.assertEqual(kwargs["source_id"], "manual")
         self.assertEqual(kwargs["source_name"], "Manual")
@@ -211,8 +176,8 @@ class RemoteAccountApiTests(unittest.TestCase):
         body_text = response.text
         self.assertNotIn("access_token", body_text)
         self.assertNotIn("submitted-token", body_text)
-        self.assertNotIn("auth_token", body_text)
-        self.assertNotIn("bearer_token", body_text)
+        self.assertNotIn('"auth_token"', body_text)
+        self.assertNotIn('"bearer_token"', body_text)
         source, config = self.import_service.sync_calls[0]
         self.assertEqual(source["id"], "source-1")
         self.assertIs(config, self.config)

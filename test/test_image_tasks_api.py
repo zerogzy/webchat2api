@@ -4,6 +4,16 @@ import base64
 import unittest
 from unittest import mock
 
+from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_pydantic_stub, install_starlette_stub, install_tiktoken_stub
+
+install_curl_cffi_stub()
+install_fastapi_stubs()
+install_pil_stub()
+install_pybase64_stub()
+install_pydantic_stub()
+install_starlette_stub()
+install_tiktoken_stub()
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 

@@ -1,88 +1,33 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any, cast
+
+from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_tiktoken_stub
+
+install_curl_cffi_stub()
+install_fastapi_stubs()
+install_pil_stub()
+install_pybase64_stub()
+install_tiktoken_stub()
+
 import json
 import sys
 import types
 import unittest
 from unittest import mock
 
-if "curl_cffi" not in sys.modules:
-    curl_cffi = types.ModuleType("curl_cffi")
-    requests_module = types.SimpleNamespace(
-        Session=object,
-        Response=object,
-        exceptions=types.SimpleNamespace(RequestException=Exception),
-    )
-    curl_cffi.requests = requests_module
-    sys.modules["curl_cffi"] = curl_cffi
-    sys.modules["curl_cffi.requests"] = requests_module
-
-if "tiktoken" not in sys.modules:
-    tiktoken = types.ModuleType("tiktoken")
-
-    class FakeEncoding:
-        def encode(self, text: str) -> list[str]:
-            return list(text)
-
-    tiktoken.get_encoding = lambda name: FakeEncoding()
-    tiktoken.encoding_for_model = lambda model: FakeEncoding()
-    sys.modules["tiktoken"] = tiktoken
-
-if "fastapi" not in sys.modules:
-    fastapi = types.ModuleType("fastapi")
-
-    class HTTPException(Exception):
-        def __init__(self, status_code: int, detail: object = None) -> None:
-            super().__init__(detail)
-            self.status_code = status_code
-            self.detail = detail
-
-    fastapi.HTTPException = HTTPException
-    sys.modules["fastapi"] = fastapi
-
-conversation = types.ModuleType("services.protocol.conversation")
-conversation.ConversationRequest = object
-class FakeImageOutput:
-    def __init__(self, kind: str, model: str, index: int, total: int, text: str = "", data: list[dict[str, object]] | None = None, upstream_event_type: str = "") -> None:
-        self.kind = kind
-        self.model = model
-        self.index = index
-        self.total = total
-        self.text = text
-        self.data = data or []
-        self.upstream_event_type = upstream_event_type
-
-
-class FakeImageGenerationError(Exception):
-    def __init__(self, message: str, status_code: int = 502, error_type: str = "server_error", code: str | None = "upstream_error", param: str | None = None) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.error_type = error_type
-        self.code = code
-        self.param = param
-
-    def to_openai_error(self) -> dict[str, object]:
-        return {"error": {"message": str(self), "type": self.error_type, "param": self.param, "code": self.code}}
-
-
-conversation.ImageOutput = FakeImageOutput
-conversation.ImageGenerationError = FakeImageGenerationError
-conversation.format_image_result = lambda items, prompt, response_format, base_url=None, created=None: {"created": created or 1, "data": items}
-conversation.collect_image_outputs = lambda *args, **kwargs: []
-conversation.collect_text = lambda *args, **kwargs: ""
-conversation.count_message_tokens = lambda *args, **kwargs: 0
-conversation.count_text_tokens = lambda *args, **kwargs: 0
-conversation.encode_images = lambda images: []
-conversation.normalize_messages = lambda messages, system=None: messages
-conversation.stream_image_outputs_with_pool = lambda *args, **kwargs: iter(())
-conversation.stream_text_deltas = lambda *args, **kwargs: iter(())
-conversation.text_backend = lambda: object()
-sys.modules["services.protocol.conversation"] = conversation
+HTTPException = cast(type[Exception], getattr(sys.modules["fastapi"], "HTTPException"))
 
 from services.models import resolve_model
 from services.network import flaresolverr
-from services.protocol import openai_v1_chat_complete
+from services.protocol import openai_v1_chat_complete, openai_v1_response
+from services.protocol.conversation import ImageGenerationError, ImageOutput
 from services.providers import grok
+
+
+def _chat_chunks(chunks: object) -> list[Mapping[str, Any]]:
+    return cast(list[Mapping[str, Any]], list(cast(Any, chunks)))
 
 
 class GrokProviderTests(unittest.TestCase):
@@ -105,6 +50,55 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(payload["input"][0]["role"], "user")
         self.assertEqual(payload["input"][0]["content"], [{"type": "input_text", "text": "Hello"}])
         self.assertEqual(payload["input"][1]["content"], [{"type": "output_text", "text": "Hi"}])
+
+    def test_build_console_payload_defaults_web_search_tool(self) -> None:
+        spec = resolve_model("grok-4.3")
+        payload = grok.build_console_payload(
+            spec,
+            {},
+            [{"role": "user", "content": "Search the web."}],
+        )
+
+        self.assertEqual(payload["tools"], [{"type": "web_search"}])
+
+    def test_build_console_payload_preserves_supported_search_tools(self) -> None:
+        spec = resolve_model("grok-4.3")
+        web_search = {"type": "web_search", "allowed_websites": ["example.com"]}
+        x_search = {"type": "x_search", "post_favorite_count": 10}
+        payload = grok.build_console_payload(
+            spec,
+            {"tools": [web_search, {"type": "image_generation"}, x_search]},
+            [{"role": "user", "content": "Search the web."}],
+        )
+
+        self.assertEqual(payload["tools"], [web_search, x_search])
+
+    def test_build_console_payload_appends_web_search_to_x_search_only(self) -> None:
+        spec = resolve_model("grok-4.3")
+        x_search = {"type": "x_search", "post_favorite_count": 10}
+        payload = grok.build_console_payload(
+            spec,
+            {"tools": [{"type": "image_generation"}, x_search]},
+            [{"role": "user", "content": "Search X and the web."}],
+        )
+
+        self.assertEqual(payload["tools"], [x_search, {"type": "web_search"}])
+
+    def test_build_console_payload_preserves_response_tool_controls(self) -> None:
+        spec = resolve_model("grok-4.3")
+        payload = grok.build_console_payload(
+            spec,
+            {
+                "tools": [{"type": "web_search"}],
+                "tool_choice": "auto",
+                "parallel_tool_calls": True,
+            },
+            [{"role": "user", "content": "Search the web"}],
+        )
+
+        self.assertEqual(payload["tools"], [{"type": "web_search"}])
+        self.assertEqual(payload["tool_choice"], "auto")
+        self.assertTrue(payload["parallel_tool_calls"])
 
     def test_extract_console_text_from_common_shapes(self) -> None:
         self.assertEqual(grok.extract_console_text({"output_text": "direct"}), "direct")
@@ -151,6 +145,24 @@ class GrokProviderTests(unittest.TestCase):
 
         self.assertEqual(response.content, "plain answer")
         self.assertEqual(response.reasoning_content, "")
+
+    def test_extract_console_stream_delta_from_output_text_delta(self) -> None:
+        delta = grok.extract_console_stream_delta({"type": "response.output_text.delta", "delta": "hello"})
+
+        self.assertEqual(delta.content, "hello")
+        self.assertEqual(delta.reasoning_content, "")
+
+    def test_extract_console_stream_delta_from_reasoning_delta(self) -> None:
+        delta = grok.extract_console_stream_delta({"type": "response.reasoning_summary_text.delta", "delta": "think"})
+
+        self.assertEqual(delta.content, "")
+        self.assertEqual(delta.reasoning_content, "think")
+
+    def test_extract_console_stream_delta_ignores_completed_snapshot(self) -> None:
+        delta = grok.extract_console_stream_delta({"type": "response.completed", "output_text": "complete text"})
+
+        self.assertEqual(delta.content, "")
+        self.assertEqual(delta.reasoning_content, "")
 
     def test_app_chat_headers_use_grok_app_shape_with_plain_token(self) -> None:
         with (
@@ -250,6 +262,24 @@ class GrokProviderTests(unittest.TestCase):
 
         self.assertEqual(headers["Cookie"], "sso=stored; sso-rw=stored; cf_clearance=profile-clearance")
         self.assertNotIn("Authorization", headers)
+
+    def test_build_app_chat_payload_enables_web_search_for_text(self) -> None:
+        spec = resolve_model("grok-4.20-heavy")
+        payload = grok.build_app_chat_payload(
+            spec,
+            {},
+            [{"role": "user", "content": "Search the web"}],
+        )
+
+        self.assertFalse(payload["disableSearch"])
+        self.assertEqual(payload["toolOverrides"], {
+            "imageGen": False,
+            "webSearch": True,
+            "xSearch": False,
+            "xMediaSearch": False,
+            "trendsSearch": False,
+            "xPostAnalyze": False,
+        })
 
     def test_build_app_chat_payload_uses_mode_tier_and_image_flags(self) -> None:
         spec = resolve_model("grok-4.20-heavy")
@@ -371,16 +401,27 @@ class GrokProviderTests(unittest.TestCase):
             "stream": True,
             "messages": [{"role": "user", "content": "Hello"}],
         }
-        with mock.patch.object(grok, "console_chat_completion", return_value=grok.GrokConsoleCompletion(content="Hi there")):
-            chunks = list(openai_v1_chat_complete.handle(body))
+        events = [
+            {"type": "response.output_text.delta", "delta": "Hi"},
+            {"type": "response.output_text.delta", "delta": " there"},
+            {"type": "response.completed"},
+        ]
+        with (
+            mock.patch.object(grok, "console_chat_completion_events", return_value=iter(events)) as patched_stream,
+            mock.patch.object(grok, "console_chat_completion") as patched_blocking,
+        ):
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
 
-        self.assertEqual(len(chunks), 2)
+        patched_stream.assert_called_once()
+        patched_blocking.assert_not_called()
+        self.assertEqual(len(chunks), 3)
         self.assertEqual(chunks[0]["object"], "chat.completion.chunk")
         self.assertEqual(chunks[0]["model"], "grok-4.20-multi-agent")
-        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "content": "Hi there"})
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "content": "Hi"})
         self.assertIsNone(chunks[0]["choices"][0]["finish_reason"])
-        self.assertEqual(chunks[1]["choices"][0]["delta"], {})
-        self.assertEqual(chunks[1]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": " there"})
+        self.assertEqual(chunks[2]["choices"][0]["delta"], {})
+        self.assertEqual(chunks[2]["choices"][0]["finish_reason"], "stop")
 
     def test_console_grok_reasoning_model_uses_console_path(self) -> None:
         spec = resolve_model("grok-4.20-reasoning")
@@ -393,18 +434,50 @@ class GrokProviderTests(unittest.TestCase):
             "stream": True,
             "messages": [{"role": "user", "content": "Hello"}],
         }
-        with mock.patch.object(
-            grok,
-            "console_chat_completion",
-            return_value=grok.GrokConsoleCompletion(content="Hi", reasoning_content="think"),
-        ) as patched_console, mock.patch.object(grok, "app_chat_completion_events") as patched_app_chat:
-            chunks = list(openai_v1_chat_complete.handle(body))
+        events = [
+            {"type": "response.reasoning_summary_text.delta", "delta": "think"},
+            {"type": "response.output_text.delta", "delta": "Hi"},
+        ]
+        with (
+            mock.patch.object(grok, "console_chat_completion_events", return_value=iter(events)) as patched_console,
+            mock.patch.object(grok, "app_chat_completion_events") as patched_app_chat,
+            mock.patch.object(grok, "console_chat_completion") as patched_blocking,
+        ):
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
 
         patched_console.assert_called_once()
         patched_app_chat.assert_not_called()
+        patched_blocking.assert_not_called()
         self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "reasoning_content": "think"})
         self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": "Hi"})
         self.assertEqual(chunks[2]["choices"][0]["finish_reason"], "stop")
+
+    def test_streaming_grok_console_completion_includes_usage_when_requested(self) -> None:
+        body = {
+            "model": "grok-4.20-reasoning",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        events = [
+            {"type": "response.reasoning_summary_text.delta", "delta": "think"},
+            {"type": "response.output_text.delta", "delta": "Hi"},
+        ]
+        with (
+            mock.patch.object(grok, "console_chat_completion_events", return_value=iter(events)) as patched_console,
+            mock.patch.object(grok, "console_chat_completion") as patched_blocking,
+            mock.patch.object(openai_v1_chat_complete, "count_message_tokens", return_value=11),
+            mock.patch.object(openai_v1_chat_complete, "count_text_tokens", side_effect=[2, 3]),
+        ):
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
+
+        patched_console.assert_called_once()
+        patched_blocking.assert_not_called()
+
+        self.assertIsNone(chunks[0]["usage"])
+        self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(chunks[-1]["choices"], [])
+        self.assertEqual(chunks[-1]["usage"], {"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16})
 
     def test_streaming_grok_app_chat_completion_emits_reasoning_content(self) -> None:
         body = {
@@ -417,11 +490,57 @@ class GrokProviderTests(unittest.TestCase):
             {"result": {"response": {"token": "Hi", "messageTag": "final"}}},
         ]
         with mock.patch.object(grok, "app_chat_completion_events", return_value=iter(events)):
-            chunks = list(openai_v1_chat_complete.handle(body))
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
 
         self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "reasoning_content": "think"})
         self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": "Hi"})
         self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
+
+    def test_streaming_grok_app_chat_completion_includes_usage_when_requested(self) -> None:
+        body = {
+            "model": "grok-4.20-heavy",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        events = [
+            {"result": {"response": {"token": "think", "isThinking": True}}},
+            {"result": {"response": {"token": "Hi"}}},
+            {"result": {"response": {"token": " there", "messageTag": "final"}}},
+        ]
+        with (
+            mock.patch.object(grok, "app_chat_completion_events", return_value=iter(events)),
+            mock.patch.object(openai_v1_chat_complete, "count_message_tokens", return_value=7),
+            mock.patch.object(openai_v1_chat_complete, "count_text_tokens", side_effect=[4, 2]),
+        ):
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
+
+        self.assertIsNone(chunks[0]["usage"])
+        self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(chunks[-1]["choices"], [])
+        self.assertEqual(chunks[-1]["usage"], {"prompt_tokens": 7, "completion_tokens": 6, "total_tokens": 13})
+
+    def test_streaming_text_completion_includes_usage_when_requested(self) -> None:
+        body = {
+            "model": "auto",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        with (
+            mock.patch.object(openai_v1_chat_complete, "text_backend", return_value=object()),
+            mock.patch.object(openai_v1_chat_complete, "ConversationRequest", return_value=object()),
+            mock.patch.object(openai_v1_chat_complete, "stream_text_deltas", return_value=iter(["Hi", " there"])),
+            mock.patch.object(openai_v1_chat_complete, "count_message_tokens", return_value=5),
+            mock.patch.object(openai_v1_chat_complete, "count_text_tokens", return_value=8),
+        ):
+            chunks = _chat_chunks(openai_v1_chat_complete.handle(body))
+
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "content": "Hi"})
+        self.assertIsNone(chunks[0]["usage"])
+        self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(chunks[-1]["choices"], [])
+        self.assertEqual(chunks[-1]["usage"], {"prompt_tokens": 5, "completion_tokens": 8, "total_tokens": 13})
 
     def test_non_streaming_grok_app_chat_completion_includes_reasoning_content(self) -> None:
         body = {
@@ -453,12 +572,80 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(message["content"], "Hi")
         self.assertEqual(message["reasoning_content"], "think")
 
+    def test_responses_grok_console_routes_to_console_completion(self) -> None:
+        body = {
+            "model": "grok-4.3",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}],
+            "tools": [{"type": "web_search"}],
+        }
+        with mock.patch.object(
+            grok,
+            "console_chat_completion",
+            return_value=grok.GrokConsoleCompletion(content="Hi from Grok"),
+        ) as patched_console:
+            response = openai_v1_response.handle(body)
+
+        patched_console.assert_called_once()
+        self.assertEqual(patched_console.call_args.args[0]["tools"], [{"type": "web_search"}])
+        self.assertEqual(response["object"], "response")
+        self.assertEqual(response["status"], "completed")
+        content = response["output"][0]["content"][0]
+        self.assertEqual(content["type"], "output_text")
+        self.assertEqual(content["text"], "Hi from Grok")
+
+    def test_streaming_responses_grok_console_emits_response_events(self) -> None:
+        body = {
+            "model": "grok-4.3",
+            "input": "Hello",
+            "stream": True,
+        }
+        with mock.patch.object(
+            grok,
+            "console_chat_completion",
+            return_value=grok.GrokConsoleCompletion(content="Hi"),
+        ) as patched_console:
+            events = list(openai_v1_response.handle(body))
+
+        patched_console.assert_called_once()
+        event_types = [event.get("type") for event in events]
+        self.assertEqual(event_types[0], "response.created")
+        self.assertIn("response.output_text.delta", event_types)
+        self.assertEqual(event_types[-1], "response.completed")
+
+    def test_responses_unknown_non_grok_model_uses_text_backend(self) -> None:
+        body = {
+            "model": "custom-text-model",
+            "input": "Hello",
+        }
+        with (
+            mock.patch.object(openai_v1_response, "text_backend", return_value=object()),
+            mock.patch.object(openai_v1_response, "ConversationRequest", lambda **kwargs: kwargs),
+            mock.patch.object(openai_v1_response, "stream_text_deltas", return_value=iter(["generic"])) as patched_stream,
+            mock.patch.object(grok, "console_chat_completion") as patched_console,
+        ):
+            response = openai_v1_response.handle(body)
+
+        patched_stream.assert_called_once()
+        patched_console.assert_not_called()
+        self.assertEqual(response["output"][0]["content"][0]["text"], "generic")
+
+    def test_responses_grok_app_chat_returns_explicit_error(self) -> None:
+        body = {
+            "model": "grok-4.20-heavy",
+            "input": "Hello",
+        }
+        with self.assertRaises(HTTPException) as ctx:
+            list(openai_v1_response.handle(body))
+
+        self.assertEqual(getattr(ctx.exception, "status_code", None), 501)
+        self.assertIn("Grok app-chat is not supported", str(getattr(ctx.exception, "detail", "")))
+
     def test_grok_image_lite_chat_routes_to_app_chat_image_outputs(self) -> None:
         body = {
             "model": "grok-imagine-image-lite",
             "messages": [{"role": "user", "content": "Draw a cat"}],
         }
-        outputs = [FakeImageOutput(kind="result", model="grok-imagine-image-lite", index=1, total=1, data=[{"url": "https://assets.grok.com/cat.png"}])]
+        outputs = [ImageOutput(kind="result", model="grok-imagine-image-lite", index=1, total=1, data=[{"url": "https://assets.grok.com/cat.png"}])]
         result = {"created": 1, "data": [{"b64_json": "abc", "url": "https://assets.grok.com/cat.png"}]}
         with (
             mock.patch.object(grok, "app_chat_image_outputs", return_value=iter(outputs)) as patched,
@@ -470,8 +657,8 @@ class GrokProviderTests(unittest.TestCase):
         self.assertIn("data:image/png;base64,abc", response["choices"][0]["message"]["content"])
 
     def test_unsupported_grok_image_model_raises_openai_error(self) -> None:
-        spec = resolve_model("grok-imagine-image-pro")
-        with self.assertRaises(FakeImageGenerationError) as context:
+        spec = resolve_model("grok-imagine-image-edit")
+        with self.assertRaises(ImageGenerationError) as context:
             list(grok.app_chat_image_outputs({"prompt": "Draw"}, spec, "Draw"))
 
         self.assertEqual(context.exception.status_code, 400)
@@ -520,6 +707,34 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(events[0]["result"]["response"]["token"], "Hi")
         account_service.mark_text_used.assert_called_once_with("selected-token")
 
+    def test_app_chat_completion_wraps_structured_grok_error_detail(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_app_chat_access_token=mock.Mock(return_value="selected-token"),
+            get_account=mock.Mock(return_value={"access_token": "selected-token"}),
+            mark_text_used=mock.Mock(),
+        )
+        sys.modules["services.account_service"] = types.SimpleNamespace(account_service=account_service)
+        spec = resolve_model("grok-4.20-heavy")
+        error = grok.GrokConsoleError(
+            "Grok app-chat navigation timed out via Browser Bridge: Navigation to grok.com timed out",
+            504,
+            504,
+            code="grok_navigation_timeout",
+            extra_detail={"bridge_code": "navigation_timeout"},
+        )
+
+        with mock.patch.object(grok, "GrokAppChatClient") as client_class:
+            client = client_class.return_value.__enter__.return_value
+            client.stream_events.side_effect = error
+            with self.assertRaises(HTTPException) as ctx:
+                list(grok.app_chat_completion_events({}, spec, [{"role": "user", "content": "Hello"}]))
+
+        self.assertEqual(ctx.exception.status_code, 504)
+        self.assertEqual(ctx.exception.detail["code"], "grok_navigation_timeout")
+        self.assertEqual(ctx.exception.detail["bridge_code"], "navigation_timeout")
+        self.assertIn("Navigation to grok.com timed out", ctx.exception.detail["error"])
+        account_service.mark_text_used.assert_not_called()
+
     def test_app_chat_headers_use_account_metadata_over_global_profile(self) -> None:
         with mock.patch.object(grok, "_grok_app_chat_profile", return_value=types.SimpleNamespace(
             user_agent="Global UA",
@@ -545,6 +760,54 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(headers["Sec-Ch-Ua-Platform"], '"Linux"')
         self.assertEqual(headers["x-statsig-id"], "global-statsig")
         self.assertEqual(headers["Cookie"], "sso=selected-token; sso-rw=selected-token; cf_bm=account-bm; cf_clearance=account-clearance")
+
+    def test_grok_app_chat_validate_rate_limits_sanitizes_request_errors(self) -> None:
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> object:
+                raise grok.requests.exceptions.RequestException("failed with Cookie: sso=secret-token")
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokAppChatClient("secret-token")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                client.validate_rate_limits()
+
+        self.assertEqual(str(ctx.exception), "Grok app-chat rate-limit validation failed")
+        self.assertNotIn("secret-token", str(ctx.exception))
+
+    def test_grok_app_chat_validate_rate_limits_sanitizes_invalid_json(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def json(self) -> object:
+                raise ValueError("invalid json near sso=secret-token")
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokAppChatClient("secret-token")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                client.validate_rate_limits()
+
+        self.assertEqual(str(ctx.exception), "Grok app-chat rate-limit validation returned an invalid response")
+        self.assertNotIn("secret-token", str(ctx.exception))
 
     def test_grok_app_chat_client_uses_account_impersonate_without_leaking_to_console_headers(self) -> None:
         settings = {
@@ -604,6 +867,321 @@ class GrokProviderTests(unittest.TestCase):
 
         self.assertEqual(created, [{"impersonate": "edge101", "verify": True}])
         self.assertEqual(client.network_profile.timeout, 60)
+
+    def test_grok_console_stream_response_parses_sse_lines(self) -> None:
+        calls: list[dict[str, object]] = []
+        closed: list[bool] = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                return iter([
+                    b": keepalive",
+                    b"event: response.output_text.delta",
+                    b'data: {"type":"response.output_text.delta","delta":"Hi"}',
+                    b"data: [DONE]",
+                    b'data: {"type":"response.output_text.delta","delta":" ignored"}',
+                ])
+
+            def close(self) -> None:
+                closed.append(True)
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                calls.append({"url": url, **kwargs})
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("token-value")
+            events = list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertEqual(events, [{"type": "response.output_text.delta", "delta": "Hi"}])
+        self.assertEqual(calls[0]["url"], grok.CONSOLE_RESPONSES_URL)
+        self.assertTrue(calls[0]["stream"])
+        self.assertEqual(calls[0]["json"]["stream"], True)
+        self.assertEqual(closed, [True])
+
+    def test_grok_console_stream_response_uses_sse_event_name_when_data_has_no_type(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                return iter([
+                    b"event: response.reasoning_summary_text.delta",
+                    b'data: {"delta":"think"}',
+                    b"event: response.output_text.delta",
+                    b'data: {"delta":"Hi"}',
+                    b"data: [DONE]",
+                ])
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("token-value")
+            events = list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertEqual(
+            events,
+            [
+                {"type": "response.reasoning_summary_text.delta", "delta": "think"},
+                {"type": "response.output_text.delta", "delta": "Hi"},
+            ],
+        )
+        self.assertEqual(grok.extract_console_stream_delta(events[0]).reasoning_content, "think")
+        self.assertEqual(grok.extract_console_stream_delta(events[1]).content, "Hi")
+
+    def test_grok_console_stream_response_aggregates_multiline_sse_data(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                return iter([
+                    b"event: response.output_text.delta",
+                    b'data: {"delta":',
+                    b'data: "Hi"}',
+                    b"",
+                    b"data:",
+                    b"",
+                    b"data: [DONE]",
+                ])
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("token-value")
+            events = list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertEqual(events, [{"type": "response.output_text.delta", "delta": "Hi"}])
+        self.assertEqual(grok.extract_console_stream_delta(events[0]).content, "Hi")
+
+    def test_grok_console_stream_response_resets_sse_event_after_dispatch(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                return iter([
+                    b"event: response.reasoning_summary_text.delta",
+                    b'data: {"delta":"think"}',
+                    b"",
+                    b'data: {"delta":"plain"}',
+                    b"",
+                    b"data: [DONE]",
+                ])
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("token-value")
+            events = list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertEqual(events[0], {"type": "response.reasoning_summary_text.delta", "delta": "think"})
+        self.assertEqual(events[1], {"delta": "plain"})
+        self.assertEqual(grok.extract_console_stream_delta(events[0]).reasoning_content, "think")
+        self.assertEqual(grok.extract_console_stream_delta(events[1]).content, "plain")
+
+    def test_grok_console_stream_marks_account_used_when_generator_is_closed(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_text_access_token=mock.Mock(return_value="selected-token"),
+            mark_text_used=mock.Mock(),
+        )
+        spec = resolve_model("grok-4.3")
+
+        class FakeClient:
+            def __init__(self, access_token: str) -> None:
+                self.access_token = access_token
+
+            def __enter__(self) -> "FakeClient":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                pass
+
+            def stream_response(self, payload):
+                yield {"type": "response.output_text.delta", "delta": "Hi"}
+                yield {"type": "response.output_text.delta", "delta": " later"}
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", FakeClient),
+        ):
+            events = grok.console_chat_completion_events(
+                {"model": "grok-4.3"},
+                spec,
+                [{"role": "user", "content": "Hello"}],
+            )
+            self.assertEqual(next(events), {"type": "response.output_text.delta", "delta": "Hi"})
+            events.close()
+
+        account_service.mark_text_used.assert_called_once_with("selected-token")
+
+    def test_grok_console_stream_marks_account_used_when_stream_completes_without_events(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_text_access_token=mock.Mock(return_value="selected-token"),
+            mark_text_used=mock.Mock(),
+        )
+        spec = resolve_model("grok-4.3")
+
+        class FakeClient:
+            def __init__(self, access_token: str) -> None:
+                self.access_token = access_token
+
+            def __enter__(self) -> "FakeClient":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                pass
+
+            def stream_response(self, payload):
+                return iter(())
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", FakeClient),
+        ):
+            events = list(grok.console_chat_completion_events(
+                {"model": "grok-4.3"},
+                spec,
+                [{"role": "user", "content": "Hello"}],
+            ))
+
+        self.assertEqual(events, [])
+        account_service.mark_text_used.assert_called_once_with("selected-token")
+
+    def test_grok_console_stream_marks_account_used_after_partial_stream_error(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_text_access_token=mock.Mock(return_value="selected-token"),
+            mark_text_used=mock.Mock(),
+        )
+        spec = resolve_model("grok-4.3")
+
+        class FakeClient:
+            def __init__(self, access_token: str) -> None:
+                self.access_token = access_token
+
+            def __enter__(self) -> "FakeClient":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                pass
+
+            def stream_response(self, payload):
+                yield {"type": "response.output_text.delta", "delta": "Hi"}
+                raise grok.GrokConsoleError("stream failed", 502)
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", FakeClient),
+        ):
+            events = grok.console_chat_completion_events(
+                {"model": "grok-4.3"},
+                spec,
+                [{"role": "user", "content": "Hello"}],
+            )
+            self.assertEqual(next(events), {"type": "response.output_text.delta", "delta": "Hi"})
+            with self.assertRaises(grok.HTTPException):
+                next(events)
+
+        account_service.mark_text_used.assert_called_once_with("selected-token")
+
+    def test_grok_console_stream_response_raises_stream_errors(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                return iter([
+                    b'data: {"type":"response.failed","error":{"message":"upstream failed"}}',
+                ])
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("token-value")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertIn("upstream failed", str(ctx.exception))
+
+    def test_grok_console_stream_response_includes_upstream_error_detail(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+
+        class FakeResponse:
+            status_code = 402
+
+            def json(self):
+                return {"error": {"message": "quota exhausted"}}
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok.config, "data", {}),
+            mock.patch("curl_cffi.requests.Session", FakeSession),
+        ):
+            client = grok.GrokConsoleClient("token-value")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertIn("quota exhausted", str(ctx.exception))
+        account_service.update_account.assert_called_once_with("token-value", {"status": "限流"})
 
     def test_grok_console_uses_configured_network_profile(self) -> None:
         settings = {
@@ -926,6 +1504,185 @@ class TestBrowserBridge(unittest.TestCase):
             with self.assertRaises(GrokConsoleError) as ctx:
                 client._try_browser_bridge({"message": "test"})
         self.assertIn("account may lack required tier", str(ctx.exception))
+
+    @mock.patch("services.providers.grok.config")
+    def test_explicit_bridge_health_unavailable_fast_fails_with_structured_code(self, mock_config):
+        import urllib.error
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
+        mock_config.browser_bridge_url = "http://bridge.local"
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")) as urlopen:
+            with self.assertRaises(GrokConsoleError) as ctx:
+                client._try_browser_bridge({"message": "test"})
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.code, "grok_browser_bridge_unavailable")
+        self.assertEqual(ctx.exception.to_http_detail()["bridge_code"], "browser_bridge_unavailable")
+        self.assertIn("Browser Bridge unavailable", str(ctx.exception))
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], grok._BRIDGE_HEALTH_TIMEOUT)
+
+    @mock.patch("services.providers.grok.config")
+    def test_explicit_bridge_degraded_health_fast_fails_with_structured_code(self, mock_config):
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
+        mock_config.browser_bridge_url = "http://bridge.local"
+        health = mock.MagicMock()
+        health.read.return_value = json.dumps({
+            "status": "degraded",
+            "last_error_code": "bridge_unavailable",
+            "last_error": "Chromium launch failed",
+        }).encode()
+        health.__enter__ = lambda s: s
+        health.__exit__ = lambda s, *a: None
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with mock.patch("urllib.request.urlopen", return_value=health):
+            with self.assertRaises(GrokConsoleError) as ctx:
+                client._try_browser_bridge({"message": "test"})
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.code, "grok_browser_bridge_unavailable")
+        self.assertEqual(ctx.exception.to_http_detail()["bridge_code"], "bridge_unavailable")
+        self.assertIn("Chromium launch failed", str(ctx.exception))
+
+    @mock.patch("services.providers.grok.config")
+    def test_explicit_bridge_ok_health_ignores_historical_last_error(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = "http://bridge.local"
+        health = mock.MagicMock()
+        health.read.return_value = json.dumps({
+            "status": "ok",
+            "last_error_code": "bridge_unavailable",
+            "last_error": "Historical launch failure",
+        }).encode()
+        health.__enter__ = lambda s: s
+        health.__exit__ = lambda s, *a: None
+        chat = mock.MagicMock()
+        chat.status = 200
+        chat.read.return_value = b'{"result":{"response":{"token":"hi","messageTag":"final"}}}\n'
+        chat.__enter__ = lambda s: s
+        chat.__exit__ = lambda s, *a: None
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with mock.patch("urllib.request.urlopen", side_effect=[health, chat]) as urlopen:
+            result = client._try_browser_bridge({"message": "test"})
+
+        self.assertEqual(result, ['{"result":{"response":{"token":"hi","messageTag":"final"}}}'])
+        self.assertEqual(len(urlopen.call_args_list), 2)
+
+    @mock.patch("services.providers.grok.config")
+    def test_explicit_bridge_navigation_timeout_maps_to_http_detail(self, mock_config):
+        import urllib.error
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = "http://bridge.local"
+        health = mock.MagicMock()
+        health.read.return_value = b'{"status":"ok"}'
+        health.__enter__ = lambda s: s
+        health.__exit__ = lambda s, *a: None
+        error_body = types.SimpleNamespace(read=lambda: b'{"error":"Navigation to grok.com timed out","code":"navigation_timeout"}')
+        http_error = urllib.error.HTTPError(
+            url="http://bridge.local/api/chat",
+            code=504,
+            msg="Gateway Timeout",
+            hdrs=None,
+            fp=error_body,
+        )
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with mock.patch("urllib.request.urlopen", side_effect=[health, http_error]):
+            with self.assertRaises(grok.HTTPException) as ctx:
+                try:
+                    client._try_browser_bridge({"message": "test"})
+                except grok.GrokConsoleError as exc:
+                    raise grok.HTTPException(status_code=exc.status_code, detail=exc.to_http_detail())
+
+        self.assertEqual(ctx.exception.status_code, 504)
+        self.assertEqual(ctx.exception.detail["code"], "grok_navigation_timeout")
+        self.assertEqual(ctx.exception.detail["bridge_code"], "navigation_timeout")
+        self.assertIn("Navigation to grok.com timed out", ctx.exception.detail["error"])
+
+    @mock.patch("services.providers.grok.config")
+    def test_explicit_bridge_healthy_response_yields_app_chat_events(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = "http://bridge.local"
+        health = mock.MagicMock()
+        health.read.return_value = b'{"status":"ok","pages":0}'
+        health.__enter__ = lambda s: s
+        health.__exit__ = lambda s, *a: None
+        chat = mock.MagicMock()
+        chat.status = 200
+        chat.read.return_value = b'{"result":{"response":{"token":"hi","messageTag":"final"}}}\n'
+        chat.__enter__ = lambda s: s
+        chat.__exit__ = lambda s, *a: None
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with mock.patch("urllib.request.urlopen", side_effect=[health, chat]) as urlopen:
+            events = list(client.stream_events({"message": "test"}))
+
+        self.assertEqual(events, [{"result": {"response": {"token": "hi", "messageTag": "final"}}}])
+        self.assertEqual(urlopen.call_args_list[0].kwargs["timeout"], grok._BRIDGE_HEALTH_TIMEOUT)
+        self.assertEqual(urlopen.call_args_list[1].kwargs["timeout"], grok._BRIDGE_EXPLICIT_CHAT_TIMEOUT)
+
+    @mock.patch("services.providers.grok.config")
+    def test_auto_detected_bridge_unavailable_still_returns_none(self, mock_config):
+        import urllib.error
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = ""
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with (
+            mock.patch("services.providers.grok._detect_bridge_url", return_value="http://127.0.0.1:3080"),
+            mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")),
+        ):
+            self.assertIsNone(client._try_browser_bridge({"message": "test"}))
+
+    @mock.patch("services.providers.grok.config")
+    def test_app_chat_prefers_direct_when_bridge_is_auto_detected(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = ""
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        direct_event = {"result": {"response": {"token": "hi"}}}
+        with (
+            mock.patch.object(client, "_stream_direct_events", return_value=iter([direct_event])) as direct,
+            mock.patch.object(client, "_try_browser_bridge") as bridge,
+        ):
+            self.assertEqual(list(client.stream_events({"message": "test"})), [direct_event])
+        direct.assert_called_once()
+        bridge.assert_not_called()
+
+    @mock.patch("services.providers.grok.config")
+    def test_app_chat_uses_explicit_bridge_before_direct(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = "http://bridge.local"
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        with (
+            mock.patch.object(client, "_try_browser_bridge", return_value=['{"result":{"response":{"token":"hi"}}}']) as bridge,
+            mock.patch.object(client, "_stream_direct_events") as direct,
+        ):
+            events = list(client.stream_events({"message": "test"}))
+        self.assertEqual(events, [{"result": {"response": {"token": "hi"}}}])
+        bridge.assert_called_once()
+        direct.assert_not_called()
+
+    @mock.patch("services.providers.grok.config")
+    def test_app_chat_falls_back_to_bridge_after_direct_403(self, mock_config):
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
+        mock_config.browser_bridge_url = ""
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        with (
+            mock.patch.object(client, "_stream_direct_events", side_effect=GrokConsoleError("forbidden", 403, 403)) as direct,
+            mock.patch.object(client, "_try_browser_bridge", return_value=['{"result":{"response":{"token":"hi"}}}']) as bridge,
+        ):
+            events = list(client.stream_events({"message": "test"}))
+        self.assertEqual(events, [{"result": {"response": {"token": "hi"}}}])
+        direct.assert_called_once()
+        bridge.assert_called_once()
 
     @mock.patch("services.providers.grok.config")
     def test_detect_bridge_url_auto_probes(self, mock_config):

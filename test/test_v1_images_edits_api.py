@@ -4,8 +4,21 @@ import base64
 import unittest
 from unittest import mock
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_pydantic_stub, install_starlette_stub, install_tiktoken_stub
+
+install_curl_cffi_stub()
+install_fastapi_stubs()
+install_pil_stub()
+install_pybase64_stub()
+install_pydantic_stub()
+install_starlette_stub()
+install_tiktoken_stub()
+
+import sys
+from typing import Any, cast
+
+FastAPI = cast(Any, getattr(sys.modules["fastapi"], "FastAPI"))
+TestClient = cast(Any, getattr(sys.modules["fastapi.testclient"], "TestClient"))
 
 import api.ai as ai_module
 
@@ -26,6 +39,9 @@ class ImagesEditsApiTests(unittest.TestCase):
         self.handler_patcher = mock.patch.object(ai_module.openai_v1_image_edit, "handle", fake_handle)
         self.handler_patcher.start()
         self.addCleanup(self.handler_patcher.stop)
+        self.log_patcher = mock.patch("services.log_service.log_service.add")
+        self.log_patcher.start()
+        self.addCleanup(self.log_patcher.stop)
         app = FastAPI()
         app.include_router(ai_module.create_router())
         self.client = TestClient(app)

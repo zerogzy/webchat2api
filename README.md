@@ -15,17 +15,22 @@
 ## 功能概览
 
 - OpenAI 风格 API：将 GPT/ChatGPT Web 与 Grok/xAI Web 能力包装为 `/v1/models`、`/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`、`/v1/responses`、`/v1/messages` 等接口
+- 公共接口：提供 `/health`、`/version`、`/auth/login`，AI 接口统一使用 Bearer Token 鉴权
 - GPT/Grok 文本模型：`/v1/models` 优先通过 `provider=gpt` 账号动态拉取 GPT 模型，并合并静态 Grok 模型；`/v1/chat/completions` 按 `model` 自动分发到 GPT 或 Grok 服务商账号
 - Grok app-chat：支持通过 grok.com app-chat 路径访问带 `mode_id` 的 Grok 模型，并可走 Browser Bridge 用真实 Chromium 代理请求
 - Grok 图片生成：`grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro` 通过 app-chat 图片能力生成图片；`grok-imagine-image-edit` 和 `grok-imagine-video` 已列出但暂未实现
 - tier 感知账号选择：Grok app-chat 会按模型所需 `basic`、`super`、`heavy` tier 和账号 `capabilities` 优先选择匹配账号，未匹配时再回退到普通 Grok 轮换
-- Web 管理后台：账号池、用户 API Key、代理、日志、图片任务、图片文件和系统配置管理
+- Web 管理后台：账号池、用户 API Key、代理、日志、图片任务、图片文件、备份、图片存储和系统配置管理
+- 管理接口：提供 `/api/settings`、`/api/auth/users`、`/api/accounts`、`/api/cpa/*`、`/api/sub2api/*`、`/api/remote-account/*`、`/api/image-tasks/*`、`/api/images*`、`/api/logs`、`/api/proxy/test`、`/api/storage/info`、`/api/backups*`、`/api/backup/test`、`/api/image-storage/*` 等后台能力
 - 远程账号注入：管理员可配置远程账号来源、手动同步来源，或通过 `/api/remote-account/inject` 注入账号；响应会隐藏来源鉴权 Token 和账号凭据
 - 账号服务商：账号 `provider` 选择 `gpt` 或 `grok`，账号 `type` 仍表示套餐或订阅类型
-- 试验页：文生文聊天、文本模型批量可用性测试、文生图/图生图切换、图片队列和图片历史
+- 试验页：`/`、`/image`、`/image-manager`、`/accounts`、`/logs`、`/settings`、`/login` 覆盖文生文聊天、文本模型批量可用性测试、文生图/图生图切换、图片队列、图片历史、图片管理、账号导入导出和系统设置
 - 文生文聊天历史：保存在浏览器本地，刷新页面后仍保留
 - 图片账号轮换：图片生成/编辑遇到失效账号时，会跳过该账号并尝试下一个可用账号
 - 网络配置：ChatGPT Web、Grok Console 与 Grok app-chat 请求使用可配置网络 profile，支持独立的指纹、TLS impersonate、超时、代理和 Cloudflare Cookie
+- 内容过滤：支持本地 `sensitive_words` 命中和可选 OpenAI 兼容 `ai_review` 审核；审核前会移除 base64 data URI 并截断长文本，`fail_open` 默认放行
+- 云备份：支持 Cloudflare R2 定时和手动备份，可选 openssl AES-256-CBC 加密，并可按开关包含配置、CPA、Sub2API、日志、图片任务、账号快照、用户密钥快照和图片
+- 图片存储：支持本地、WebDAV、双写模式，提供 WebDAV 连通性测试和同步；图片索引写入 `data/image_index.json`，标签写入 `data/image_tags.json`
 - Grok 防护处理：支持手动 `cf_clearance`、FlareSolverr clearance 刷新，以及可选 Browser Bridge 浏览器路径；这些都是尽力而为，不保证绕过所有 Cloudflare/WAF 挑战
 - GPT Turnstile：默认启用 `enable_turnstile_solver`，会在 ChatGPT 返回 Turnstile 要求时尝试生成 Sentinel Turnstile Token；该能力依赖上游挑战和求解结果，真实 GPT Turnstile 仍可能失败
 - 账号导出：仅导出 TXT，并按 GPT/Grok 服务商分别下载为 `webchat2api-gpt.txt` / `webchat2api_grok.txt`；文件内容每行一个 `access_token` 或 `sso` 凭据
@@ -107,7 +112,9 @@ docker run -d \
 
 ### Docker Compose 部署
 
-`docker-compose.yml` 使用本地镜像 `webchat2api:latest`。请先按上面的命令构建镜像，再启动服务：
+`docker-compose.yml` 使用本地镜像 `webchat2api:latest`。请先按上面的命令构建镜像，再启动服务。普通 Compose 文件仍是跨平台默认选择，即使没有显式 `networks:` 配置，Docker Compose 也会自动创建默认 bridge 网络：
+
+如需在 bridge 网络中访问宿主机代理，请在 Compose 文件中同时取消 `PROXY_URL` 和 `extra_hosts` 注释。
 
 ```bash
 docker compose up -d
@@ -126,6 +133,28 @@ docker logs -f webchat2api
 docker restart webchat2api
 docker compose down
 ```
+
+Linux 服务器如果需要绕过 Docker 默认 bridge 网络，让容器直接使用宿主机网络，可改用独立的 `docker-compose.host.yml`。该文件使用 `network_mode: host`，只适用于 Linux Docker Engine，不适用于 Docker Desktop 的常规跨平台场景。它不是覆盖文件，不要和 `docker-compose.yml` 叠加使用。
+
+> [!WARNING]
+> host 网络模式会让服务直接暴露在宿主机网络的 `83` 端口，Docker `ports` 无法限制访问范围。启动前必须设置强随机 `LOGIN_SECRET`，并用宿主机防火墙、安全组或反向代理访问控制限制入口。
+
+```bash
+export LOGIN_SECRET=your-strong-random-secret
+docker compose -f docker-compose.host.yml up -d
+docker logs -f webchat2api
+docker compose -f docker-compose.host.yml down
+```
+
+如需重新构建镜像后再启动：
+
+```bash
+docker build -t webchat2api:latest .
+export LOGIN_SECRET=your-strong-random-secret
+docker compose -f docker-compose.host.yml up -d
+```
+
+host 网络模式下没有 `ports` 映射，服务会直接监听宿主机的 `83` 端口。若宿主机代理监听在 loopback，可在 `docker-compose.host.yml` 中设置 `PROXY_URL: http://127.0.0.1:7890`。
 
 ### 本地开发
 
@@ -148,7 +177,7 @@ npm run dev
 
 Grok Console 与 grok.com app-chat 是不同上游路径。本项目没有接入官方 xAI API，也不声称提供官方兼容能力。Console 路径可使用 `network_profiles.grok_console.cf_clearance` 附加手动 Cookie；app-chat 路径可使用 `network_profiles.grok_app_chat` 覆盖 UA、impersonate、`cf_clearance`、`cf_cookies`、`sec-ch-ua`、`x-statsig-id` 等字段。
 
-如配置 `flaresolverr_url`，直接 app-chat 请求遇到 Cloudflare 或 403 时会尝试通过 FlareSolverr 刷新 clearance 并重试。Browser Bridge 是独立浏览器路径，后端会优先使用 `browser_bridge_url`，未配置时会探测 `http://127.0.0.1:3080/health`。Browser Bridge 的接口是 `POST /api/chat {sso,payload}` 和 `GET /health`，请求会经真实 Chromium 页面发往 grok.com。
+如配置 `flaresolverr_url`，直接 app-chat 请求遇到 Cloudflare 或 403 时会尝试通过 FlareSolverr 刷新 clearance 并重试。Browser Bridge 是独立浏览器路径；显式配置 `browser_bridge_url` 时，后端会优先使用该 Bridge。未配置时，app-chat 默认先走直接请求；直接请求遇到 `403`、`408`、`502`、`503`、`504` 时，才会尝试探测并回退到 `http://127.0.0.1:3080/health` 对应的 Browser Bridge。Browser Bridge 的接口是 `POST /api/chat {sso,payload}` 和 `GET /health`，请求会经真实 Chromium 页面发往 grok.com。Docker 入口脚本会在 `BRIDGE_PORT` 上启动 `services/browser_bridge/server.js`，默认 `3080`；页面池可用 `BRIDGE_MAX_PAGES` 和 `BRIDGE_PAGE_IDLE_MS` 控制。Bridge 如果没有拿到 `x-userid` Cookie，会快速返回 `sso_unavailable`，避免继续使用未鉴权页面。
 
 > [!WARNING]
 > Cloudflare、WAF、账号风控和上游配额都可能变化。手动 clearance、FlareSolverr 和 Browser Bridge 都是尽力而为，不能保证长期可用。
@@ -289,6 +318,18 @@ cp config.example.json config.json
 | `WEBCHAT2API_AUTH_KEY` | 空 | 兼容旧配置的登录密钥覆盖项 |
 | `WEBCHAT2API_BASE_URL` | 空 | 生成图片访问 URL 时使用的外部基础地址 |
 | `PROXY_URL` | 空 | 上游请求使用的 HTTP/HTTPS/SOCKS 代理 |
+| `auth-key` | `admin` | `config.json` 中的管理端登录密钥，会被环境变量覆盖 |
+| `refresh_account_interval_minute` | `60` | 限流账号后台检查间隔 |
+| `image_retention_days` | `15` | 本地图片保留天数 |
+| `image_poll_timeout_secs` | `120` | 图片任务轮询超时时间 |
+| `auto_remove_rate_limited_accounts` | `false` | 是否自动移除限流账号 |
+| `auto_remove_invalid_accounts` | `true` | 是否自动移除失效账号 |
+| `log_levels` | `debug`、`error`、`info`、`warning` | 日志级别过滤配置 |
+| `sensitive_words` | `[]` | 本地敏感词，命中后直接拦截文本请求 |
+| `global_system_prompt` | 空 | 全局系统提示词 |
+| `ai_review` | 默认关闭 | OpenAI 兼容文本审核配置，`fail_open` 未配置时默认放行 |
+| `backup` | 默认关闭 | Cloudflare R2 备份配置，支持定时、手动、轮换和可选加密 |
+| `image_account_concurrency` | `3` | 图片账号并发数量 |
 | `network_profiles` | 见 `config.example.json` | ChatGPT Web、Grok Console 和 Grok app-chat 网络 profile |
 | `network_profiles.grok_console.cf_clearance` | 空 | Grok Console 请求附加的 Cloudflare `cf_clearance` Cookie |
 | `network_profiles.grok_app_chat` | 空 | Grok app-chat 请求 profile，可配置 `user-agent`、`impersonate`、`timeout`、`cf_clearance`、`cf_cookies`、`sec-ch-ua`、`x-statsig-id` 等字段 |
@@ -297,12 +338,44 @@ cp config.example.json config.json
 | `enable_turnstile_solver` | `true` | ChatGPT Turnstile 要求出现时尝试求解，不保证所有真实挑战都能通过 |
 | `flaresolverr_url` | 空 | FlareSolverr 服务地址，配置后可为 Grok app-chat 尝试刷新 Cloudflare clearance |
 | `flaresolverr_timeout_sec` | `60` | FlareSolverr 单次求解超时时间，单位秒 |
-| `browser_bridge_url` | 空 | Grok Browser Bridge 地址；留空时后端会探测 `http://127.0.0.1:3080` |
+| `browser_bridge_url` | 空 | Grok Browser Bridge 地址；留空时后端在直接 app-chat 请求遇到可回退错误后探测 `http://127.0.0.1:3080` |
 | `BRIDGE_PORT` | `3080` | Docker 入口脚本启动 Browser Bridge 使用的端口 |
+| `BRIDGE_MAX_PAGES` | `10` | Browser Bridge 页面池最大页面数 |
+| `BRIDGE_PAGE_IDLE_MS` | `300000` | Browser Bridge 空闲页面回收时间，单位毫秒 |
 | `STORAGE_BACKEND` | `json` | 存储后端：`json`、`sqlite`、`postgres`、`git` |
 | `DATABASE_URL` | 空 | SQLite/PostgreSQL 连接字符串 |
 | `GIT_REPO_URL` | 空 | Git 存储后端仓库地址 |
 | `GIT_TOKEN` | 空 | Git 存储后端访问令牌 |
+| `GIT_BRANCH` | `main` | Git 存储后端分支 |
+| `GIT_FILE_PATH` | `accounts.json` | Git 存储后端账号文件路径 |
+| `GIT_AUTH_KEYS_FILE_PATH` | `auth_keys.json` | Git 存储后端用户密钥文件路径，`.env.example` 当前未列出，可按需设置 |
+
+## 测试与检查
+
+后端单元测试：
+
+```bash
+python3 -m unittest discover -s test -t .
+```
+
+> [!IMPORTANT]
+> `-t .` 用于指定项目根目录，避免 `test/utils.py` 遮蔽项目内的 `utils` 包。
+
+前端类型检查和构建：
+
+```bash
+cd web
+npm run typecheck
+npm run build
+```
+
+存储后端检查脚本：
+
+```bash
+python scripts/test_storage.py
+```
+
+Browser Bridge 可选健康语义测试位于 `services/browser_bridge/test_health.js`，需要 Node 环境。
 
 ## 文档
 

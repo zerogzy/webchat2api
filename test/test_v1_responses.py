@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
 import time
 import unittest
+from typing import Any
 
-import requests
+requests: Any = None
+if importlib.util.find_spec("requests") is not None:
+    requests = importlib.import_module("requests")
 
 from test.utils import save_image
 
@@ -15,9 +20,10 @@ IMAGE_MODEL = "gpt-image-2"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 
 
+@unittest.skipIf(requests is None, "requests is not installed")
 class ResponsesTests(unittest.TestCase):
     @staticmethod
-    def _iter_sse_payloads(response: requests.Response):
+    def _iter_sse_payloads(response: Any):
         for line in response.iter_lines():
             if not line:
                 continue

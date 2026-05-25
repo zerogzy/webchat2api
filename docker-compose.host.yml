@@ -5,18 +5,16 @@ services:
     image: webchat2api:latest
     container_name: webchat2api
     restart: unless-stopped
-    ports:
-      - "83:83"
+    network_mode: host
     volumes:
       - ./data:/app/data
       # Optional local override: cp config.example.json config.json, then uncomment.
       # Do not bind config.json read-only if you need Web UI settings saves.
       # - ./config.json:/app/config.json
     environment:
-      LOGIN_SECRET: admin
+      LOGIN_SECRET: ${LOGIN_SECRET:?set LOGIN_SECRET before starting}
       STORAGE_BACKEND: json
-      # 如需访问宿主机代理，可同时取消下一行和 extra_hosts 的注释。
-      # PROXY_URL: http://host.docker.internal:7890
+      # Host network mode shares the Linux host network namespace.
+      # If your host proxy listens on loopback, use http://127.0.0.1:7890.
+      # PROXY_URL: http://127.0.0.1:7890
       # WEBCHAT2API_BASE_URL: https://your-domain.com
-    # extra_hosts:
-    #   - "host.docker.internal:host-gateway"

@@ -154,6 +154,35 @@ class AccountService:
             return True
         return int(account.get("quota") or 0) > 0
 
+    @staticmethod
+    def _normalize_account_type(value: Any) -> str | None:
+        text = _clean_string(value)
+        if not text:
+            return None
+        normalized = re.sub(r"[^a-z0-9]+", "", text.lower())
+        if normalized in {"prolite", "pluslite"}:
+            return "ProLite"
+        return text
+
+    @classmethod
+    def _search_account_type(cls, payload: Any) -> str | None:
+        if isinstance(payload, dict):
+            for key in ("type", "account_type", "plan_type", "plan", "tier"):
+                if key in payload:
+                    account_type = cls._normalize_account_type(payload.get(key))
+                    if account_type:
+                        return account_type
+            for value in payload.values():
+                account_type = cls._search_account_type(value)
+                if account_type:
+                    return account_type
+        elif isinstance(payload, (list, tuple, set)):
+            for value in payload:
+                account_type = cls._search_account_type(value)
+                if account_type:
+                    return account_type
+        return None
+
     def _normalize_account(self, item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
@@ -164,9 +193,11 @@ class AccountService:
         normalized = dict(item)
         normalized["access_token"] = access_token
         normalized["provider"] = provider
-        normalized["type"] = normalized.get("type") or "free"
+        account_type = self._normalize_account_type(normalized.get("type")) or self._search_account_type(normalized) or "free"
+        normalized["type"] = account_type
         normalized["status"] = normalized.get("status") or "正常"
-        normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
+        quota_value = normalized.get("quota")
+        normalized["quota"] = max(0, int(quota_value if quota_value is not None else 0))
         normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))
         normalized["email"] = normalized.get("email") or None
         normalized["user_id"] = normalized.get("user_id") or None
@@ -583,10 +614,14 @@ class AccountService:
         if not access_token:
             raise ValueError("access_token is required")
         account = self.get_account(access_token) or {}
-        if normalize_provider(account.get("provider")) != GPT_PROVIDER:
+        provider = normalize_provider(account.get("provider"))
+        if provider == GROK_PROVIDER:
+            return self.fetch_grok_remote_info(access_token, event)
+        if provider != GPT_PROVIDER:
             return dict(account) if account else None
+        from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
+
         try:
-            from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
             with OpenAIBackendAPI(access_token) as backend:
                 result = backend.get_user_info()
         except InvalidAccessTokenError:
@@ -594,13 +629,49 @@ class AccountService:
             raise
         return self.update_account(access_token, result)
 
+    @staticmethod
+    def _is_grok_auth_failure_payload(payload: Any) -> bool:
+        if isinstance(payload, dict):
+            for key in ("error", "message", "detail", "code", "reason"):
+                text = _clean_string(payload.get(key)).lower()
+                if any(marker in text for marker in ("auth", "login", "session", "token", "unauthorized", "forbidden")):
+                    return True
+            return any(AccountService._is_grok_auth_failure_payload(value) for value in payload.values())
+        if isinstance(payload, (list, tuple, set)):
+            return any(AccountService._is_grok_auth_failure_payload(value) for value in payload)
+        return False
+
+    def fetch_grok_remote_info(self, access_token: str, event: str = "fetch_grok_remote_info") -> dict[str, Any] | None:
+        account = self.get_account(access_token) or {}
+        from services.providers.grok import GrokConsoleError, validate_grok_access_token
+
+        try:
+            payload = validate_grok_access_token(access_token, account)
+        except GrokConsoleError as exc:
+            status = exc.upstream_status or exc.status_code
+            if status in {401, 403} or any(marker in str(exc).lower() for marker in ("auth", "login", "session", "token")):
+                self.remove_invalid_token(access_token, event)
+            elif status in {402, 429}:
+                self.update_account(access_token, {"status": "限流"})
+            raise
+        if self._is_grok_auth_failure_payload(payload):
+            self.remove_invalid_token(access_token, event)
+            raise RuntimeError("Grok app-chat authentication failed")
+        return self.update_account(access_token, {"status": "正常", "app_chat": True})
+
+    def _refresh_error_message(self, access_token: str, exc: Exception) -> str:
+        account = self.get_account(access_token) or {}
+        if normalize_provider(account.get("provider")) == GROK_PROVIDER:
+            return "Grok app-chat rate-limit validation failed"
+        return str(exc)
+
     def refresh_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         with self._lock:
             access_tokens = [
                 token
                 for token in access_tokens
-                if normalize_provider((self._accounts.get(token) or {}).get("provider")) == GPT_PROVIDER
+                if normalize_provider((self._accounts.get(token) or {}).get("provider")) in {GPT_PROVIDER, GROK_PROVIDER}
             ]
         if not access_tokens:
             return {"refreshed": 0, "errors": [], "items": self.list_accounts()}
@@ -618,7 +689,8 @@ class AccountService:
                 try:
                     account = future.result()
                 except Exception as exc:
-                    errors.append({"token": anonymize_token(futures[future]), "error": str(exc)})
+                    token = futures[future]
+                    errors.append({"token": anonymize_token(token), "error": self._refresh_error_message(token, exc)})
                     continue
                 if account is not None:
                     refreshed += 1
