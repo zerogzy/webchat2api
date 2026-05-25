@@ -761,6 +761,54 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(headers["x-statsig-id"], "global-statsig")
         self.assertEqual(headers["Cookie"], "sso=selected-token; sso-rw=selected-token; cf_bm=account-bm; cf_clearance=account-clearance")
 
+    def test_grok_app_chat_validate_rate_limits_sanitizes_request_errors(self) -> None:
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> object:
+                raise grok.requests.exceptions.RequestException("failed with Cookie: sso=secret-token")
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokAppChatClient("secret-token")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                client.validate_rate_limits()
+
+        self.assertEqual(str(ctx.exception), "Grok app-chat rate-limit validation failed")
+        self.assertNotIn("secret-token", str(ctx.exception))
+
+    def test_grok_app_chat_validate_rate_limits_sanitizes_invalid_json(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def json(self) -> object:
+                raise ValueError("invalid json near sso=secret-token")
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokAppChatClient("secret-token")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                client.validate_rate_limits()
+
+        self.assertEqual(str(ctx.exception), "Grok app-chat rate-limit validation returned an invalid response")
+        self.assertNotIn("secret-token", str(ctx.exception))
+
     def test_grok_app_chat_client_uses_account_impersonate_without_leaking_to_console_headers(self) -> None:
         settings = {
             "network_profiles": {
