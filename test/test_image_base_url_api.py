@@ -2,6 +2,16 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_pydantic_stub, install_starlette_stub, install_tiktoken_stub
+
+install_curl_cffi_stub()
+install_fastapi_stubs()
+install_pil_stub()
+install_pybase64_stub()
+install_pydantic_stub()
+install_starlette_stub()
+install_tiktoken_stub()
+
 import api.support as api_support
 
 
