@@ -733,6 +733,34 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(events[0]["result"]["response"]["token"], "Hi")
         account_service.mark_text_used.assert_called_once_with("selected-token")
 
+    def test_app_chat_completion_wraps_structured_grok_error_detail(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_app_chat_access_token=mock.Mock(return_value="selected-token"),
+            get_account=mock.Mock(return_value={"access_token": "selected-token"}),
+            mark_text_used=mock.Mock(),
+        )
+        sys.modules["services.account_service"] = types.SimpleNamespace(account_service=account_service)
+        spec = resolve_model("grok-4.20-heavy")
+        error = grok.GrokConsoleError(
+            "Grok app-chat navigation timed out via Browser Bridge: Navigation to grok.com timed out",
+            504,
+            504,
+            code="grok_navigation_timeout",
+            extra_detail={"bridge_code": "navigation_timeout"},
+        )
+
+        with mock.patch.object(grok, "GrokAppChatClient") as client_class:
+            client = client_class.return_value.__enter__.return_value
+            client.stream_events.side_effect = error
+            with self.assertRaises(HTTPException) as ctx:
+                list(grok.app_chat_completion_events({}, spec, [{"role": "user", "content": "Hello"}]))
+
+        self.assertEqual(ctx.exception.status_code, 504)
+        self.assertEqual(ctx.exception.detail["code"], "grok_navigation_timeout")
+        self.assertEqual(ctx.exception.detail["bridge_code"], "navigation_timeout")
+        self.assertIn("Navigation to grok.com timed out", ctx.exception.detail["error"])
+        account_service.mark_text_used.assert_not_called()
+
     def test_app_chat_headers_use_account_metadata_over_global_profile(self) -> None:
         with mock.patch.object(grok, "_grok_app_chat_profile", return_value=types.SimpleNamespace(
             user_agent="Global UA",
@@ -1454,6 +1482,143 @@ class TestBrowserBridge(unittest.TestCase):
             with self.assertRaises(GrokConsoleError) as ctx:
                 client._try_browser_bridge({"message": "test"})
         self.assertIn("account may lack required tier", str(ctx.exception))
+
+    @mock.patch("services.providers.grok.config")
+    def test_explicit_bridge_health_unavailable_fast_fails_with_structured_code(self, mock_config):
+        import urllib.error
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
+        mock_config.browser_bridge_url = "http://bridge.local"
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")) as urlopen:
+            with self.assertRaises(GrokConsoleError) as ctx:
+                client._try_browser_bridge({"message": "test"})
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.code, "grok_browser_bridge_unavailable")
+        self.assertEqual(ctx.exception.to_http_detail()["bridge_code"], "browser_bridge_unavailable")
+        self.assertIn("Browser Bridge unavailable", str(ctx.exception))
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], grok._BRIDGE_HEALTH_TIMEOUT)
+
+    @mock.patch("services.providers.grok.config")
+    def test_explicit_bridge_degraded_health_fast_fails_with_structured_code(self, mock_config):
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
+        mock_config.browser_bridge_url = "http://bridge.local"
+        health = mock.MagicMock()
+        health.read.return_value = json.dumps({
+            "status": "degraded",
+            "last_error_code": "bridge_unavailable",
+            "last_error": "Chromium launch failed",
+        }).encode()
+        health.__enter__ = lambda s: s
+        health.__exit__ = lambda s, *a: None
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with mock.patch("urllib.request.urlopen", return_value=health):
+            with self.assertRaises(GrokConsoleError) as ctx:
+                client._try_browser_bridge({"message": "test"})
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.code, "grok_browser_bridge_unavailable")
+        self.assertEqual(ctx.exception.to_http_detail()["bridge_code"], "bridge_unavailable")
+        self.assertIn("Chromium launch failed", str(ctx.exception))
+
+    @mock.patch("services.providers.grok.config")
+    def test_explicit_bridge_ok_health_ignores_historical_last_error(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = "http://bridge.local"
+        health = mock.MagicMock()
+        health.read.return_value = json.dumps({
+            "status": "ok",
+            "last_error_code": "bridge_unavailable",
+            "last_error": "Historical launch failure",
+        }).encode()
+        health.__enter__ = lambda s: s
+        health.__exit__ = lambda s, *a: None
+        chat = mock.MagicMock()
+        chat.status = 200
+        chat.read.return_value = b'{"result":{"response":{"token":"hi","messageTag":"final"}}}\n'
+        chat.__enter__ = lambda s: s
+        chat.__exit__ = lambda s, *a: None
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with mock.patch("urllib.request.urlopen", side_effect=[health, chat]) as urlopen:
+            result = client._try_browser_bridge({"message": "test"})
+
+        self.assertEqual(result, ['{"result":{"response":{"token":"hi","messageTag":"final"}}}'])
+        self.assertEqual(len(urlopen.call_args_list), 2)
+
+    @mock.patch("services.providers.grok.config")
+    def test_explicit_bridge_navigation_timeout_maps_to_http_detail(self, mock_config):
+        import urllib.error
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = "http://bridge.local"
+        health = mock.MagicMock()
+        health.read.return_value = b'{"status":"ok"}'
+        health.__enter__ = lambda s: s
+        health.__exit__ = lambda s, *a: None
+        error_body = types.SimpleNamespace(read=lambda: b'{"error":"Navigation to grok.com timed out","code":"navigation_timeout"}')
+        http_error = urllib.error.HTTPError(
+            url="http://bridge.local/api/chat",
+            code=504,
+            msg="Gateway Timeout",
+            hdrs=None,
+            fp=error_body,
+        )
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with mock.patch("urllib.request.urlopen", side_effect=[health, http_error]):
+            with self.assertRaises(grok.HTTPException) as ctx:
+                try:
+                    client._try_browser_bridge({"message": "test"})
+                except grok.GrokConsoleError as exc:
+                    raise grok.HTTPException(status_code=exc.status_code, detail=exc.to_http_detail())
+
+        self.assertEqual(ctx.exception.status_code, 504)
+        self.assertEqual(ctx.exception.detail["code"], "grok_navigation_timeout")
+        self.assertEqual(ctx.exception.detail["bridge_code"], "navigation_timeout")
+        self.assertIn("Navigation to grok.com timed out", ctx.exception.detail["error"])
+
+    @mock.patch("services.providers.grok.config")
+    def test_explicit_bridge_healthy_response_yields_app_chat_events(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = "http://bridge.local"
+        health = mock.MagicMock()
+        health.read.return_value = b'{"status":"ok","pages":0}'
+        health.__enter__ = lambda s: s
+        health.__exit__ = lambda s, *a: None
+        chat = mock.MagicMock()
+        chat.status = 200
+        chat.read.return_value = b'{"result":{"response":{"token":"hi","messageTag":"final"}}}\n'
+        chat.__enter__ = lambda s: s
+        chat.__exit__ = lambda s, *a: None
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with mock.patch("urllib.request.urlopen", side_effect=[health, chat]) as urlopen:
+            events = list(client.stream_events({"message": "test"}))
+
+        self.assertEqual(events, [{"result": {"response": {"token": "hi", "messageTag": "final"}}}])
+        self.assertEqual(urlopen.call_args_list[0].kwargs["timeout"], grok._BRIDGE_HEALTH_TIMEOUT)
+        self.assertEqual(urlopen.call_args_list[1].kwargs["timeout"], grok._BRIDGE_EXPLICIT_CHAT_TIMEOUT)
+
+    @mock.patch("services.providers.grok.config")
+    def test_auto_detected_bridge_unavailable_still_returns_none(self, mock_config):
+        import urllib.error
+        from services.providers.grok import GrokAppChatClient
+        mock_config.browser_bridge_url = ""
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client.access_token = "test_sso_token"
+
+        with (
+            mock.patch("services.providers.grok._detect_bridge_url", return_value="http://127.0.0.1:3080"),
+            mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")),
+        ):
+            self.assertIsNone(client._try_browser_bridge({"message": "test"}))
 
     @mock.patch("services.providers.grok.config")
     def test_app_chat_prefers_direct_when_bridge_is_auto_detected(self, mock_config):
