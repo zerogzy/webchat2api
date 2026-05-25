@@ -196,7 +196,7 @@ Grok app-chat 账号选择：
 
 - Browser Bridge 是 Grok app-chat 的本地辅助服务，默认监听 `http://127.0.0.1:3080`。
 - `services/browser_bridge/server.js` 使用 Playwright 启动真实 Chromium，按 SSO 维护页面池。
-- 每个页面通过 `sso` Cookie 登录 `https://grok.com/`，并等待页面建立网页端会话；如果未产生 `x-userid` Cookie，会记录警告，但页面仍可能继续尝试。
+- 每个页面通过 `sso` Cookie 登录 `https://grok.com/`，并等待页面建立网页端会话；如果未产生 `x-userid` Cookie，Bridge 会返回结构化 `sso_unavailable` 错误并快速失败，不会继续使用未鉴权页面。
 - 页面池默认最多 `BRIDGE_MAX_PAGES=10`，空闲页面会在 `BRIDGE_PAGE_IDLE_MS` 后回收。
 - Bridge 拦截浏览器对 `/rest/app-chat/conversations/new` 的请求，将后端传入的 payload 合并到网页自身请求体，再把上游流式响应文本返回给后端。
 - Bridge 提供 `GET /health`，返回状态和当前页面数，供 entrypoint 和后端探测。
