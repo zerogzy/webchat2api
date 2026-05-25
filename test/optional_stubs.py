@@ -532,4 +532,3 @@ def install_tiktoken_stub() -> None:
     setattr(tiktoken, "get_encoding", lambda name: FakeEncoding())
     setattr(tiktoken, "encoding_for_model", lambda model: FakeEncoding())
     _install_module("tiktoken", tiktoken)
-
