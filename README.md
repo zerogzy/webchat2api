@@ -109,6 +109,8 @@ docker run -d \
 
 `docker-compose.yml` 使用本地镜像 `webchat2api:latest`。请先按上面的命令构建镜像，再启动服务。普通 Compose 文件仍是跨平台默认选择，即使没有显式 `networks:` 配置，Docker Compose 也会自动创建默认 bridge 网络：
 
+如需在 bridge 网络中访问宿主机代理，请在 Compose 文件中同时取消 `PROXY_URL` 和 `extra_hosts` 注释。
+
 ```bash
 docker compose up -d
 ```
