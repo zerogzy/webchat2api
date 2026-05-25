@@ -174,6 +174,24 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(response.content, "plain answer")
         self.assertEqual(response.reasoning_content, "")
 
+    def test_extract_console_stream_delta_from_output_text_delta(self) -> None:
+        delta = grok.extract_console_stream_delta({"type": "response.output_text.delta", "delta": "hello"})
+
+        self.assertEqual(delta.content, "hello")
+        self.assertEqual(delta.reasoning_content, "")
+
+    def test_extract_console_stream_delta_from_reasoning_delta(self) -> None:
+        delta = grok.extract_console_stream_delta({"type": "response.reasoning_summary_text.delta", "delta": "think"})
+
+        self.assertEqual(delta.content, "")
+        self.assertEqual(delta.reasoning_content, "think")
+
+    def test_extract_console_stream_delta_ignores_completed_snapshot(self) -> None:
+        delta = grok.extract_console_stream_delta({"type": "response.completed", "output_text": "complete text"})
+
+        self.assertEqual(delta.content, "")
+        self.assertEqual(delta.reasoning_content, "")
+
     def test_app_chat_headers_use_grok_app_shape_with_plain_token(self) -> None:
         with (
             mock.patch.object(grok, "_grok_app_chat_profile", return_value=types.SimpleNamespace(
@@ -393,16 +411,27 @@ class GrokProviderTests(unittest.TestCase):
             "stream": True,
             "messages": [{"role": "user", "content": "Hello"}],
         }
-        with mock.patch.object(grok, "console_chat_completion", return_value=grok.GrokConsoleCompletion(content="Hi there")):
+        events = [
+            {"type": "response.output_text.delta", "delta": "Hi"},
+            {"type": "response.output_text.delta", "delta": " there"},
+            {"type": "response.completed"},
+        ]
+        with (
+            mock.patch.object(grok, "console_chat_completion_events", return_value=iter(events)) as patched_stream,
+            mock.patch.object(grok, "console_chat_completion") as patched_blocking,
+        ):
             chunks = list(openai_v1_chat_complete.handle(body))
 
-        self.assertEqual(len(chunks), 2)
+        patched_stream.assert_called_once()
+        patched_blocking.assert_not_called()
+        self.assertEqual(len(chunks), 3)
         self.assertEqual(chunks[0]["object"], "chat.completion.chunk")
         self.assertEqual(chunks[0]["model"], "grok-4.20-multi-agent")
-        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "content": "Hi there"})
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "content": "Hi"})
         self.assertIsNone(chunks[0]["choices"][0]["finish_reason"])
-        self.assertEqual(chunks[1]["choices"][0]["delta"], {})
-        self.assertEqual(chunks[1]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": " there"})
+        self.assertEqual(chunks[2]["choices"][0]["delta"], {})
+        self.assertEqual(chunks[2]["choices"][0]["finish_reason"], "stop")
 
     def test_console_grok_reasoning_model_uses_console_path(self) -> None:
         spec = resolve_model("grok-4.20-reasoning")
@@ -415,15 +444,20 @@ class GrokProviderTests(unittest.TestCase):
             "stream": True,
             "messages": [{"role": "user", "content": "Hello"}],
         }
-        with mock.patch.object(
-            grok,
-            "console_chat_completion",
-            return_value=grok.GrokConsoleCompletion(content="Hi", reasoning_content="think"),
-        ) as patched_console, mock.patch.object(grok, "app_chat_completion_events") as patched_app_chat:
+        events = [
+            {"type": "response.reasoning_summary_text.delta", "delta": "think"},
+            {"type": "response.output_text.delta", "delta": "Hi"},
+        ]
+        with (
+            mock.patch.object(grok, "console_chat_completion_events", return_value=iter(events)) as patched_console,
+            mock.patch.object(grok, "app_chat_completion_events") as patched_app_chat,
+            mock.patch.object(grok, "console_chat_completion") as patched_blocking,
+        ):
             chunks = list(openai_v1_chat_complete.handle(body))
 
         patched_console.assert_called_once()
         patched_app_chat.assert_not_called()
+        patched_blocking.assert_not_called()
         self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "reasoning_content": "think"})
         self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": "Hi"})
         self.assertEqual(chunks[2]["choices"][0]["finish_reason"], "stop")
@@ -626,6 +660,321 @@ class GrokProviderTests(unittest.TestCase):
 
         self.assertEqual(created, [{"impersonate": "edge101", "verify": True}])
         self.assertEqual(client.network_profile.timeout, 60)
+
+    def test_grok_console_stream_response_parses_sse_lines(self) -> None:
+        calls: list[dict[str, object]] = []
+        closed: list[bool] = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                return iter([
+                    b": keepalive",
+                    b"event: response.output_text.delta",
+                    b'data: {"type":"response.output_text.delta","delta":"Hi"}',
+                    b"data: [DONE]",
+                    b'data: {"type":"response.output_text.delta","delta":" ignored"}',
+                ])
+
+            def close(self) -> None:
+                closed.append(True)
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                calls.append({"url": url, **kwargs})
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("token-value")
+            events = list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertEqual(events, [{"type": "response.output_text.delta", "delta": "Hi"}])
+        self.assertEqual(calls[0]["url"], grok.CONSOLE_RESPONSES_URL)
+        self.assertTrue(calls[0]["stream"])
+        self.assertEqual(calls[0]["json"]["stream"], True)
+        self.assertEqual(closed, [True])
+
+    def test_grok_console_stream_response_uses_sse_event_name_when_data_has_no_type(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                return iter([
+                    b"event: response.reasoning_summary_text.delta",
+                    b'data: {"delta":"think"}',
+                    b"event: response.output_text.delta",
+                    b'data: {"delta":"Hi"}',
+                    b"data: [DONE]",
+                ])
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("token-value")
+            events = list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertEqual(
+            events,
+            [
+                {"type": "response.reasoning_summary_text.delta", "delta": "think"},
+                {"type": "response.output_text.delta", "delta": "Hi"},
+            ],
+        )
+        self.assertEqual(grok.extract_console_stream_delta(events[0]).reasoning_content, "think")
+        self.assertEqual(grok.extract_console_stream_delta(events[1]).content, "Hi")
+
+    def test_grok_console_stream_response_aggregates_multiline_sse_data(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                return iter([
+                    b"event: response.output_text.delta",
+                    b'data: {"delta":',
+                    b'data: "Hi"}',
+                    b"",
+                    b"data:",
+                    b"",
+                    b"data: [DONE]",
+                ])
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("token-value")
+            events = list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertEqual(events, [{"type": "response.output_text.delta", "delta": "Hi"}])
+        self.assertEqual(grok.extract_console_stream_delta(events[0]).content, "Hi")
+
+    def test_grok_console_stream_response_resets_sse_event_after_dispatch(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                return iter([
+                    b"event: response.reasoning_summary_text.delta",
+                    b'data: {"delta":"think"}',
+                    b"",
+                    b'data: {"delta":"plain"}',
+                    b"",
+                    b"data: [DONE]",
+                ])
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("token-value")
+            events = list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertEqual(events[0], {"type": "response.reasoning_summary_text.delta", "delta": "think"})
+        self.assertEqual(events[1], {"delta": "plain"})
+        self.assertEqual(grok.extract_console_stream_delta(events[0]).reasoning_content, "think")
+        self.assertEqual(grok.extract_console_stream_delta(events[1]).content, "plain")
+
+    def test_grok_console_stream_marks_account_used_when_generator_is_closed(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_text_access_token=mock.Mock(return_value="selected-token"),
+            mark_text_used=mock.Mock(),
+        )
+        spec = resolve_model("grok-4.3")
+
+        class FakeClient:
+            def __init__(self, access_token: str) -> None:
+                self.access_token = access_token
+
+            def __enter__(self) -> "FakeClient":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                pass
+
+            def stream_response(self, payload):
+                yield {"type": "response.output_text.delta", "delta": "Hi"}
+                yield {"type": "response.output_text.delta", "delta": " later"}
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", FakeClient),
+        ):
+            events = grok.console_chat_completion_events(
+                {"model": "grok-4.3"},
+                spec,
+                [{"role": "user", "content": "Hello"}],
+            )
+            self.assertEqual(next(events), {"type": "response.output_text.delta", "delta": "Hi"})
+            events.close()
+
+        account_service.mark_text_used.assert_called_once_with("selected-token")
+
+    def test_grok_console_stream_marks_account_used_when_stream_completes_without_events(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_text_access_token=mock.Mock(return_value="selected-token"),
+            mark_text_used=mock.Mock(),
+        )
+        spec = resolve_model("grok-4.3")
+
+        class FakeClient:
+            def __init__(self, access_token: str) -> None:
+                self.access_token = access_token
+
+            def __enter__(self) -> "FakeClient":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                pass
+
+            def stream_response(self, payload):
+                return iter(())
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", FakeClient),
+        ):
+            events = list(grok.console_chat_completion_events(
+                {"model": "grok-4.3"},
+                spec,
+                [{"role": "user", "content": "Hello"}],
+            ))
+
+        self.assertEqual(events, [])
+        account_service.mark_text_used.assert_called_once_with("selected-token")
+
+    def test_grok_console_stream_marks_account_used_after_partial_stream_error(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_text_access_token=mock.Mock(return_value="selected-token"),
+            mark_text_used=mock.Mock(),
+        )
+        spec = resolve_model("grok-4.3")
+
+        class FakeClient:
+            def __init__(self, access_token: str) -> None:
+                self.access_token = access_token
+
+            def __enter__(self) -> "FakeClient":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                pass
+
+            def stream_response(self, payload):
+                yield {"type": "response.output_text.delta", "delta": "Hi"}
+                raise grok.GrokConsoleError("stream failed", 502)
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", FakeClient),
+        ):
+            events = grok.console_chat_completion_events(
+                {"model": "grok-4.3"},
+                spec,
+                [{"role": "user", "content": "Hello"}],
+            )
+            self.assertEqual(next(events), {"type": "response.output_text.delta", "delta": "Hi"})
+            with self.assertRaises(grok.HTTPException):
+                next(events)
+
+        account_service.mark_text_used.assert_called_once_with("selected-token")
+
+    def test_grok_console_stream_response_raises_stream_errors(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                return iter([
+                    b'data: {"type":"response.failed","error":{"message":"upstream failed"}}',
+                ])
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(grok.config, "data", {}), mock.patch("curl_cffi.requests.Session", FakeSession):
+            client = grok.GrokConsoleClient("token-value")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertIn("upstream failed", str(ctx.exception))
+
+    def test_grok_console_stream_response_includes_upstream_error_detail(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+
+        class FakeResponse:
+            status_code = 402
+
+            def json(self):
+                return {"error": {"message": "quota exhausted"}}
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok.config, "data", {}),
+            mock.patch("curl_cffi.requests.Session", FakeSession),
+        ):
+            client = grok.GrokConsoleClient("token-value")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                list(client.stream_response({"model": "grok-4.3", "input": []}))
+
+        self.assertIn("quota exhausted", str(ctx.exception))
+        account_service.update_account.assert_called_once_with("token-value", {"status": "限流"})
 
     def test_grok_console_uses_configured_network_profile(self) -> None:
         settings = {

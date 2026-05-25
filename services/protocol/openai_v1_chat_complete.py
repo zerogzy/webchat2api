@@ -115,12 +115,26 @@ def stream_grok_chat_completion(body: dict[str, Any], spec, messages: list[dict[
         return
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    response = grok.console_chat_completion(body, spec, messages)
-    if response.reasoning_content:
-        yield completion_chunk(model, {"role": "assistant", "reasoning_content": response.reasoning_content}, None, completion_id, created)
-        yield completion_chunk(model, {"content": response.content}, None, completion_id, created)
-    else:
-        yield completion_chunk(model, {"role": "assistant", "content": response.content}, None, completion_id, created)
+    sent_role = False
+    for event in grok.console_chat_completion_events(body, spec, messages):
+        delta = grok.extract_console_stream_delta(event)
+        if not delta.content and not delta.reasoning_content:
+            continue
+        if not sent_role:
+            sent_role = True
+            first_delta: dict[str, Any] = {"role": "assistant"}
+            if delta.reasoning_content:
+                first_delta["reasoning_content"] = delta.reasoning_content
+            else:
+                first_delta["content"] = delta.content
+            yield completion_chunk(model, first_delta, None, completion_id, created)
+            continue
+        if delta.reasoning_content:
+            yield completion_chunk(model, {"reasoning_content": delta.reasoning_content}, None, completion_id, created)
+        else:
+            yield completion_chunk(model, {"content": delta.content}, None, completion_id, created)
+    if not sent_role:
+        yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
     yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
