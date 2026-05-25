@@ -34,10 +34,26 @@ _bridge_probed = False
 
 
 class GrokConsoleError(RuntimeError):
-    def __init__(self, message: str, status_code: int = 502, upstream_status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        upstream_status: int | None = None,
+        code: str | None = None,
+        extra_detail: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.upstream_status = upstream_status
+        self.code = code
+        self.extra_detail = extra_detail or {}
+
+    def to_http_detail(self) -> dict[str, Any]:
+        detail: dict[str, Any] = {"error": str(self)}
+        if self.code:
+            detail["code"] = self.code
+        detail.update(self.extra_detail)
+        return detail
 
 
 @dataclass(frozen=True)
@@ -606,6 +622,96 @@ def _detect_bridge_url() -> str:
     return ""
 
 
+_BRIDGE_HEALTH_TIMEOUT = 2
+_BRIDGE_EXPLICIT_CHAT_TIMEOUT = 55
+_BRIDGE_ERROR_STATUS = {
+    "invalid_json": 400,
+    "invalid_request": 400,
+    "bridge_unavailable": 503,
+    "browser_bridge_unavailable": 503,
+    "navigation_timeout": 504,
+    "sso_unavailable": 401,
+    "page_not_prepared": 503,
+    "page_busy": 429,
+    "request_timeout": 504,
+    "upstream_error": 502,
+}
+
+
+def _browser_bridge_error_code(code: object | None) -> str:
+    normalized = str(code or "browser_bridge_unavailable").strip() or "browser_bridge_unavailable"
+    if normalized == "bridge_unavailable":
+        normalized = "browser_bridge_unavailable"
+    return normalized if normalized.startswith("grok_") else f"grok_{normalized}"
+
+
+def _parse_bridge_json_response(response: object) -> dict[str, Any]:
+    reader = getattr(response, "read", None)
+    if not callable(reader):
+        return {}
+    try:
+        raw = reader()
+    except Exception:
+        return {}
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        text = str(raw or "")
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _bridge_error_from_payload(
+    payload: dict[str, Any] | None,
+    upstream_status: int | None = None,
+    default_code: str = "browser_bridge_unavailable",
+) -> GrokConsoleError:
+    data = payload if isinstance(payload, dict) else {}
+    raw_code = data.get("code") or data.get("last_error_code") or default_code
+    bridge_code = str(raw_code or default_code)
+    status = _BRIDGE_ERROR_STATUS.get(bridge_code, _openai_status(upstream_status or 503))
+    message = str(data.get("error") or data.get("last_error") or "Browser Bridge is unavailable")
+    if bridge_code == "navigation_timeout":
+        message = f"Grok app-chat navigation timed out via Browser Bridge: {message}"
+    elif bridge_code == "sso_unavailable":
+        message = f"Grok app-chat authentication failed via Browser Bridge: {message}"
+    elif bridge_code == "page_not_prepared":
+        message = f"Grok app-chat Browser Bridge page was not prepared: {message}"
+    elif bridge_code in {"bridge_unavailable", "browser_bridge_unavailable"}:
+        message = f"Grok app-chat Browser Bridge unavailable: {message}"
+    else:
+        message = f"Grok app-chat via Browser Bridge failed: {message}"
+    return GrokConsoleError(
+        message,
+        status,
+        upstream_status,
+        code=_browser_bridge_error_code(bridge_code),
+        extra_detail={"bridge_code": bridge_code},
+    )
+
+
+def _preflight_browser_bridge_health(bridge_url: str) -> None:
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"{bridge_url}/health", timeout=_BRIDGE_HEALTH_TIMEOUT) as response:
+            health = _parse_bridge_json_response(response)
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise GrokConsoleError(
+            f"Grok app-chat Browser Bridge unavailable: {exc}",
+            503,
+            None,
+            code="grok_browser_bridge_unavailable",
+            extra_detail={"bridge_code": "browser_bridge_unavailable"},
+        ) from exc
+    if health.get("status") != "ok":
+        raise _bridge_error_from_payload(health, 503, "browser_bridge_unavailable")
+
+
 def app_chat_headers(access_token: str, account: dict[str, Any] | None = None) -> dict[str, str]:
     profile = _grok_app_chat_profile()
     headers = {
@@ -883,6 +989,7 @@ class GrokAppChatClient:
             return True
 
     def _try_browser_bridge(self, payload: dict[str, Any]) -> list[str] | None:
+        configured_bridge = bool(config.browser_bridge_url)
         bridge_url = _detect_bridge_url()
         if not bridge_url:
             return None
@@ -891,6 +998,8 @@ class GrokAppChatClient:
             return None
         import urllib.request
         import urllib.error
+        if configured_bridge:
+            _preflight_browser_bridge_health(bridge_url)
         bridge_body = json.dumps({"sso": sso, "payload": payload}).encode()
         req = urllib.request.Request(
             f"{bridge_url}/api/chat",
@@ -898,19 +1007,33 @@ class GrokAppChatClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        timeout = _BRIDGE_EXPLICIT_CHAT_TIMEOUT if configured_bridge else 120
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 if resp.status != 200:
                     logger.warning({"event": "browser_bridge_error", "status": resp.status})
+                    if configured_bridge:
+                        raise _bridge_error_from_payload(_parse_bridge_json_response(resp), resp.status)
                     return None
                 return resp.read().decode("utf-8", errors="replace").splitlines()
         except urllib.error.HTTPError as exc:
+            payload = _parse_bridge_json_response(exc)
+            if payload.get("code"):
+                raise _bridge_error_from_payload(payload, exc.code) from exc
             msg = f"Grok app-chat forbidden (HTTP {exc.code}): account may lack required tier" if exc.code == 403 else f"Grok app-chat via bridge failed (HTTP {exc.code})"
-            raise GrokConsoleError(msg, _openai_status(exc.code), exc.code)
-        except (urllib.error.URLError, OSError, TimeoutError):
+            raise GrokConsoleError(msg, _openai_status(exc.code), exc.code) from exc
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
             global _bridge_probed
             _bridge_probed = False
             logger.warning({"event": "browser_bridge_unavailable"})
+            if configured_bridge:
+                raise GrokConsoleError(
+                    f"Grok app-chat Browser Bridge unavailable: {exc}",
+                    503,
+                    None,
+                    code="grok_browser_bridge_unavailable",
+                    extra_detail={"bridge_code": "browser_bridge_unavailable"},
+                ) from exc
             return None
 
     def _stream_direct_events(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -978,7 +1101,7 @@ def app_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messages: 
         with GrokAppChatClient(access_token, account) as client:
             yield from client.stream_events(payload)
     except GrokConsoleError as exc:
-        raise HTTPException(status_code=exc.status_code, detail={"error": str(exc)}) from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
     account_service.mark_text_used(access_token)
 
 
@@ -1044,7 +1167,7 @@ def console_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: lis
         with GrokConsoleClient(access_token) as client:
             response_json = client.create_response(payload)
     except GrokConsoleError as exc:
-        raise HTTPException(status_code=exc.status_code, detail={"error": str(exc)}) from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
     account_service.mark_text_used(access_token)
     completion = extract_console_completion(response_json)
     if not completion.content and not completion.reasoning_content:
@@ -1067,7 +1190,7 @@ def console_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messag
                 yield event
             mark_used = True
     except GrokConsoleError as exc:
-        raise HTTPException(status_code=exc.status_code, detail={"error": str(exc)}) from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
     finally:
         if mark_used:
             account_service.mark_text_used(access_token)
