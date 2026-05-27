@@ -554,6 +554,104 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(message["content"], "Hi")
         self.assertEqual(message["reasoning_content"], "think")
 
+    def test_console_chat_completion_uses_reserved_console_quota(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_console_access_token=mock.Mock(return_value="grok-token"),
+            mark_grok_console_used=mock.Mock(),
+        )
+        response_json = {
+            "output": [{"content": [{"type": "output_text", "text": "Hi"}]}],
+        }
+        client = mock.Mock()
+        client.__enter__ = mock.Mock(return_value=client)
+        client.__exit__ = mock.Mock(return_value=None)
+        client.create_response.return_value = response_json
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", return_value=client),
+        ):
+            completion = grok.console_chat_completion({}, resolve_model("grok-4.3"), [{"role": "user", "content": "Hello"}])
+
+        self.assertEqual(completion.content, "Hi")
+        account_service.get_grok_console_access_token.assert_called_once_with()
+        account_service.mark_grok_console_used.assert_not_called()
+
+    def test_console_chat_completion_marks_failed_request_without_extra_quota_decrement(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_console_access_token=mock.Mock(return_value="grok-token"),
+            mark_grok_console_used=mock.Mock(),
+        )
+        client = mock.Mock()
+        client.__enter__ = mock.Mock(return_value=client)
+        client.__exit__ = mock.Mock(return_value=None)
+        client.create_response.side_effect = grok.GrokConsoleError("upstream failed", 502)
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", return_value=client),
+        ):
+            with self.assertRaises(grok.HTTPException):
+                grok.console_chat_completion({}, resolve_model("grok-4.3"), [{"role": "user", "content": "Hello"}])
+
+        account_service.get_grok_console_access_token.assert_called_once_with()
+        account_service.mark_grok_console_used.assert_called_once_with("grok-token", success=False)
+
+    def test_console_chat_completion_marks_empty_response_failed_without_extra_quota_decrement(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_console_access_token=mock.Mock(return_value="grok-token"),
+            mark_grok_console_used=mock.Mock(),
+        )
+        client = mock.Mock()
+        client.__enter__ = mock.Mock(return_value=client)
+        client.__exit__ = mock.Mock(return_value=None)
+        client.create_response.return_value = {"output": []}
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", return_value=client),
+        ):
+            with self.assertRaises(grok.HTTPException) as ctx:
+                grok.console_chat_completion({}, resolve_model("grok-4.3"), [{"role": "user", "content": "Hello"}])
+
+        self.assertEqual(ctx.exception.status_code, 502)
+        account_service.get_grok_console_access_token.assert_called_once_with()
+        client.create_response.assert_called_once()
+        account_service.mark_grok_console_used.assert_called_once_with("grok-token", success=False)
+
+    def test_console_chat_completion_validates_payload_before_reserving_quota(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_console_access_token=mock.Mock(return_value="grok-token"),
+            mark_grok_console_used=mock.Mock(),
+        )
+
+        with mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}):
+            with self.assertRaises(grok.HTTPException):
+                grok.console_chat_completion({}, resolve_model("grok-4.3"), [{"role": "user", "content": ""}])
+
+        account_service.get_grok_console_access_token.assert_not_called()
+        account_service.mark_grok_console_used.assert_not_called()
+
+    def test_console_stream_uses_reserved_console_quota(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_console_access_token=mock.Mock(return_value="grok-token"),
+            mark_grok_console_used=mock.Mock(),
+        )
+        client = mock.Mock()
+        client.__enter__ = mock.Mock(return_value=client)
+        client.__exit__ = mock.Mock(return_value=None)
+        client.stream_response.return_value = iter([{"type": "response.created"}, {"type": "response.completed"}])
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", return_value=client),
+        ):
+            events = list(grok.console_chat_completion_events({}, resolve_model("grok-4.3"), [{"role": "user", "content": "Hello"}]))
+
+        self.assertEqual([event["type"] for event in events], ["response.created", "response.completed"])
+        account_service.get_grok_console_access_token.assert_called_once_with()
+        account_service.mark_grok_console_used.assert_not_called()
+
     def test_non_streaming_grok_console_completion_includes_reasoning_content(self) -> None:
         body = {
             "model": "grok-4.20-reasoning",
@@ -1018,10 +1116,10 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(grok.extract_console_stream_delta(events[0]).reasoning_content, "think")
         self.assertEqual(grok.extract_console_stream_delta(events[1]).content, "plain")
 
-    def test_grok_console_stream_marks_account_used_when_generator_is_closed(self) -> None:
+    def test_grok_console_stream_does_not_mark_reserved_quota_when_generator_is_closed(self) -> None:
         account_service = types.SimpleNamespace(
-            get_text_access_token=mock.Mock(return_value="selected-token"),
-            mark_text_used=mock.Mock(),
+            get_grok_console_access_token=mock.Mock(return_value="selected-token"),
+            mark_grok_console_used=mock.Mock(),
         )
         spec = resolve_model("grok-4.3")
 
@@ -1051,12 +1149,12 @@ class GrokProviderTests(unittest.TestCase):
             self.assertEqual(next(events), {"type": "response.output_text.delta", "delta": "Hi"})
             events.close()
 
-        account_service.mark_text_used.assert_called_once_with("selected-token")
+        account_service.mark_grok_console_used.assert_not_called()
 
-    def test_grok_console_stream_marks_account_used_when_stream_completes_without_events(self) -> None:
+    def test_grok_console_stream_does_not_mark_reserved_quota_when_stream_completes_without_events(self) -> None:
         account_service = types.SimpleNamespace(
-            get_text_access_token=mock.Mock(return_value="selected-token"),
-            mark_text_used=mock.Mock(),
+            get_grok_console_access_token=mock.Mock(return_value="selected-token"),
+            mark_grok_console_used=mock.Mock(),
         )
         spec = resolve_model("grok-4.3")
 
@@ -1084,12 +1182,12 @@ class GrokProviderTests(unittest.TestCase):
             ))
 
         self.assertEqual(events, [])
-        account_service.mark_text_used.assert_called_once_with("selected-token")
+        account_service.mark_grok_console_used.assert_not_called()
 
     def test_grok_console_stream_marks_account_used_after_partial_stream_error(self) -> None:
         account_service = types.SimpleNamespace(
-            get_text_access_token=mock.Mock(return_value="selected-token"),
-            mark_text_used=mock.Mock(),
+            get_grok_console_access_token=mock.Mock(return_value="selected-token"),
+            mark_grok_console_used=mock.Mock(),
         )
         spec = resolve_model("grok-4.3")
 
@@ -1120,7 +1218,7 @@ class GrokProviderTests(unittest.TestCase):
             with self.assertRaises(grok.HTTPException):
                 next(events)
 
-        account_service.mark_text_used.assert_called_once_with("selected-token")
+        account_service.mark_grok_console_used.assert_called_once_with("selected-token", success=False)
 
     def test_grok_console_stream_response_raises_stream_errors(self) -> None:
         class FakeResponse:

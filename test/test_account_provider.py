@@ -213,6 +213,88 @@ class AccountProviderTests(unittest.TestCase):
         self.assertIsNone(account["user_agent"])
         self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
 
+    def test_grok_console_quota_normalizes_defaults_and_persists(self) -> None:
+        storage = MemoryStorage([{"access_token": "grok-token", "provider": "grok"}])
+        service = AccountService(storage)
+
+        [account] = service.list_accounts()
+        self.assertEqual(account["quota_console"], {
+            "remaining": 30,
+            "total": 30,
+            "window_seconds": 900,
+            "reset_at": None,
+        })
+        service.get_grok_console_access_token()
+        [stored] = storage.accounts
+        self.assertEqual(stored["quota_console"]["remaining"], 29)
+        self.assertEqual(stored["quota"], 0)
+
+    def test_grok_console_selection_skips_exhausted_until_reset(self) -> None:
+        now = [1000.0]
+        service = AccountService(MemoryStorage([
+            {
+                "access_token": "exhausted-token",
+                "provider": "grok",
+                "quota_console": {"remaining": 0, "total": 30, "window_seconds": 900, "reset_at": 1900},
+            },
+            {"access_token": "ready-token", "provider": "grok"},
+        ]), now=lambda: now[0])
+
+        self.assertEqual(service.get_grok_console_access_token(), "ready-token")
+        now[0] = 1900.0
+        self.assertEqual(service.get_grok_console_access_token(excluded_tokens={"ready-token"}), "exhausted-token")
+        [reset_account] = [item for item in service.list_accounts() if item["access_token"] == "exhausted-token"]
+        self.assertEqual(reset_account["quota_console"]["remaining"], 29)
+        self.assertIsNone(reset_account["quota_console"]["reset_at"])
+
+    def test_grok_console_selection_reserves_quota_and_sets_reset_window(self) -> None:
+        now = [5000.0]
+        service = AccountService(MemoryStorage([
+            {
+                "access_token": "grok-token",
+                "provider": "grok",
+                "quota_console": {"remaining": 1, "total": 30, "window_seconds": 900, "reset_at": None},
+            }
+        ]), now=lambda: now[0])
+
+        self.assertEqual(service.get_grok_console_access_token(), "grok-token")
+
+        [account] = service.list_accounts()
+        self.assertEqual(account["quota_console"]["remaining"], 0)
+        self.assertEqual(account["quota_console"]["reset_at"], 5900)
+        self.assertEqual(service.get_grok_console_access_token(), "")
+
+    def test_grok_console_selection_reserves_without_provider_mark(self) -> None:
+        service = AccountService(MemoryStorage([
+            {
+                "access_token": "grok-token",
+                "provider": "grok",
+                "quota_console": {"remaining": 1, "total": 1, "window_seconds": 900, "reset_at": None},
+            }
+        ]))
+
+        self.assertEqual(service.get_grok_console_access_token(), "grok-token")
+        self.assertEqual(service.get_grok_console_access_token(), "")
+
+        [account] = service.list_accounts()
+        self.assertEqual(account["quota_console"]["remaining"], 0)
+
+    def test_text_and_image_usage_do_not_consume_console_quota(self) -> None:
+        storage = MemoryStorage([
+            {"access_token": "grok-token", "provider": "grok"},
+            {"access_token": "gpt-token", "provider": "gpt", "quota": 1},
+        ])
+        service = AccountService(storage)
+
+        service.mark_text_used("grok-token")
+        service.mark_image_result("gpt-token", success=True)
+
+        grok_account = service.get_account("grok-token")
+        gpt_account = service.get_account("gpt-token")
+        self.assertEqual(grok_account["quota_console"]["remaining"], 30)
+        self.assertNotIn("quota_console", gpt_account)
+        self.assertEqual(gpt_account["quota"], 0)
+
     def test_selects_grok_app_chat_token_by_tier_semantics(self) -> None:
         basic_service = AccountService(MemoryStorage())
         basic_service.add_account_items([

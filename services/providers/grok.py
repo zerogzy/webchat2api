@@ -1189,18 +1189,19 @@ def app_chat_image_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n
 def console_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> GrokConsoleCompletion:
     from services.account_service import account_service
 
-    access_token = account_service.get_text_access_token(provider=GROK_PROVIDER)
+    payload = build_console_payload(spec, body, messages)
+    access_token = account_service.get_grok_console_access_token()
     if not access_token:
         raise HTTPException(status_code=503, detail={"error": "no available Grok account"})
-    payload = build_console_payload(spec, body, messages)
     try:
         with GrokConsoleClient(access_token) as client:
             response_json = client.create_response(payload)
     except GrokConsoleError as exc:
+        account_service.mark_grok_console_used(access_token, success=False)
         raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
-    account_service.mark_text_used(access_token)
     completion = extract_console_completion(response_json)
     if not completion.content and not completion.reasoning_content:
+        account_service.mark_grok_console_used(access_token, success=False)
         raise HTTPException(status_code=502, detail={"error": "Grok upstream response did not contain text"})
     return completion
 
@@ -1208,22 +1209,17 @@ def console_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: lis
 def console_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     from services.account_service import account_service
 
-    access_token = account_service.get_text_access_token(provider=GROK_PROVIDER)
+    payload = build_console_payload(spec, body, messages)
+    access_token = account_service.get_grok_console_access_token()
     if not access_token:
         raise HTTPException(status_code=503, detail={"error": "no available Grok account"})
-    payload = build_console_payload(spec, body, messages)
-    mark_used = False
     try:
         with GrokConsoleClient(access_token) as client:
             for event in client.stream_response(payload):
-                mark_used = True
                 yield event
-            mark_used = True
     except GrokConsoleError as exc:
+        account_service.mark_grok_console_used(access_token, success=False)
         raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
-    finally:
-        if mark_used:
-            account_service.mark_text_used(access_token)
 
 
 def chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> str:

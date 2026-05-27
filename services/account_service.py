@@ -6,7 +6,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from threading import Condition, Lock
-from typing import Any
+from typing import Any, Callable
 
 from services.config import config
 from services.log_service import (
@@ -60,6 +60,8 @@ GROK_TIER_ALIASES = {
     "heavy": "heavy",
 }
 GROK_UNAVAILABLE_STATUSES = {"禁用", "异常", "限流", "disabled", "abnormal", "limited"}
+GROK_CONSOLE_QUOTA_TOTAL = 30
+GROK_CONSOLE_QUOTA_WINDOW_SECONDS = 900
 
 
 def _normalize_grok_tier(value: Any) -> str:
@@ -119,11 +121,12 @@ def _grok_account_has_capability(account: dict, spec: ModelSpec) -> bool:
 class AccountService:
     """账号池服务，使用 token -> account 的 dict 保存账号。"""
 
-    def __init__(self, storage_backend: StorageBackend):
+    def __init__(self, storage_backend: StorageBackend, now: Callable[[], float] | None = None):
         self.storage = storage_backend
         self._lock = Lock()
         self._image_slot_condition = Condition(self._lock)
         self._index = 0
+        self._now = now or (lambda: datetime.now(timezone.utc).timestamp())
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
 
@@ -153,6 +156,64 @@ class AccountService:
         if bool(account.get("image_quota_unknown")):
             return True
         return int(account.get("quota") or 0) > 0
+
+    @staticmethod
+    def _normalize_console_quota(value: Any) -> dict[str, Any]:
+        raw = value if isinstance(value, dict) else {}
+        total = raw.get("total")
+        try:
+            total_value = int(total if total is not None else GROK_CONSOLE_QUOTA_TOTAL)
+        except (TypeError, ValueError):
+            total_value = GROK_CONSOLE_QUOTA_TOTAL
+        total_value = max(0, total_value)
+
+        window_seconds = raw.get("window_seconds")
+        try:
+            window_value = int(window_seconds if window_seconds is not None else GROK_CONSOLE_QUOTA_WINDOW_SECONDS)
+        except (TypeError, ValueError):
+            window_value = GROK_CONSOLE_QUOTA_WINDOW_SECONDS
+        window_value = max(0, window_value)
+
+        remaining = raw.get("remaining")
+        try:
+            remaining_value = int(remaining if remaining is not None else total_value)
+        except (TypeError, ValueError):
+            remaining_value = total_value
+        remaining_value = min(total_value, max(0, remaining_value))
+
+        reset_at = raw.get("reset_at")
+        try:
+            reset_at_value = int(reset_at) if reset_at is not None else None
+        except (TypeError, ValueError):
+            reset_at_value = None
+
+        return {
+            "remaining": remaining_value,
+            "total": total_value,
+            "window_seconds": window_value,
+            "reset_at": reset_at_value,
+        }
+
+    def _reset_console_quota_if_ready(self, account: dict, now: float | None = None) -> dict:
+        next_account = dict(account)
+        quota = self._normalize_console_quota(next_account.get("quota_console"))
+        reset_at = quota.get("reset_at")
+        current_time = self._now() if now is None else now
+        if reset_at is not None and int(reset_at) <= int(current_time):
+            quota["remaining"] = quota["total"]
+            quota["reset_at"] = None
+        next_account["quota_console"] = quota
+        return next_account
+
+    def _is_console_account_available(self, account: dict, now: float | None = None) -> bool:
+        if not isinstance(account, dict):
+            return False
+        if normalize_provider(account.get("provider")) != GROK_PROVIDER:
+            return False
+        if account.get("status") in GROK_UNAVAILABLE_STATUSES:
+            return False
+        quota = self._reset_console_quota_if_ready(account, now).get("quota_console") or {}
+        return int(quota.get("remaining") or 0) > 0
 
     @staticmethod
     def _normalize_account_type(value: Any) -> str | None:
@@ -212,6 +273,7 @@ class AccountService:
             if "model_tier" in normalized:
                 normalized["model_tier"] = normalized_tier
             normalized["app_chat"] = bool(normalized.get("app_chat"))
+            normalized["quota_console"] = self._normalize_console_quota(normalized.get("quota_console"))
             normalized["capabilities"] = _normalize_string_list(normalized.get("capabilities"))
             cf_cookies = normalized.get("cf_cookies")
             normalized["cf_cookies"] = cf_cookies if isinstance(cf_cookies, dict) else _clean_string(cf_cookies)
@@ -302,6 +364,44 @@ class AccountService:
         self._index += 1
         return access_token
 
+    def _reserve_grok_console_quota(self, account: dict, now: float) -> dict:
+        next_item = self._reset_console_quota_if_ready(account, now)
+        quota = self._normalize_console_quota(next_item.get("quota_console"))
+        quota["remaining"] = max(0, int(quota.get("remaining") or 0) - 1)
+        if quota["remaining"] == 0 and quota.get("reset_at") is None:
+            quota["reset_at"] = int(now) + int(quota.get("window_seconds") or GROK_CONSOLE_QUOTA_WINDOW_SECONDS)
+        next_item["quota_console"] = quota
+        next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return next_item
+
+    def get_grok_console_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+        excluded = set(excluded_tokens or set())
+        with self._lock:
+            now = self._now()
+            candidates: list[str] = []
+            changed = False
+            for token, account in list(self._accounts.items()):
+                if normalize_provider(account.get("provider")) != GROK_PROVIDER:
+                    continue
+                if (account.get("access_token") or "") in excluded:
+                    continue
+                refreshed = self._reset_console_quota_if_ready(account, now)
+                if refreshed != account:
+                    self._accounts[token] = refreshed
+                    changed = True
+                if self._is_console_account_available(refreshed, now):
+                    candidates.append(refreshed.get("access_token") or "")
+            access_token = self._next_text_token([candidate for candidate in candidates if candidate])
+            if access_token:
+                reserved = self._reserve_grok_console_quota(self._accounts[access_token], now)
+                account = self._normalize_account(reserved)
+                if account is not None:
+                    self._accounts[access_token] = account
+                    changed = True
+            if changed:
+                self._save_accounts()
+            return access_token
+
     def get_grok_app_chat_access_token(self, spec: ModelSpec, excluded_tokens: set[str] | None = None) -> str:
         requested_tiers = _grok_requested_tiers(spec)
         if not requested_tiers:
@@ -337,6 +437,25 @@ class AccountService:
                 return
             next_item = dict(current)
             next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            account = self._normalize_account(next_item)
+            if account is None:
+                return
+            self._accounts[access_token] = account
+            self._save_accounts()
+
+    def mark_grok_console_used(self, access_token: str, success: bool = True) -> None:
+        if not access_token:
+            return
+        with self._lock:
+            current = self._accounts.get(access_token)
+            if current is None:
+                return
+            next_item = dict(current)
+            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if success:
+                next_item["success"] = int(next_item.get("success") or 0) + 1
+            else:
+                next_item["fail"] = int(next_item.get("fail") or 0) + 1
             account = self._normalize_account(next_item)
             if account is None:
                 return
