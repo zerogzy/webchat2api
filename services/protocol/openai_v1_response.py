@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from services.models import GROK_PROVIDER, is_grok_app_chat_model, resolve_model
 from services.providers import grok
+import services.protocol.tool_calls as tool_calls
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
@@ -54,10 +55,7 @@ def messages_from_input(input_value: object, instructions: object = None) -> lis
             messages.append({"role": "user", "content": input_value.strip()})
         return messages
     if isinstance(input_value, dict):
-        messages.append({
-            "role": str(input_value.get("role") or "user"),
-            "content": extract_response_prompt([input_value]) or input_value.get("content") or "",
-        })
+        messages.extend(_messages_from_response_item(input_value))
         return messages
     if isinstance(input_value, list):
         if all(isinstance(item, dict) and item.get("type") for item in input_value):
@@ -67,11 +65,48 @@ def messages_from_input(input_value: object, instructions: object = None) -> lis
             return messages
         for item in input_value:
             if isinstance(item, dict):
-                messages.append({
-                    "role": str(item.get("role") or "user"),
-                    "content": extract_response_prompt([item]) or item.get("content") or "",
-                })
+                messages.extend(_messages_from_response_item(item))
     return messages
+
+
+def _messages_from_response_item(item: dict[str, Any]) -> list[dict[str, Any]]:
+    item_type = str(item.get("type") or "")
+    if item_type == "function_call":
+        return [{
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": str(item.get("call_id") or ""),
+                "type": "function",
+                "function": {
+                    "name": str(item.get("name") or ""),
+                    "arguments": str(item.get("arguments") or "{}"),
+                },
+            }],
+        }]
+    if item_type in {"function_call_output", "tool_result"}:
+        return [{
+            "role": "tool",
+            "tool_call_id": str(item.get("call_id") or item.get("tool_call_id") or ""),
+            "content": str(item.get("output") or item.get("content") or ""),
+        }]
+    return [{
+        "role": str(item.get("role") or "user"),
+        "content": extract_response_prompt([item]) or item.get("content") or "",
+    }]
+
+
+def prepare_response_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    messages = messages_from_input(body.get("input"), body.get("instructions"))
+    if tool_calls.has_function_tools(body):
+        injected = tool_calls.inject_tool_prompt(
+            messages,
+            body.get("tools"),
+            body.get("tool_choice"),
+            body.get("parallel_tool_calls"),
+        )
+        return injected, messages
+    return messages, messages
 
 
 def text_output_item(text: str, item_id: str | None = None, status: str = "completed") -> dict[str, Any]:
@@ -82,6 +117,15 @@ def text_output_item(text: str, item_id: str | None = None, status: str = "compl
         "role": "assistant",
         "content": [{"type": "output_text", "text": text, "annotations": []}],
     }
+
+
+def response_output_from_text(body: dict[str, Any], text: str) -> list[dict[str, Any]]:
+    names = tool_calls.tool_names(body.get("tools"))
+    if names:
+        parsed = tool_calls.parse_tool_calls(text, names)
+        if parsed.calls:
+            return tool_calls.response_function_call_items(parsed.calls)
+    return [text_output_item(text)]
 
 
 def image_output_items(prompt: str, data: list[dict[str, Any]], item_id: str | None = None) -> list[dict[str, Any]]:
@@ -133,23 +177,34 @@ def response_completed(response_id: str, model: str, created: int, output: list[
     }
 
 
+def stream_response_output_items(output: list[dict[str, Any]], response_id: str, model: str, created: int) -> Iterator[dict[str, Any]]:
+    for index, item in enumerate(output):
+        if item.get("type") == "function_call":
+            yield {"type": "response.output_item.added", "output_index": index, "item": {**item, "arguments": "", "status": "in_progress"}}
+            yield {"type": "response.function_call_arguments.delta", "item_id": item["id"], "output_index": index, "delta": item["arguments"]}
+            yield {"type": "response.function_call_arguments.done", "item_id": item["id"], "output_index": index, "arguments": item["arguments"]}
+            yield {"type": "response.output_item.done", "output_index": index, "item": item}
+            continue
+        yield {"type": "response.output_item.added", "output_index": index, "item": item}
+        content = item.get("content") if isinstance(item.get("content"), list) else []
+        first = content[0] if content and isinstance(content[0], dict) else {}
+        text = str(first.get("text") or "")
+        if text:
+            yield {"type": "response.output_text.delta", "item_id": item["id"], "output_index": index, "content_index": 0, "delta": text}
+        yield {"type": "response.output_text.done", "item_id": item["id"], "output_index": index, "content_index": 0, "text": text}
+        yield {"type": "response.output_item.done", "output_index": index, "item": item}
+    yield response_completed(response_id, model, created, output)
+
+
 def stream_text_response(backend, body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     model = str(body.get("model") or "auto").strip() or "auto"
-    messages = messages_from_input(body.get("input"), body.get("instructions"))
+    messages, _ = prepare_response_messages(body)
     response_id = f"resp_{uuid.uuid4().hex}"
-    item_id = f"msg_{uuid.uuid4().hex}"
     created = int(time.time())
-    full_text = ""
     yield response_created(response_id, model, created)
-    yield {"type": "response.output_item.added", "output_index": 0, "item": text_output_item("", item_id, "in_progress")}
     request = ConversationRequest(model=model, messages=messages)
-    for delta in stream_text_deltas(backend, request):
-        full_text += delta
-        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 0, "content_index": 0, "delta": delta}
-    yield {"type": "response.output_text.done", "item_id": item_id, "output_index": 0, "content_index": 0, "text": full_text}
-    item = text_output_item(full_text, item_id, "completed")
-    yield {"type": "response.output_item.done", "output_index": 0, "item": item}
-    yield response_completed(response_id, model, created, [item])
+    full_text = "".join(stream_text_deltas(backend, request))
+    yield from stream_response_output_items(response_output_from_text(body, full_text), response_id, model, created)
 
 
 def stream_grok_console_response(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -157,22 +212,14 @@ def stream_grok_console_response(body: dict[str, Any]) -> Iterator[dict[str, Any
     spec = resolve_model(model)
     if is_grok_app_chat_model(spec):
         raise HTTPException(status_code=501, detail={"error": "Grok app-chat is not supported on /v1/responses"})
-    messages = messages_from_input(body.get("input"), body.get("instructions"))
+    messages, _ = prepare_response_messages(body)
     if not messages:
         raise HTTPException(status_code=400, detail={"error": "input text is required"})
     response_id = f"resp_{uuid.uuid4().hex}"
-    item_id = f"msg_{uuid.uuid4().hex}"
     created = int(time.time())
     yield response_created(response_id, model, created)
-    yield {"type": "response.output_item.added", "output_index": 0, "item": text_output_item("", item_id, "in_progress")}
     completion = grok.console_chat_completion(body, spec, messages)
-    text = completion.content
-    if text:
-        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 0, "content_index": 0, "delta": text}
-    yield {"type": "response.output_text.done", "item_id": item_id, "output_index": 0, "content_index": 0, "text": text}
-    item = text_output_item(text, item_id, "completed")
-    yield {"type": "response.output_item.done", "output_index": 0, "item": item}
-    yield response_completed(response_id, model, created, [item])
+    yield from stream_response_output_items(response_output_from_text(body, completion.content), response_id, model, created)
 
 
 def stream_image_response(image_outputs: Iterable[ImageOutput], prompt: str, model: str) -> Iterator[dict[str, Any]]:
