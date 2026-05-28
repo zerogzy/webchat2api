@@ -180,17 +180,20 @@ class ConfigLoadingTests(unittest.TestCase):
 
             result = store.update({
                 "proxy": "http://allowed-proxy",
+                "show_search_sources": "true",
                 "auth-key": "posted-secret",
                 "backup_state": {"last_run": "now"},
                 "unexpected_secret": "do-not-store",
             })
 
             self.assertEqual(result["proxy"], "http://allowed-proxy")
+            self.assertTrue(result["show_search_sources"])
+            self.assertTrue(store.show_search_sources)
             self.assertNotIn("auth-key", result)
             self.assertNotIn("backup_state", store.data)
             self.assertNotIn("unexpected_secret", store.data)
             settings = json.loads((Path(tmp_dir) / "data" / "settings.json").read_text(encoding="utf-8"))
-            self.assertEqual(settings, {"proxy": "http://allowed-proxy"})
+            self.assertEqual(settings, {"proxy": "http://allowed-proxy", "show_search_sources": "true"})
 
     def test_config_json_initial_values_migrate_to_storage(self) -> None:
         if not _has_sqlalchemy():

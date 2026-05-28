@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, cast
 
 from fastapi import HTTPException
 
 from services.models import GROK_PROVIDER, resolve_model, is_grok_app_chat_model
 from services.providers import grok
+from services.config import config
 import services.protocol.tool_calls as tool_calls
 from services.protocol.conversation import (
     ConversationRequest,
@@ -42,6 +43,7 @@ def completion_response(
     messages: list[dict[str, Any]] | None = None,
     reasoning_content: str = "",
     tool_call_messages: list[dict[str, Any]] | None = None,
+    search_sources: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     token_messages = tool_call_messages or messages
     prompt_tokens = count_message_tokens(token_messages, model) if token_messages else 0
@@ -50,6 +52,9 @@ def completion_response(
     message: dict[str, Any] = {"role": "assistant", "content": content}
     if reasoning_content:
         message["reasoning_content"] = reasoning_content
+    if search_sources:
+        message["search_sources"] = search_sources
+        message["annotations"] = url_citation_annotations(search_sources)
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
@@ -66,6 +71,23 @@ def completion_response(
             "total_tokens": prompt_tokens + completion_tokens + reasoning_tokens,
         },
     }
+
+
+def url_citation_annotations(search_sources: list[dict[str, str]]) -> list[dict[str, Any]]:
+    annotations: list[dict[str, Any]] = []
+    for source in search_sources:
+        url = str(source.get("url") or "").strip()
+        if not url:
+            continue
+        title = str(source.get("title") or url).strip() or url
+        annotations.append({
+            "type": "url_citation",
+            "url_citation": {
+                "url": url,
+                "title": title,
+            },
+        })
+    return annotations
 
 
 def stream_include_usage(body: dict[str, Any]) -> bool:
@@ -209,7 +231,9 @@ def stream_grok_app_chat_completion(body: dict[str, Any], spec, messages: list[d
     sent_role = False
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
+    search_sources: list[dict[str, str]] = []
     for event in grok.app_chat_completion_events(body, spec, messages):
+        search_sources.extend(grok.extract_app_chat_search_sources(event))
         token, thinking = grok.extract_app_chat_token(event)
         if not token:
             if grok.is_app_chat_final_event(event):
@@ -236,7 +260,12 @@ def stream_grok_app_chat_completion(body: dict[str, Any], spec, messages: list[d
     if not sent_role:
         chunk = completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
         yield stream_chunk(chunk, include_usage)
-    yield stream_chunk(completion_chunk(model, {}, "stop", completion_id, created), include_usage)
+    final_delta: dict[str, Any] = {}
+    deduped_sources = grok.dedupe_search_sources(search_sources)
+    if deduped_sources:
+        final_delta["search_sources"] = deduped_sources
+        final_delta["annotations"] = url_citation_annotations(deduped_sources)
+    yield stream_chunk(completion_chunk(model, final_delta, "stop", completion_id, created), include_usage)
     if include_usage:
         yield completion_usage_chunk(
             model,
@@ -315,7 +344,7 @@ def chat_messages_from_body(body: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def prepare_text_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    raw_messages = chat_messages_from_body(body)
+    raw_messages = grok.strip_search_sources_from_messages(chat_messages_from_body(body))
     if tool_calls.has_function_tools(body):
         injected = tool_calls.inject_tool_prompt(
             raw_messages,
@@ -466,7 +495,11 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     if spec.provider == GROK_PROVIDER:
         if is_grok_app_chat_model(spec):
             response = grok.app_chat_completion(body, spec, messages)
-            content = response.get("content", "")
+            raw_sources = response.get("search_sources")
+            search_sources = cast(list[dict[str, str]], raw_sources) if isinstance(raw_sources, list) else []
+            content = str(response.get("content", ""))
+            if config.show_search_sources:
+                content = grok.append_search_sources_suffix(content, search_sources)
             tool_response = parsed_chat_tool_response(body, model, content, messages)
             if tool_response:
                 return tool_response
@@ -476,6 +509,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
                 messages=original_messages,
                 tool_call_messages=messages,
                 reasoning_content=response.get("reasoning_content", ""),
+                search_sources=search_sources,
             )
         response = grok.console_chat_completion(body, spec, messages)
         tool_response = parsed_chat_tool_response(body, model, response.content, messages)

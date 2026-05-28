@@ -202,6 +202,47 @@ class OpenAIToolCallTests(unittest.TestCase):
         self.assertEqual(done_item["name"], "get_weather")
         self.assertEqual(json.loads(done_item["arguments"]), {"city": "Paris"})
 
+    def test_grok_app_chat_non_stream_includes_search_source_annotations(self) -> None:
+        response_payload = {
+            "content": "Answer",
+            "reasoning_content": "Think",
+            "search_sources": [
+                {"url": "https://example.com/a", "title": "Example A", "type": "web"},
+                {"url": "https://x.com/alice/status/123", "title": "Alice post", "type": "x_post"},
+            ],
+        }
+        body = {"model": "grok-4.20-fast", "messages": [{"role": "user", "content": "search"}]}
+
+        with mock.patch.object(grok, "app_chat_completion", return_value=response_payload):
+            with mock.patch.dict(openai_v1_chat_complete.config.data, {"show_search_sources": False}):
+                response = cast(dict[str, Any], openai_v1_chat_complete.handle(body))
+
+        message = response["choices"][0]["message"]
+        self.assertEqual(message["content"], "Answer")
+        self.assertEqual(message["reasoning_content"], "Think")
+        self.assertEqual(message["search_sources"], response_payload["search_sources"])
+        self.assertEqual(message["annotations"], [
+            {"type": "url_citation", "url_citation": {"url": "https://example.com/a", "title": "Example A"}},
+            {"type": "url_citation", "url_citation": {"url": "https://x.com/alice/status/123", "title": "Alice post"}},
+        ])
+
+    def test_grok_app_chat_show_search_sources_appends_markdown_suffix(self) -> None:
+        response_payload = {
+            "content": "Answer",
+            "reasoning_content": "",
+            "search_sources": [{"url": "https://example.com/a", "title": "Example A", "type": "web"}],
+        }
+        body = {"model": "grok-4.20-fast", "messages": [{"role": "user", "content": "search"}]}
+
+        with mock.patch.object(grok, "app_chat_completion", return_value=response_payload):
+            with mock.patch.dict(openai_v1_chat_complete.config.data, {"show_search_sources": True}):
+                response = cast(dict[str, Any], openai_v1_chat_complete.handle(body))
+
+        content = response["choices"][0]["message"]["content"]
+        self.assertIn("[webchat2api-sources]: #", content)
+        self.assertIn("## Sources", content)
+        self.assertIn("1. [Example A](https://example.com/a)", content)
+
 
 if __name__ == "__main__":
     unittest.main()
