@@ -1,127 +1,111 @@
-# webchat2api 技术文档
+# webchat2api 技术指南
 
-版本：0.0.7
+版本：0.0.8
 
-## 1. 项目概述
+本文是 webchat2api 0.0.8 的 canonical 技术手册，面向部署、集成、运维和排障。文档只描述当前实现，不代表 OpenAI 或 xAI 官方 API 支持。
 
-webchat2api 是一个将 Web Chat 服务封装为标准 API 接口的代理服务项目，可用于将网页端会话能力转换为类 OpenAI API 风格的接口，方便第三方系统、自动化脚本、客户端或中间件调用。
+## 1. 项目定位与边界
 
-核心能力：
+webchat2api 将网页端 Chat 服务封装为类 OpenAI API 风格的代理服务，供第三方系统、自动化脚本、客户端或中间件调用。
 
-- FastAPI 后端提供 OpenAI 风格 API。
-- 文本 API 支持 GPT 与 Grok 服务商，`/v1/models` 优先动态拉取 GPT 模型并合并静态 Grok 模型，`/v1/chat/completions` 按请求 `model` 分发。
-- Grok 同时支持 Console 与 app-chat 两条网页端路径，app-chat 模型通过 Grok 网页会话、网络 profile、FlareSolverr clearance 和 Browser Bridge 尝试完成请求。
-- Grok app-chat 支持 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro` 文生图和 `grok-imagine-image-edit` 图生图；`grok-imagine-video` 已在模型表中声明，但当前不会执行视频生成。
-- Next.js Web 管理端提供账号池、用户密钥、代理、日志、图片任务、图片文件、Cloudflare R2 备份、图片存储和系统配置管理。
+核心定位：
+
+- 后端由 FastAPI 提供 OpenAI 风格 API、管理 API、图片任务 API 和静态 Web 管理端回退路由。
+- 文本 API 支持 GPT 与 Grok 两类 provider，`/v1/chat/completions` 按请求 `model` 分发。
+- `/v1/models` 优先通过 `provider=gpt` 账号动态拉取 GPT 模型，并合并内置 GPT fallback 与静态 Grok 模型。
+- Grok 分为 Console 与 app-chat 两条网页端链路：无 `mode_id` 的 Grok 文本模型走 Console Responses，带 `mode_id` 的文本、图片生成和图片编辑走 grok.com app-chat。
+- 图片生成和图片编辑支持 GPT 图片路径与 Grok app-chat imagine 路径；`grok-imagine-video` 只在模型表声明，当前执行时返回不支持。
+- Web 管理端提供账号池、用户密钥、代理、日志、图片任务、图片文件、Cloudflare R2 备份、图片存储和系统配置管理。
 - 试验页支持文生文聊天、文本模型批量可用性测试、文生图/图生图切换、图片队列和图片历史。
 - 文生文聊天历史保存在浏览器本地，刷新页面后仍保留。
-- 支持本地敏感词和可选 OpenAI 兼容 AI 审核，审核前会移除 base64 data URI 并截断长文本，`fail_open` 默认放行。
-- 图片生成或编辑遇到失效账号时，会在同次任务中跳过该账号并轮换下一个可用账号，直到成功或账号池耗尽。
-- 账号导出按 GPT/Grok 服务商分别生成 `webchat2api-gpt.txt` / `webchat2api_grok.txt`；TXT 内容每行一个 `access_token` 或 `sso` 凭据。
-- 账号 `provider` 选择 `gpt` 或 `grok`，账号 `type` 仍表示 plan、subscription 等套餐或订阅类型。
-- 支持远程账号来源配置、来源同步和管理员直接注入账号 payload。
-- 支持 Cloudflare R2 定时和手动备份，可选 openssl AES-256-CBC 加密，并可按开关包含配置、CPA、Sub2API、日志、图片任务、账号快照、用户密钥快照和图片。
-- 支持本地、WebDAV、双写图片存储模式，提供 WebDAV 测试和同步，图片索引写入 `data/image_index.json`，图片标签写入 `data/image_tags.json`。
-- 支持 ChatGPT Web、Grok Console、Grok app-chat 网络 profile，Grok app-chat 可读取 `cf_clearance`、`cf_cookies`、UA、client hints 和 Statsig 字段。
-- 支持 Docker CLI 和 Docker Compose 部署。镜像内包含 Python 3.13 slim、uv、Chromium、Node/npm、Playwright bridge 依赖和 Web 静态产物。
-- 支持登录密钥和用户 API Key 鉴权。
+- 支持本地敏感词与可选 OpenAI 兼容 AI 审核；审核前移除 base64 data URI 并截断长文本，`fail_open` 默认放行。
+- 支持 Docker CLI 与 Docker Compose 部署；镜像内包含 Python 3.13 slim、uv、Chromium、Node/npm、Playwright bridge 依赖和 Web 静态产物。
 
 默认部署信息：
 
-- 服务地址：`http://localhost:83`
-- 管理后台：`http://localhost:83`
-- API Base URL：`http://localhost:83/v1`
-- 默认登录密钥：`admin`
+| 项目 | 默认值 |
+| --- | --- |
+| 服务地址 | `http://localhost:83` |
+| 管理后台 | `http://localhost:83` |
+| API Base URL | `http://localhost:83/v1` |
+| 默认登录密钥 | `admin` |
 
-生产环境部署后请立即修改默认登录密钥，避免未授权访问。
+生产环境部署后必须立即修改默认登录密钥，避免未授权访问。
 
-## 2. 项目架构
+## 2. 系统架构总览
 
 ```text
 webchat2api
 ├── API 服务层
 ├── Web 管理端
 ├── 鉴权模块
-├── 会话 / Token 管理模块
+├── 会话 / Token / 账号池模块
+├── 模型注册与 Provider 路由模块
+├── ChatGPT Web 链路
+├── Grok Console 链路
+├── Grok app-chat 链路
+├── 图片生成 / 编辑 / 任务模块
 ├── 远程账号注入模块
 ├── 网络 Profile 模块
-├── Grok Browser Bridge 模块
+├── Browser Bridge 模块
 ├── FlareSolverr Clearance 模块
 ├── Proxy 转发模块
-├── 配置管理模块
-├── 日志模块
+├── 存储 / 备份模块
+├── 日志与内容过滤模块
 └── Docker 部署模块
 ```
 
-### 2.1 API 服务层
+主要代码边界：
 
-相关文件：`main.py`、`api/app.py`、`api/ai.py`、`api/accounts.py`、`api/system.py`、`api/image_tasks.py`。
+| 模块 | 相关文件或目录 | 职责 |
+| --- | --- | --- |
+| API 服务层 | `main.py`、`api/app.py`、`api/ai.py`、`api/accounts.py`、`api/system.py`、`api/image_tasks.py` | 接收 HTTP 请求、校验参数和鉴权、调用账号池与 provider、返回 JSON 或 OpenAI 风格响应。 |
+| Web 管理端 | `web/`、`web/src/app/`、`web/src/components/`、`web/src/store/` | 管理后台、账号池、配置、日志、图片任务、图片文件和试验页。 |
+| 鉴权 | `services/config.py`、`services/auth_service.py`、`api/support.py` | 登录密钥、用户 API Key、Bearer 与部分 `x-api-key` 支持。 |
+| 账号与来源 | `services/account_service.py`、`services/cpa_service.py`、`services/sub2api_service.py`、`services/remote_account_service.py`、`services/storage/` | 保存账号、刷新状态、导入 CPA/Sub2API/GPT/Grok/远程来源、导出凭据。 |
+| 模型与协议 | `services/models.py`、`services/protocol/openai_v1_chat_complete.py`、`services/providers/grok.py` | 维护模型规格、Provider 分发、OpenAI 兼容响应封装。 |
+| 网络与上游 | `services/network/`、`services/browser_bridge/`、`services/providers/grok.py` | ChatGPT、Grok Console、Grok app-chat、Browser Bridge、FlareSolverr、代理。 |
+| 存储与备份 | `services/backup_service.py`、`services/image_storage_service.py`、`services/image_service.py`、`services/image_tags_service.py` | Cloudflare R2 备份、本地/WebDAV/双写图片存储、图片索引和标签。 |
+| 内容过滤与日志 | `services/content_filter.py`、`services/log_service.py` | 敏感词、可选 AI 审核、日志写入和查询。 |
 
-职责：
+技术栈：
 
-- 接收外部 HTTP 请求。
-- 校验请求参数和 Bearer Token。
-- 调用账号池、Web Chat、图片任务、代理和存储服务。
-- 返回标准 JSON 或 OpenAI 风格响应。
-
-主要公共路由：
-
-- `GET /health`
-- `GET /version`
-- `POST /auth/login`
-- `GET /v1/models` 优先通过 `provider=gpt` 账号动态拉取 GPT 模型，并合并静态 Grok 模型。
-- `POST /v1/chat/completions` 根据请求中的 `model` 分发到 GPT 或 Grok 账号。
-- `POST /v1/images/generations`
-- `POST /v1/images/edits`
-- `POST /v1/responses`
-- `POST /v1/messages`
-
-主要管理路由：
-
-- `/api/settings`：读取和保存系统配置。
-- `/api/auth/users`：用户 API Key 列表、新增、更新和删除。
-- `/api/accounts`、`/api/accounts/refresh`、`/api/accounts/update`、`/api/accounts/export`：账号池管理、刷新、更新和导出。
-- `/api/cpa/*`：CPA 连接、文件浏览、导入和进度查询。
-- `/api/sub2api/*`：Sub2API 连接、分组、账号浏览、导入和进度查询。
-- `/api/remote-account/*`：远程账号来源、同步、同步状态和直接注入。
-- `/api/image-tasks/*`：图片任务列表、文生图任务和图生图任务。
-- `/api/images`、`/api/images/delete`、`/api/images/download`、`/api/images/download/{image_path}`、`/api/images/tags`：图片文件、下载、删除和标签管理。
-- `/images/{image_path}`、`/image-thumbnails/{image_path}`：本地图片和缩略图访问。
-- `/api/logs`：日志查询和清理。
-- `/api/proxy/test`：代理连通性测试。
-- `/api/storage/info`：存储后端信息和健康检查。
-- `/api/backups`、`/api/backups/run`、`/api/backups/detail`、`/api/backups/download`、`/api/backups/delete`、`/api/backup/test`：备份列表、手动备份、详情、下载、删除和 R2 连通性测试。
-- `/api/image-storage/test`、`/api/image-storage/sync`：WebDAV 图片存储测试和同步。
-
-### 2.2 Web 管理端
-
-相关目录：`web/`、`web/src/app/`、`web/src/components/`、`web/src/store/`。
-
-职责：
-
-- 管理后台登录。
-- 管理账号池和用户 API Key。
-- 导入、刷新、导出和删除账号。
-- 配置代理、基础 URL、备份、图片存储和过滤策略。
-- 查看调用日志。
-- 管理图片任务和图片文件。
-- 在试验页进行文生文、批量模型测试、文生图和图生图。
+| 类型 | 技术 |
+| --- | --- |
+| 后端语言 | Python 3.13 |
+| Web 框架 | FastAPI |
+| ASGI 服务 | Uvicorn |
+| 前端 | Next.js 静态导出 |
+| 包管理 | uv、npm |
+| 浏览器运行时 | Chromium、Playwright bridge 依赖 |
+| 容器 | Docker、Docker Compose |
+| 数据目录 | 默认 `data/` |
 
 前端构建为静态产物，Docker 镜像构建时复制到后端镜像内的 `web_dist`，由 FastAPI 静态回退路由提供访问。
 
-### 2.3 鉴权模块
+## 3. API 路由与鉴权矩阵
 
-相关文件：`services/config.py`、`services/auth_service.py`、`api/support.py`。
+### 3.1 公共与 AI 路由
 
-鉴权方式：
+| 路由 | 方法 | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| `/health` | `GET` | 无 | 健康检查，期望返回 `{"status":"ok"}`。 |
+| `/version` | `GET` | 无 | 版本查询。 |
+| `/auth/login` | `POST` | 登录密钥 | 管理后台登录。 |
+| `/v1/models` | `GET` | Bearer；也支持 `x-api-key` | 返回 GPT 与 Grok 模型。 |
+| `/v1/chat/completions` | `POST` | Bearer；也支持 `x-api-key` | 文本聊天公共入口，按 `model` 路由。 |
+| `/v1/responses` | `POST` | Bearer；也支持 `x-api-key` | Responses 兼容入口。 |
+| `/v1/messages` | `POST` | Bearer；也支持 `x-api-key` | Messages 兼容入口。 |
+| `/v1/images/generations` | `POST` | Bearer | 图片生成。 |
+| `/v1/images/edits` | `POST` | Bearer | 图片编辑。 |
 
-- 管理端登录密钥，默认 `admin`。
-- 用户 API Key，由管理员在后台生成。
-- 请求头统一使用：
+鉴权头：
 
 ```http
 Authorization: Bearer <密钥>
 ```
+
+`x-api-key: <密钥>` 仅适用于 `/v1/models`、`/v1/chat/completions`、`/v1/responses` 和 `/v1/messages`。图片接口与管理接口仍使用 Bearer Token。
 
 登录密钥优先级：
 
@@ -130,313 +114,267 @@ Authorization: Bearer <密钥>
 3. `config.json` 中的 `auth-key`
 4. 内置默认值 `admin`
 
-### 2.4 会话 / Token 管理模块
+### 3.2 管理路由
 
-相关文件：`services/account_service.py`、`services/cpa_service.py`、`services/sub2api_service.py`、`services/remote_account_service.py`、`services/storage/`。
+| 路由 | 说明 |
+| --- | --- |
+| `/api/settings` | 读取和保存系统配置。 |
+| `/api/auth/users` | 用户 API Key 列表、新增、更新和删除。 |
+| `/api/accounts`、`/api/accounts/refresh`、`/api/accounts/update`、`/api/accounts/export` | 账号池管理、刷新、更新和导出。 |
+| `/api/cpa/*` | CPA 连接、文件浏览、导入和进度查询。 |
+| `/api/sub2api/*` | Sub2API 连接、分组、账号浏览、导入和进度查询。 |
+| `/api/remote-account/*` | 远程账号来源、同步、同步状态和管理员直接注入。 |
+| `/api/image-tasks/*` | 图片任务列表、文生图任务和图生图任务。 |
+| `/api/images`、`/api/images/delete`、`/api/images/download`、`/api/images/download/{image_path}`、`/api/images/tags` | 图片文件、下载、删除和标签管理。 |
+| `/images/{image_path}`、`/image-thumbnails/{image_path}` | 本地图片和缩略图访问。 |
+| `/api/logs` | 日志查询和清理。 |
+| `/api/proxy/test` | 代理连通性测试。 |
+| `/api/storage/info` | 存储后端信息和健康检查。 |
+| `/api/backups`、`/api/backups/run`、`/api/backups/detail`、`/api/backups/download`、`/api/backups/delete`、`/api/backup/test` | 备份列表、手动备份、详情、下载、删除和 R2 连通性测试。 |
+| `/api/image-storage/test`、`/api/image-storage/sync` | WebDAV 图片存储测试和同步。 |
 
-职责：
+### 3.3 常用 curl 示例
+
+健康、版本与模型：
+
+```bash
+curl http://localhost:83/health
+curl http://localhost:83/version
+curl http://localhost:83/v1/models \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+聊天：
+
+```bash
+curl http://localhost:83/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "model": "auto",
+    "messages": [
+      {"role": "user", "content": "你好"}
+    ]
+  }'
+```
+
+图片生成：
+
+```bash
+curl http://localhost:83/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "model": "grok-imagine-image",
+    "prompt": "一只漂浮在太空里的猫",
+    "n": 1,
+    "response_format": "url"
+  }'
+```
+
+图片编辑：
+
+```bash
+curl http://localhost:83/v1/images/edits \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F "model=gpt-image-2" \
+  -F "prompt=把这张图改成赛博朋克夜景风格" \
+  -F "n=1" \
+  -F "image=@./input.png"
+```
+
+Responses 与 Messages：
+
+```bash
+curl http://localhost:83/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "model": "gpt-5",
+    "input": "生成一张未来感城市天际线图片",
+    "tools": [{"type": "image_generation"}]
+  }'
+
+curl http://localhost:83/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "model": "gpt-5",
+    "messages": [
+      {"role": "user", "content": "你好"}
+    ],
+    "max_tokens": 256
+  }'
+```
+
+## 4. 模型与 Provider 路由
+
+`services/models.py` 维护 `gpt` 与 `grok` 服务商模型，并通过 `ModelSpec` 描述 `capability`、`mode_id`、`model_tier`、`prefer_best` 等路由属性。`/v1/chat/completions` 保持公共入口不变，按请求 `model` 选择 provider 与账号。
+
+### 4.1 模型注册分组
+
+| 分组 | 模型 | 路由与说明 |
+| --- | --- | --- |
+| GPT 动态模型 | 通过 `provider=gpt` 账号动态拉取 | 成功拉取时并入 `/v1/models`。 |
+| GPT fallback 文本 | `auto`、`gpt-5`、`gpt-5-thinking`、`gpt-4o`、`gpt-4o-mini` | 没有 GPT 账号或动态拉取失败时保留可见。 |
+| GPT 图片 | `gpt-image-2`、`codex-gpt-image-2` | 走 GPT 图片账号池。 |
+| Grok Console 文本 | `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent` | 无 `mode_id`，走 Console Responses 路径。 |
+| Grok app-chat 文本 | `grok-4.20-0309` 系列、`grok-4.20-fast`、`grok-4.20-auto`、`grok-4.20-expert`、`grok-4.20-heavy`、`grok-4.3-beta` | 带 `mode_id`，走 grok.com app-chat。 |
+| Grok app-chat 图片 | `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`、`grok-imagine-image-edit` | 图片生成或图片编辑，模型元数据标记 `capability`。 |
+| Grok video 声明 | `grok-imagine-video` | 只声明为未支持的视频能力，执行返回 `unsupported_model`。 |
+
+当前 Grok token/cookie 无法访问 `console.x.ai` 或 `api.x.ai` 的模型列表端点，因此不做 Grok 动态模型拉取。本项目使用 Grok 网页端 token/cookie 的 provider 处理，不声明官方 xAI API Key 接入。
+
+### 4.2 路由规则
+
+| 请求模型 | Provider | 链路 | 账号选择 |
+| --- | --- | --- | --- |
+| GPT 文本模型 | `gpt` | ChatGPT Web | `provider=gpt` 账号。 |
+| GPT 图片模型 | `gpt` | GPT 图片路径 | `provider=gpt` 图片账号池。 |
+| Grok 无 `mode_id` 文本模型 | `grok` | Grok Console Responses | `provider=grok` 账号。 |
+| Grok 带 `mode_id` 文本模型 | `grok` | Grok app-chat | `provider=grok` 且匹配 tier/capabilities 的账号。 |
+| Grok imagine 图片模型 | `grok` | Grok app-chat | `provider=grok` 且匹配图片 capability、tier/capabilities 的账号。 |
+
+Grok 文本聊天的非流式响应和流式请求都会返回 OpenAI 兼容结果；流式请求封装为 stream-compatible chunks，并保留可见的 `reasoning_content`。
+
+Grok 搜索来源会作为结构化 `search_sources` 返回，并映射为 OpenAI 风格 `url_citation` annotations。流式响应会在最终 `finish_reason=stop` chunk 附带 metadata。`show_search_sources` 默认 `false`，只控制非流式文本末尾是否追加 Markdown `Sources` 来源列表，适合只显示文本内容的客户端。
+
+## 5. GPT / ChatGPT Web 链路
+
+GPT 文本与图片请求使用 GPT provider 账号。模型列表优先动态拉取 GPT 模型；无法动态拉取时使用内置 fallback 文本模型与 GPT 图片模型。
+
+GPT 图片编辑约束：
+
+- `/v1/images/edits` 接受 JSON 或 multipart form 中的图片输入。
+- 图片输入可传 URL、data URI 或上传文件。
+- 支持多参考图。
+- 单张参考图上限 50MiB。
+- 当前不支持 `file_id` 图片输入。
+
+内容过滤适用于文本请求：`sensitive_words` 为空数组时不启用本地敏感词；配置后对文本做本地包含匹配，命中即拦截。`ai_review.enabled=true` 时调用 OpenAI 兼容接口做审核，配置项包括 `base_url`、`api_key`、`model`、`prompt` 和可选 `fail_open`。发送到审核模型前会把 base64 data URI 替换为 `[image]`，并对超长文本保留头尾后截断。`fail_open` 默认 `true`；设置为 `false` 后审核异常会按严格策略拦截。
+
+## 6. Grok Console 与 app-chat 链路
+
+### 6.1 Grok Console
+
+无 `mode_id` 的 Grok 文本模型走 Console Responses 路径。Console 请求使用 `network_profiles.grok_console` 中的 UA、impersonate、origin、referer、sec-ch-ua、cf_clearance、cookie 等配置，并可由账号字段补充凭据。
+
+### 6.2 Grok app-chat
+
+带 `mode_id` 的 Grok 文本模型、Grok 图片生成和 `grok-imagine-image-edit` 图片编辑走 grok.com app-chat。app-chat 可读取账号级或 profile 级的 `cf_clearance`、`cf_cookies`、UA、client hints、Statsig 字段。
+
+app-chat 错误语义：
+
+| 状态或错误 | 账号反馈 | 说明 |
+| --- | --- | --- |
+| `401` | 标记账号异常 | 通常表示 SSO/token 无效或 Cookie 无法完成网页端鉴权。 |
+| `403` | 返回给调用方，不标记异常 | 通常表示账号 tier、权限、Cloudflare 或上游策略不允许当前请求；不会自动回退到 Browser Bridge。 |
+| `429` | 标记账号限流 | 按账号受限处理并等待后续恢复检查。 |
+| `408` / `504` | 上游超时语义 | 表示上游或 Bridge 请求超时。 |
+| `image_generation_failed` / `image_edit_failed` | 不表示账号必然失效 | 请求结束但未解析到图片 URL。 |
+
+重要边界：直接 app-chat `403` 会返回给调用方，不会自动回退到 Browser Bridge，也不会标记账号异常。配置了 FlareSolverr 时，403 可以触发 clearance 刷新并重试一次；若仍失败则按普通错误返回。
+
+## 7. 图片生成、图片编辑与图片任务
+
+### 7.1 图片模型能力
+
+| 模型 | capability | mode_id | tier | 当前行为 |
+| --- | --- | --- | --- | --- |
+| `gpt-image-2` | image / image_edit | 无 | GPT 账号池 | GPT 图片生成与编辑。 |
+| `codex-gpt-image-2` | image | 无 | GPT 账号池 | GPT 图片生成。 |
+| `grok-imagine-image-lite` | `image` | `fast` | `basic` | Grok app-chat 文生图。 |
+| `grok-imagine-image` | `image` | `auto` | `super` | Grok app-chat 文生图。 |
+| `grok-imagine-image-pro` | `image` | `auto` | `super` | Grok app-chat 文生图。 |
+| `grok-imagine-image-edit` | `image_edit` | app-chat 编辑 payload | 按账号匹配 | Grok app-chat 图生图。 |
+| `grok-imagine-video` | `video` | 无 | 未支持 | 当前返回 `unsupported_model`。 |
+
+Grok 文生图会通过 app-chat 打开 `enableImageGeneration` 与 `enableImageStreaming`，从 app-chat event 中提取完成进度为 100 的 `imageUrl`。如果 app-chat 完成后没有返回图片 URL，接口返回 `image_generation_failed`。
+
+### 7.2 图片编辑约束
+
+GPT 图片编辑：
+
+- 接受 JSON 或 multipart form 图片输入。
+- 支持 URL、data URI 或上传文件。
+- 支持多参考图。
+- 单张参考图上限 50MiB。
+- 当前不支持 `file_id`。
+
+Grok 图片编辑：
+
+- 模型为 `grok-imagine-image-edit`。
+- 通过 app-chat upload-file 上传参考图，创建 `MEDIA_POST_TYPE_IMAGE` 父 post，再发送 image-edit payload。
+- 仅支持 `size=1024x1024`。
+- 最多 7 张参考图。
+- `n<=2`。
+- prompt 中的 `@IMAGE1`、`@IMAGE2` 等占位符会替换为对应上传资产引用。
+
+`/api/image-tasks/*` 使用同一图片生成/编辑 handler。图片生成或编辑遇到失效账号时，会在同次任务中跳过该账号并轮换下一个可用账号，直到成功或账号池耗尽。
+
+## 8. 账号池、tier、quota 与状态反馈
+
+账号 `provider` 决定服务商，可取 `gpt` 或 `grok`。账号 `type` 只记录 plan、subscription 等套餐或订阅类型，不用于选择 GPT/Grok provider。
+
+账号池能力：
 
 - 保存和读取账号池数据。
 - 刷新账号状态、额度、限流状态和恢复时间。
 - 导入本地 CPA、远程 CPA、Sub2API、GPT access token 和 Grok token/cookie。
 - Grok 账号导入时设置 `provider=grok`；GPT 账号使用 `provider=gpt` 或默认值。
 - Grok 账号会归一化 `tier` / `model_tier` 为 `basic`、`super`、`heavy`，并保留账号级 `capabilities`、`app_chat`、`cf_cookies`、`user_agent` 等字段。
-- 导出账号数据。导出 TXT 内容仅包含凭据本身，每个账号一行，优先使用 `access_token`，缺失时使用 `sso`。
-- 图片生成/编辑时遇到失效账号会跳过并轮换下一个账号。
-- `provider` 决定账号服务商，`type` 只记录套餐或订阅类型，不用于选择 GPT/Grok。
 - 通过 JSON、SQLite、PostgreSQL 或 Git 存储账号与用户密钥。
 
 Grok app-chat 账号选择：
 
-- `services/account_service.py` 的 `get_grok_app_chat_access_token` 会根据模型规格选择账号。
-- `model_tier=basic` 可使用 basic、super、heavy 账号。
-- `model_tier=super` 可使用 super、heavy 账号。
-- `model_tier=heavy` 只使用 heavy 账号。
-- `prefer_best=true` 的模型按 heavy、super、basic 顺序查找可用账号。
-- 如果账号声明了 `capabilities`，必须命中模型的 `capability`、`mode_id` 或标准化 tier 之一；未声明 `capabilities` 的账号按通用账号处理。
-
-### 2.5 远程账号注入模块
-
-相关文件：`services/remote_account_service.py`、`api/accounts.py`、`api/support.py`、`services/account_service.py`。
-
-职责：
-
-- `services/remote_account_service.py` 负责远程来源配置、HTTP 拉取、payload 归一化、merge 或 replace 注入。
-- `api/accounts.py` 暴露管理员路由，包含来源列表、新增、更新、删除、同步、同步任务查询和直接注入。
-- `api/support.py` 对远程来源响应做脱敏，隐藏 `auth_token` 与 `bearer_token`，只返回 `has_auth_token` 与 `has_bearer_token`。
-- `services/account_service.py` 执行账号 upsert 和按 `remote_source_id` 的来源范围 replace。
-
-安全语义：
-
-- 所有远程账号接口都需要管理员权限，不接受普通用户 API Key 执行管理操作。
-- `merge` 会按 `access_token` 合并账号，远程 payload 省略的字段保留现有账号值，因此状态、额度、限流恢复时间、成功失败计数等可变字段不会被空 payload 覆盖。
-- `replace` 必须带 `source_id`，并且只替换同一 `remote_source_id` 下的账号，不会删除其他来源或本地账号。
-- 来源同步失败返回统一的 `remote account sync failed`，避免把上游地址、鉴权头或异常细节暴露给响应调用方。
-- 来源配置响应不返回 `auth_token`、`bearer_token`，账号注入结果只返回计数、策略和来源信息，不返回账号 Token 列表。
-- 请求和响应示例见 [远程账号注入 API 示例](./remote-account-api-examples.md)。
-
-### 2.6 网络 Profile 模块
-
-相关文件：`services/network/profiles.py`、`services/network/headers.py`、`services/network/client.py`、`services/network/retry.py`、`services/network/errors.py`。
-
-职责：
-
-- `profiles.py` 定义 ChatGPT Web、Grok Console、Grok app-chat profile，读取全局配置和账号内指纹字段。
-- `headers.py` 根据 profile 生成 ChatGPT Web 和 Grok Console 请求头，Grok Console 会把账号 sso/token 和 `cf_clearance` 组合成 Cookie。
-- Grok app-chat 请求头由 `services/providers/grok.py` 生成，会合并 profile 字段与账号字段。
-- `client.py` 统一创建 `curl_cffi` Session，接入 impersonate、证书校验和代理设置。
-- `retry.py` 提供轻量重试策略，用于可重试的上游请求。
-- `errors.py` 保留网络 profile 相关错误类型。
-
-配置语义：
-
-- `network_profiles.grok_console` 用于 `https://console.x.ai/v1/responses`，支持 `impersonate`、`user-agent` / `user_agent`、`verify`、`timeout`、`cf_clearance`。
-- `network_profiles.grok_app_chat` 用于 `https://grok.com/rest/app-chat/conversations/new`，支持 `impersonate` / `browser`、`user-agent` / `user_agent`、`verify`、`timeout`、`cf_cookies`、`cf_clearance`、`sec-ch-ua`、`sec-ch-ua-mobile`、`sec-ch-ua-platform`、`statsig_id` / `x-statsig-id`。
-- `grok_app_chat` 未设置 UA 时会回退到 `grok_console` UA，再回退到内置 Chrome UA。
-- `grok_app_chat` 未设置 `cf_clearance` 时会回退到 `grok_console.cf_clearance`。
-- Grok app-chat 账号级字段可覆盖 profile 中的 UA、impersonate/browser、Statsig、client hints、`cf_clearance`、`cf_cookies`。
-- `grok_console_fingerprint` 是旧版 Grok Console 指纹配置，仍兼容；同名字段以 `network_profiles.grok_console` 为准。
-- `chatgpt_fingerprint` 控制 ChatGPT Web 请求的 UA、impersonate、`sec-ch-ua` 和设备会话标识，可被账号内 `fp` 或同名字段覆盖。
-- `enable_turnstile_solver` 默认 `true`。当 ChatGPT Sentinel 返回 Turnstile 要求时，后端会尝试生成 `OpenAI-Sentinel-Turnstile-Token`；如果求解返回空值会失败关闭。真实 GPT Turnstile 是否通过仍取决于上游挑战和求解结果，不能承诺全部可解。
-
-### 2.7 Grok Browser Bridge 模块
-
-相关文件：`services/browser_bridge/server.js`、`services/providers/grok.py`、`scripts/entrypoint.sh`、`Dockerfile`。
-
-职责：
-
-- Browser Bridge 是 Grok app-chat 的本地辅助服务，默认监听 `http://127.0.0.1:3080`。
-- `services/browser_bridge/server.js` 使用 Playwright 启动真实 Chromium，按 SSO 维护页面池。
-- 每个页面通过 `sso` Cookie 登录 `https://grok.com/`，并等待页面建立网页端会话；如果未产生 `x-userid` Cookie，Bridge 会返回结构化 `sso_unavailable` 错误并快速失败，不会继续使用未鉴权页面。
-- 页面池默认最多 `BRIDGE_MAX_PAGES=10`，空闲页面会在 `BRIDGE_PAGE_IDLE_MS=300000` 后回收。
-- Bridge 拦截浏览器对 `/rest/app-chat/conversations/new` 的请求，将后端传入的 payload 合并到网页自身请求体，再把上游流式响应文本返回给后端。
-- Bridge 提供 `GET /health`，返回状态和当前页面数，供 entrypoint 和后端探测。
-- 后端 `services/providers/grok.py` 会优先读取 `browser_bridge_url`。未配置时，app-chat 默认先走直接请求；直接请求遇到 `403`、`408`、`502`、`503`、`504` 时，再尝试探测 `http://127.0.0.1:3080/health` 并回退到 Browser Bridge。
-- Docker 入口脚本会在启动 FastAPI 前尝试启动 Bridge，默认端口来自 `BRIDGE_PORT=3080`。Bridge 启动失败不会单独停止 Python 服务，但 Grok app-chat 会少一条通过真实 Chromium 的请求路径。
-
-限制说明：
-
-- Browser Bridge 不是官方接口，也不保证绕过所有 Cloudflare 或上游风控。
-- Bridge 依赖有效 SSO Cookie、容器内 Chromium、Node/npm 依赖和可访问的 `grok.com`。
-- 同一个 SSO 页面忙碌时会返回 429 风格的忙碌响应，调用方需要稍后重试。
-
-### 2.8 FlareSolverr Clearance 模块
-
-相关文件：`services/network/flaresolverr.py`、`services/providers/grok.py`、`services/config.py`。
-
-配置项：
-
-- `flaresolverr_url`：FlareSolverr 服务地址，空值表示禁用。
-- `flaresolverr_timeout_sec`：FlareSolverr 求解超时时间，默认 `60` 秒。
-
-流程：
-
-- Grok app-chat 直接请求返回 403 时，且配置了 `flaresolverr_url`，后端会调用 FlareSolverr 请求 `https://grok.com`。
-- 求解成功且响应中包含 UA 与 `cf_clearance` 时，后端会把 UA、`cf_clearance`、完整 `cf_cookies` 写入 `network_profiles.grok_app_chat`，并更新当前请求头后重试一次 app-chat。
-- 如果配置了全局代理，FlareSolverr payload 会附带同一个代理地址。
-
-限制说明：
-
-- 该流程是可选的 best effort 路径，不会保证挑战一定可解。
-- 只有 FlareSolverr 返回有效 `solution.userAgent` 和 `cf_clearance` Cookie 时才会产生可用 clearance 数据。
-- 求解失败、响应缺少关键字段或未配置 `flaresolverr_url` 时，后端会继续按普通错误语义处理，不会宣称已完成 Cloudflare 绕过。
-
-### 2.9 Proxy 转发模块
-
-相关文件：`services/proxy_service.py`。
-
-职责：
-
-- 为上游 Web Chat / ChatGPT / Grok 请求配置 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理。
-- 提供代理连通性测试。
-- 环境变量 `PROXY_URL` 可覆盖配置文件中的 `proxy` 字段。
-
-### 2.10 日志模块
-
-相关文件：`services/log_service.py`、`api/system.py`。
-
-默认日志文件位置：`data/logs.jsonl`。
-
-日志会对请求摘要做截断处理，但仍不建议在提示词、Token、Cookie 或 Session 中写入敏感信息。
-
-### 2.11 内容过滤模块
-
-相关文件：`services/content_filter.py`、`services/config.py`。
-
-职责：
-
-- `sensitive_words` 为空数组时不启用本地敏感词；配置后会对文本请求做本地包含匹配，命中即拦截。
-- `ai_review.enabled=true` 时调用 OpenAI 兼容接口做文本审核，配置项包括 `base_url`、`api_key`、`model`、`prompt` 和可选 `fail_open`。
-- 发送到审核模型前会把 base64 data URI 替换为 `[image]`，并对超长文本保留头尾后截断，避免把图片原文或过长内容传给审核服务。
-- `fail_open` 默认 `true`，审核服务失败、响应不是 JSON、结构不符合预期或无法判断时默认放行；设置为 `false` 后会按严格策略拦截。
-
-### 2.12 备份模块
-
-相关文件：`services/backup_service.py`、`api/system.py`、`services/config.py`。
-
-职责：
-
-- 备份服务使用 Cloudflare R2 兼容 S3 API，配置项位于 `backup`。
-- 支持随 FastAPI 生命周期启动定时任务，也支持通过 `/api/backups/run` 手动触发。
-- `backup.include` 可控制是否包含 `config`、`cpa`、`sub2api`、`logs`、`image_tasks`、`accounts_snapshot`、`auth_keys_snapshot`、`images`。
-- `backup.encrypt=true` 时会通过 openssl AES-256-CBC 生成 `.tar.gz.enc`，需要配置 `passphrase`；关闭加密时生成 `.tar.gz`。
-- 管理接口支持 R2 连通性测试、备份列表、详情、下载和删除。
-- `rotation_keep` 控制保留数量，`interval_minutes` 控制定时备份间隔。
-
-### 2.13 图片存储模块
-
-相关文件：`services/image_storage_service.py`、`services/image_service.py`、`services/image_tags_service.py`、`api/system.py`。
-
-职责：
-
-- 默认本地图片存储在 `data/images`，索引文件为 `data/image_index.json`。
-- 图片标签存储在 `data/image_tags.json`。
-- `image_storage.mode` 支持 `local`、`webdav`、`both`；`both` 表示本地保存并同步到 WebDAV。
-- `/api/image-storage/test` 测试 WebDAV 配置，`/api/image-storage/sync` 同步现有图片。
-- `/images/{image_path}` 和 `/image-thumbnails/{image_path}` 提供本地图片和缩略图访问；`WEBCHAT2API_BASE_URL` 或 `base_url` 会影响生成给前端和 API 的图片 URL。
-
-### 2.14 GPT/Grok 模型集成
-
-相关文件：`services/models.py`、`services/protocol/openai_v1_chat_complete.py`、`services/providers/grok.py`、`services/account_service.py`。
-
-集成要点：
-
-- `services/models.py` 维护 `gpt` 与 `grok` 服务商模型，并通过 `ModelSpec` 描述 `capability`、`mode_id`、`model_tier`、`prefer_best`。
-- GPT 模型列表优先通过 `provider=gpt` 账号动态拉取；没有 GPT 账号或拉取失败时，回退到匿名 ChatGPT Web 模型和内置 GPT fallback。
-- 没有 `mode_id` 的 Grok 文本模型走 Console Responses 路径，如 `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent`。
-- 带 `mode_id` 的 Grok 模型走 app-chat 路径，如 `grok-4.20-0309` 系列、`grok-4.20-fast`、`grok-4.20-auto`、`grok-4.20-expert`、`grok-4.20-heavy`、`grok-4.3-beta`。
-- `/v1/chat/completions` 保持公共入口不变，按请求 `model` 选择对应服务商账号。
-- Grok 文本聊天的非流式响应和流式请求都会返回 OpenAI 兼容结果；流式请求会封装为 stream-compatible chunks，并保留可见的 `reasoning_content`。
-- Grok 上游返回 402 或 429 时按账号受限处理，记录限流状态和恢复检查。
-- 现有 Grok token/cookie 无法访问 `console.x.ai` 或 `api.x.ai` 的模型列表端点，因此当前不做 Grok 动态模型拉取。
-- 本项目使用 Grok 账号 token/cookie 的 provider 处理，不声明官方 xAI API Key 接入。
-
-Grok app-chat 图片模型：
-
-- `grok-imagine-image-lite`：`capability=image`，`mode_id=fast`，`model_tier=basic`。
-- `grok-imagine-image`：`capability=image`，`mode_id=auto`，`model_tier=super`。
-- `grok-imagine-image-pro`：`capability=image`，`mode_id=auto`，`model_tier=super`。
-- 上述三个模型会通过 app-chat 打开 `enableImageGeneration` 与 `enableImageStreaming`，从 app-chat event 中提取完成进度为 100 的 `imageUrl`。
-- `grok-imagine-image-edit`：`capability=image_edit`，通过 app-chat upload-file 上传参考图、创建 `MEDIA_POST_TYPE_IMAGE` 父 post，再发送 image-edit payload；仅支持 `1024x1024`、最多 7 张参考图、`n<=2`。
-- `grok-imagine-video`：`capability=video`，当前明确返回不支持 Grok video generation。
-- 如果 app-chat 完成后没有返回图片 URL，接口返回 `image_generation_failed`。
-
-错误语义：
-
-- 401：Grok app-chat authentication failed，通常表示 SSO/token 无效或未通过鉴权。
-- 403：Grok app-chat forbidden，通常表示账号 tier、权限、Cloudflare 或上游策略不允许当前请求。
-- 429：Grok app-chat rate limited，账号会按限流语义处理。
-- 408 / 504：Grok app-chat upstream timeout，表示上游或 Bridge 请求超时。
-- `image_generation_failed` / `image_edit_failed`：Grok 图片请求结束但未解析到图片 URL。
-
-## 3. 技术栈说明
-
-| 类型 | 技术 |
+| 模型 tier | 可用账号 tier |
 | --- | --- |
-| 后端语言 | Python 3.13 |
-| Web 框架 | FastAPI |
-| ASGI 服务 | Uvicorn |
-| 前端框架 | Next.js 16、React 19、TypeScript |
-| UI / 状态 | Tailwind CSS、Radix UI、Zustand、localforage |
-| HTTP 客户端 | curl-cffi、axios |
-| Browser Bridge | Node.js、Playwright、Chromium |
-| 存储 | JSON、SQLite、PostgreSQL、Git 存储后端 |
-| 容器化 | Docker |
-| 部署方式 | Docker CLI、Docker Compose |
-| 鉴权方式 | 登录密钥、用户 API Key |
-| 配置方式 | 环境变量、本地 `config.json`、Web 管理端设置 |
-| 包管理 | Python `uv`、前端 npm 与 `package-lock.json`、Bridge npm |
+| `basic` | `basic`、`super`、`heavy` |
+| `super` | `super`、`heavy` |
+| `heavy` | `heavy` |
 
-## 4. 目录结构说明
+补充规则：
 
-```text
-webchat2api/
-├── api/                         # FastAPI 路由层
-├── services/                    # 业务服务层
-│   ├── browser_bridge/          # Grok Browser Bridge Node 服务
-│   ├── network/                 # 网络 profile、请求头、Session、FlareSolverr 和重试工具
-│   ├── protocol/                # OpenAI/Anthropic 兼容协议实现
-│   └── storage/                 # JSON/数据库/Git 存储后端
-├── utils/                       # 通用工具
-├── web/                         # Next.js 管理端源码
-│   ├── src/app/                 # 页面路由
-│   ├── src/components/          # UI 组件
-│   ├── src/lib/                 # 前端 API 请求封装
-│   └── src/store/               # 前端状态存储，含图片历史和文本聊天历史
-├── scripts/                     # 维护脚本和 Docker entrypoint
-├── test/                        # Python 单元测试
-├── data/                        # 运行数据目录，部署时建议挂载，禁止提交
-├── docs/                        # 公开文档与内部过程记录
-├── Dockerfile
-├── docker-compose.yml
-├── docker-compose.local.yml
-├── config.example.json          # 安全示例配置，复制为 config.json 后再本地修改
-├── .env.example
-├── pyproject.toml
-├── README.md
-├── VERSION
-├── 技术文档.md
-└── docs/technical-guide.md
-```
+- `services/account_service.py` 的 `get_grok_app_chat_access_token` 会根据模型规格选择账号。
+- 如果账号声明了 `capabilities`，必须命中模型的 `capability`、`mode_id` 或标准化 tier 之一。
+- 未声明 `capabilities` 的账号按通用账号处理。
+- `prefer_best=true` 的模型优先选择更高 tier 的账号。
+- Grok 上游返回 402 或 429 时，后端会按账号受限处理并等待后续恢复检查。
 
-## 5. 配置说明
+账号导出：
 
-| 配置项 | 默认值 | 是否必填 | 说明 |
-| --- | --- | --- | --- |
-| `PORT` | `83` | 否 | 服务监听端口。Docker 默认暴露 `83`。 |
-| `HOST` | `0.0.0.0` | 否 | 服务监听地址。 |
-| `LOGIN_SECRET` | `admin` | 否 | 管理端默认登录密钥，优先级最高。 |
-| `WEBCHAT2API_AUTH_KEY` | 空 | 否 | 兼容旧配置的登录密钥覆盖项。 |
-| `WEBCHAT2API_BASE_URL` | 空 | 否 | 外部访问基础 URL，用于生成图片文件访问地址。 |
-| `PROXY_URL` | 空 | 否 | 上游代理地址。 |
-| `STORAGE_BACKEND` | `json` | 否 | 存储后端：`json`、`sqlite`、`postgres`、`git`。 |
-| `DATABASE_URL` | 空 | 否 | SQLite/PostgreSQL 连接字符串。 |
-| `GIT_REPO_URL` | 空 | Git 后端必填 | Git 存储后端仓库地址。 |
-| `GIT_TOKEN` | 空 | Git 后端通常必填 | Git 仓库访问令牌。 |
-| `GIT_BRANCH` | `main` | 否 | Git 存储分支。 |
-| `GIT_FILE_PATH` | `accounts.json` | 否 | Git 存储账号文件路径。 |
-| `GIT_AUTH_KEYS_FILE_PATH` | `auth_keys.json` | 否 | Git 存储用户密钥文件路径。 |
-| `network_profiles` | 见示例配置 | 否 | 网络 profile 配置，可包含 `grok_console` 与 `grok_app_chat`。 |
-| `flaresolverr_url` | 空 | 否 | FlareSolverr 服务地址，空值表示禁用。 |
-| `flaresolverr_timeout_sec` | `60` | 否 | FlareSolverr 求解超时时间。 |
-| `browser_bridge_url` | 空 | 否 | Grok Browser Bridge 地址；空值时后端按需探测 `http://127.0.0.1:3080`。 |
-| `enable_turnstile_solver` | `true` | 否 | ChatGPT Turnstile 出现时尝试求解，失败时关闭请求。 |
-| `BRIDGE_PORT` | `3080` | 否 | Docker 入口脚本启动 Browser Bridge 使用的端口。 |
-| `BRIDGE_MAX_PAGES` | `10` | 否 | Browser Bridge 页面池最大页面数。 |
-| `BRIDGE_PAGE_IDLE_MS` | `300000` | 否 | Browser Bridge 空闲页面回收时间，单位毫秒。 |
+- 导出按 GPT/Grok 服务商分别生成 TXT 文件。
+- GPT 文件名固定为 `webchat2api-gpt.txt`。
+- Grok 文件名固定为 `webchat2api_grok.txt`。
+- TXT 内容每行一个 `access_token` 或 `sso` 凭据，优先使用清理后的 `access_token`，缺失时使用清理后的 `sso`。
+- `access_tokens` 为空数组时导出指定 provider 的全部账号。
 
-`config.example.json` 是可提交的安全示例。需要本地覆盖时复制为 `config.json` 后再修改：
+账号导出示例：
 
 ```bash
-cp config.example.json config.json
+curl http://localhost:83/api/accounts/export \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "provider": "gpt",
+    "access_tokens": ["ACCESS_TOKEN_1"]
+  }'
 ```
 
-`config.json` 是本地运行文件，可能包含代理、备份密钥或其他敏感配置，不应提交。后端会写入 `config.json` 保存 Web UI 设置，部署时如果把该文件只读挂载，管理后台的设置保存会失败。`data/` 保存账号、用户密钥、日志、图片任务和图片文件等运行数据，必须保持未提交。
+## 9. 网络 Profile、FlareSolverr 与 Browser Bridge
 
-`config.json` 中的重要配置：
+### 9.1 网络 Profile
+
+支持 ChatGPT Web、Grok Console、Grok app-chat 三类网络 profile。常用配置项：
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `auth-key` | `admin` | 管理端登录密钥；会被 `LOGIN_SECRET` 或 `WEBCHAT2API_AUTH_KEY` 覆盖。 |
-| `refresh_account_interval_minute` | `60` | 限流账号后台检查间隔。 |
-| `image_retention_days` | `15` | 本地图片保留天数。 |
-| `image_poll_timeout_secs` | `120` | 图片任务轮询超时时间。 |
-| `auto_remove_rate_limited_accounts` | `false` | 是否自动移除限流账号。 |
-| `auto_remove_invalid_accounts` | `true` | 是否自动移除失效账号。 |
-| `log_levels` | `debug`、`error`、`info`、`warning` | 日志级别过滤配置。 |
-| `proxy` | 空 | 上游代理地址，会被 `PROXY_URL` 覆盖。 |
-| `base_url` | 空 | 生成图片 URL 的基础地址，会被 `WEBCHAT2API_BASE_URL` 覆盖。 |
-| `sensitive_words` | `[]` | 本地敏感词，命中后直接拦截文本请求。 |
-| `global_system_prompt` | 空 | 全局系统提示词。 |
-| `ai_review` | 默认关闭 | OpenAI 兼容文本审核配置，支持可选 `fail_open`。 |
-| `backup` | 默认关闭 | Cloudflare R2 云备份配置，支持定时、手动、轮换、加密和包含项开关。 |
-| `image_storage` | 默认本地 | 图片存储配置，支持 `local`、`webdav`、`both`。 |
-| `image_account_concurrency` | `3` | 图片账号并发数量。 |
-| `network_profiles.grok_console.impersonate` | `edge101` | Grok Console 请求使用的 curl-cffi impersonate。 |
-| `network_profiles.grok_console.user-agent` | 见示例配置 | Grok Console 请求 UA。 |
-| `network_profiles.grok_console.verify` | `true` | Grok Console TLS 校验开关。 |
-| `network_profiles.grok_console.timeout` | `60` | Grok Console 请求超时时间。 |
-| `network_profiles.grok_console.cf_clearance` | 空 | Grok Console 请求附加的 Cloudflare clearance Cookie，也可作为 app-chat fallback。 |
+| `proxy` | 空 | HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理。 |
+| `PROXY_URL` | 空 | 环境变量，可覆盖配置文件中的 `proxy`。 |
+| `network_profiles.chatgpt.*` | 见配置 | ChatGPT Web 请求 headers、fingerprint 等。 |
+| `network_profiles.grok_console.user-agent` | 见内置默认 | Grok Console 请求 UA。 |
+| `network_profiles.grok_console.impersonate` | 自动推断或 `chrome136` | Grok Console curl-cffi impersonate。 |
+| `network_profiles.grok_console.cf_clearance` | 空 | Grok Console 请求附加的 Cloudflare clearance Cookie，也可作为 app-chat fallback 数据来源。 |
 | `network_profiles.grok_app_chat.user-agent` | 见内置默认 | Grok app-chat 请求 UA，可由账号字段覆盖。 |
 | `network_profiles.grok_app_chat.impersonate` | 自动推断或 `chrome136` | Grok app-chat curl-cffi impersonate。 |
 | `network_profiles.grok_app_chat.cf_clearance` | 空 | Grok app-chat 请求附加的 `cf_clearance`。 |
@@ -444,48 +382,141 @@ cp config.example.json config.json
 | `network_profiles.grok_app_chat.statsig_id` | 见内置默认 | Grok app-chat `x-statsig-id`。 |
 | `chatgpt_fingerprint` | 见示例配置 | ChatGPT Web 请求指纹。 |
 | `grok_console_fingerprint` | 空 | 旧版 Grok Console 指纹配置，仍兼容；建议迁移到 `network_profiles.grok_console`。 |
+
+### 9.2 FlareSolverr
+
+配置项：
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
 | `flaresolverr_url` | 空 | 设置后，Grok app-chat 403 时会尝试获取 UA 与 clearance 后重试。 |
 | `flaresolverr_timeout_sec` | `60` | FlareSolverr 单次求解超时时间。 |
-| `browser_bridge_url` | 空 | 指定 Browser Bridge 地址；Docker 默认本地启动，后端在直接 app-chat 请求遇到可回退错误时按需探测。 |
-| `enable_turnstile_solver` | `true` | 是否在 ChatGPT 要求 Turnstile 时尝试生成 Sentinel Turnstile Token。 |
 
-默认登录密钥为：
+流程：
 
-```text
-admin
-```
+- Grok app-chat 直接请求返回 403 且配置了 `flaresolverr_url` 时，后端调用 FlareSolverr 请求 `https://grok.com`。
+- 求解成功且响应中包含 UA 与 `cf_clearance` 时，后端把 UA、`cf_clearance`、完整 `cf_cookies` 写入 `network_profiles.grok_app_chat`，更新当前请求头后重试一次 app-chat。
+- 如果配置了全局代理，FlareSolverr payload 会附带同一个代理地址。
+- 求解失败、响应缺少关键字段或未配置 `flaresolverr_url` 时，后端继续按普通错误语义处理。
 
-生产环境部署后请立即修改默认登录密钥。
+FlareSolverr 是可选 best effort 路径，不保证挑战一定可解，也不会宣称已经完成 Cloudflare 绕过。
 
-## 6. 管理后台与试验页
+### 9.3 Browser Bridge
 
-### 6.1 管理后台
+Browser Bridge 是用于 Grok app-chat 的可选真实 Chromium 辅助路径，相关代码位于 `services/browser_bridge/`。它不是官方接口，也不保证绕过所有 Cloudflare 或上游风控。
+
+Fallback 语义：
+
+| 场景 | 行为 |
+| --- | --- |
+| 显式配置 `browser_bridge_url` | 后端优先预检并使用该 Bridge。 |
+| 未配置 `browser_bridge_url`，直接 app-chat 返回 `408`、`502`、`503`、`504` | 后端探测本机 Bridge，如可用则尝试回退。 |
+| 直接 app-chat 返回 `403` | 直接 app-chat `403` 会返回给调用方，不会自动回退到 Browser Bridge，也不会标记账号异常；可由 FlareSolverr best effort 刷新后重试。 |
+| 同一个 SSO 页面忙碌 | Bridge 返回 429 风格忙碌响应，调用方稍后重试。 |
+
+限制：
+
+- Bridge 依赖有效 SSO Cookie、容器内 Chromium、Node/npm 依赖和可访问的 `grok.com`。
+- Docker 入口脚本会先启动 Browser Bridge，再启动 Python 后端。
+- Browser Bridge 默认使用容器内 `BRIDGE_PORT=3080` 与 `CHROMIUM_PATH=/usr/bin/chromium`。
+- 通常不需要额外挂载 Bridge 端口，因为 Python 后端访问容器内本地地址。
+
+## 10. 存储、备份与远程账号
+
+### 10.1 账号与用户密钥存储
+
+账号和用户密钥可通过 JSON、SQLite、PostgreSQL 或 Git 存储。默认运行数据位于 `data/`，生产环境应挂载持久化目录并限制访问权限。
+
+### 10.2 远程账号
+
+相关文件：`services/remote_account_service.py`、`api/accounts.py`、`api/support.py`、`services/account_service.py`。
+
+远程账号能力：
+
+- 配置远程账号来源。
+- HTTP 拉取远程 payload。
+- 对 payload 做归一化。
+- 支持 merge 或 replace 注入账号。
+- 管理员可直接注入账号 payload。
+- `replace` 必须带 `source_id`，且只替换同一 `remote_source_id` 下的账号，不会删除其他来源或本地账号。
+- 来源同步失败返回统一的 `remote account sync failed`，避免把上游地址、鉴权头或异常细节暴露给响应调用方。
+
+### 10.3 Cloudflare R2 备份
+
+备份服务使用 Cloudflare R2 兼容 S3 API，配置项位于 `backup`。
+
+| 能力 | 说明 |
+| --- | --- |
+| 定时备份 | 随 FastAPI 生命周期启动定时任务。 |
+| 手动备份 | 通过 `/api/backups/run` 触发。 |
+| 包含范围 | `backup.include` 控制 `config`、`cpa`、`sub2api`、`logs`、`image_tasks`、`accounts_snapshot`、`auth_keys_snapshot`、`images`。 |
+| 加密 | `backup.encrypt=true` 时通过 openssl AES-256-CBC 生成 `.tar.gz.enc`，需要配置 `passphrase`；关闭加密时生成 `.tar.gz`。 |
+| 保留策略 | `rotation_keep` 控制保留数量，`interval_minutes` 控制定时备份间隔。 |
+| 管理操作 | R2 连通性测试、备份列表、详情、下载和删除。 |
+
+### 10.4 图片存储
+
+相关文件：`services/image_storage_service.py`、`services/image_service.py`、`services/image_tags_service.py`、`api/system.py`。
+
+图片存储规则：
+
+- 默认本地图片存储在 `data/images`。
+- 图片索引写入 `data/image_index.json`。
+- 图片标签写入 `data/image_tags.json`。
+- `image_storage.mode` 支持 `local`、`webdav`、`both`。
+- `both` 表示本地保存并同步到 WebDAV。
+- `/api/image-storage/test` 测试 WebDAV 配置。
+- `/api/image-storage/sync` 执行 WebDAV 同步。
+
+## 11. 配置与环境变量
+
+常用环境变量与配置：
+
+| 项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PORT` | `83` | 服务监听端口。 |
+| `HOST` | `0.0.0.0` | 服务监听地址。 |
+| `LOGIN_SECRET` | 空 | 优先级最高的登录密钥。 |
+| `WEBCHAT2API_AUTH_KEY` | 空 | 兼容登录密钥环境变量。 |
+| `PROXY_URL` | 空 | 覆盖配置文件中的代理地址。 |
+| `BRIDGE_PORT` | `3080` | Browser Bridge 监听端口。 |
+| `CHROMIUM_PATH` | `/usr/bin/chromium` | Browser Bridge 使用的 Chromium 路径。 |
+| `browser_bridge_url` | 空 | 显式指定 Browser Bridge 地址。 |
+| `enable_turnstile_solver` | `true` | ChatGPT 要求 Turnstile 时是否尝试生成 Sentinel Turnstile Token。 |
+| `show_search_sources` | `false` | 是否在非流式文本末尾追加 Markdown `Sources`。 |
+| `flaresolverr_url` | 空 | FlareSolverr 服务地址。 |
+| `flaresolverr_timeout_sec` | `60` | FlareSolverr 求解超时。 |
+
+配置文件卫生：
+
+- `.gitignore` 已忽略本地 `config.json`。
+- `config.json` 可保存本地密钥、代理、R2、WebDAV、CPA、Sub2API、远程账号和内容过滤配置。
+- 不要提交 Token、Cookie、Session、SSO、`cf_clearance`、R2 密钥或用户 API Key。
+
+## 12. Web 管理端与试验页
 
 管理后台入口：`http://localhost:83`。主要页面包括 `/`、`/accounts`、`/image`、`/image-manager`、`/logs`、`/settings` 和 `/login`。
 
-后台主要能力：
+管理后台能力：
 
 - 账号池列表、搜索、筛选、刷新、删除和状态编辑。
-- 账号导入：支持 access token、本地 CPA、远程 CPA、Sub2API、Grok token/cookie 和远程账号来源。
-- ChatGPT 图片生成和图片编辑使用 GPT 服务商账号；Grok 文生图和 `grok-imagine-image-edit` 图生图使用 app-chat 支持的 Grok imagine 模型。
-- Grok 图生图支持 `grok-imagine-image-edit`，限制为 `1024x1024`、最多 7 张参考图、`n<=2`。
+- 账号导入：access token、本地 CPA、远程 CPA、Sub2API、Grok token/cookie 和远程账号来源。
 - 管理后台可按服务商 `provider` 和套餐 `type` 分别筛选账号。
-- 账号导出：仅导出 TXT，并按 GPT/Grok 服务商分别下载为 `webchat2api-gpt.txt` / `webchat2api_grok.txt`；文件内容每行一个 `access_token` 或 `sso` 凭据。
+- 账号导出：按 GPT/Grok 服务商分别下载 TXT。
 - 用户 API Key 管理。
 - CPA、Sub2API 和远程账号来源配置、同步和导入。
 - 代理、基础 URL、备份、图片存储、用户密钥、CPA、Sub2API 和内容过滤等配置。
 - 日志查看与清理。
-
-### 6.2 试验页
+- 图片任务和图片文件管理。
 
 试验页位于 `/image`，通过顶部切换区分文本试验和图像试验。
 
 文本试验：
 
 - 调用 `/v1/chat/completions`。
-- 聊天消息会保存在浏览器本地 localforage 中，刷新页面后仍保留。
+- 聊天消息保存在浏览器本地 localforage 中，刷新页面后仍保留。
 - 错误消息会显示在聊天历史中，但不会作为下一次 API 请求上下文发送。
-- 提供“批量测试模型”按钮，会从 `/v1/models` 获取 GPT/Grok 模型，逐个调用文本模型并显示 `pending`、`testing`、`success`、`error` 状态。
+- “批量测试模型”会从 `/v1/models` 获取 GPT/Grok 模型，逐个调用文本模型并显示 `pending`、`testing`、`success`、`error` 状态。
 - 提供清空文本聊天记录功能。
 
 图像试验：
@@ -499,9 +530,11 @@ admin
 - 图片任务保留队列和历史记录。
 - 遇到失效账号时，后端会在同次任务中排除该账号并尝试下一个可用账号，直到成功或账号池耗尽。
 
-## 7. Docker CLI Proxy 部署方式
+## 13. 部署与运维
 
-### 7.1 构建镜像
+### 13.1 Docker CLI
+
+构建镜像：
 
 ```bash
 docker build -t webchat2api:latest .
@@ -516,22 +549,7 @@ Docker 构建分为两段：
 - Web 静态产物复制到 `/app/web_dist`，由 FastAPI 提供访问。
 - `scripts/entrypoint.sh` 会先启动 Browser Bridge，再执行 `uv run python main.py`。
 
-### 7.2 启动容器
-
-标准启动命令：
-
-```bash
-docker run -d \
-  --name webchat2api \
-  --restart unless-stopped \
-  -p 83:83 \
-  -e PORT=83 \
-  -e HOST=0.0.0.0 \
-  -e LOGIN_SECRET=admin \
-  webchat2api:latest
-```
-
-带数据目录挂载：
+标准启动：
 
 ```bash
 docker run -d \
@@ -541,7 +559,7 @@ docker run -d \
   -v $(pwd)/data:/app/data \
   -e PORT=83 \
   -e HOST=0.0.0.0 \
-  -e LOGIN_SECRET=admin \
+  -e LOGIN_SECRET=your-strong-secret \
   webchat2api:latest
 ```
 
@@ -556,16 +574,16 @@ docker run -d \
   -v $(pwd)/data:/app/data \
   -e PORT=83 \
   -e HOST=0.0.0.0 \
-  -e LOGIN_SECRET=admin \
+  -e LOGIN_SECRET=your-strong-secret \
   -e PROXY_URL=http://host.docker.internal:7890 \
   webchat2api:latest
 ```
 
-Browser Bridge 默认使用容器内 `BRIDGE_PORT=3080` 与 `CHROMIUM_PATH=/usr/bin/chromium`。通常不需要额外挂载端口，因为 Python 后端会访问容器内本地地址。
-
-## 8. Docker Compose 部署方式
+### 13.2 Docker Compose
 
 `docker-compose.yml` 使用本地镜像 `webchat2api:latest`，适合普通 bridge 网络部署。`docker-compose.local.yml` 可本地构建后启动。`docker-compose.host.yml` 是 Linux host 网络模式的独立文件，不要和默认 Compose 文件叠加使用；host 网络会让服务直接监听宿主机 `83` 端口，必须先设置强随机 `LOGIN_SECRET` 并做好防火墙或反向代理限制。
+
+Compose 示例：
 
 ```yaml
 services:
@@ -578,7 +596,7 @@ services:
     environment:
       PORT: 83
       HOST: 0.0.0.0
-      LOGIN_SECRET: admin
+      LOGIN_SECRET: your-strong-secret
       PROXY_URL: http://host.docker.internal:7890
     volumes:
       - ./data:/app/data
@@ -586,354 +604,16 @@ services:
       - "host.docker.internal:host-gateway"
 ```
 
-启动：
+启动与日志：
 
 ```bash
 docker compose up -d
-```
-
-查看日志：
-
-```bash
 docker logs -f webchat2api
 ```
 
 日志中出现 `[entrypoint] Starting Browser Bridge on port 3080...` 与 `[entrypoint] Browser Bridge ready` 表示 Bridge 已通过 `/health` 探测。未出现 ready 不代表主服务一定不可用，但 Grok app-chat 可能会回退到直接请求。
 
-配置文件卫生：
-
-`.gitignore` 已忽略本地 `config.json`，该文件可用于保存本地密钥、代理和运行时配置。仓库已提供 `config.example.json` 作为可提交示例。
-
-停止服务：
-
-```bash
-docker compose down
-```
-
-## 9. 部署完成后的访问信息
-
-```text
-服务地址：http://服务器IP:83
-本机访问：http://localhost:83
-管理后台：http://服务器IP:83
-默认登录密钥：admin
-API Base URL：http://服务器IP:83/v1
-Chat Completions：POST http://服务器IP:83/v1/chat/completions
-Browser Bridge 健康检查：容器内 http://127.0.0.1:3080/health
-```
-
-## 10. 登录与鉴权说明
-
-打开 `http://localhost:83`，输入登录密钥。
-
-默认登录密钥：
-
-```text
-admin
-```
-
-默认密钥仅适合本地测试。公网或生产环境部署后，必须通过环境变量或配置文件修改 `LOGIN_SECRET`。
-
-API 调用鉴权：
-
-```http
-Authorization: Bearer YOUR_API_KEY
-```
-
-OpenAI 兼容接口还接受 `x-api-key: YOUR_API_KEY`，适用于 `/v1/models`、`/v1/chat/completions`、`/v1/responses`；`/v1/messages` 也已支持该请求头。图片生成和图片编辑接口仍按 Bearer Token 使用。
-
-管理员密钥可直接作为 Bearer Token 使用。也可以在管理后台创建用户 API Key，供第三方服务调用。
-
-## 11. API 使用说明
-
-### 11.1 健康检查
-
-```bash
-curl http://localhost:83/health
-```
-
-期望返回：
-
-```json
-{"status":"ok"}
-```
-
-### 11.2 版本查询
-
-```bash
-curl http://localhost:83/version
-```
-
-### 11.3 模型列表
-
-```bash
-curl http://localhost:83/v1/models \
-  -H "Authorization: Bearer YOUR_API_KEY"
-```
-
-该接口返回 GPT 与 Grok 模型。Grok 文本示例包括 `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent`、`grok-4.20-0309` 系列和 `grok-4.20-fast` / `auto` / `expert` / `heavy`。Grok 图片示例包括 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`，模型元数据会对非聊天模型标记 `capability`。
-
-### 11.4 聊天接口
-
-```bash
-curl http://localhost:83/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{
-    "model": "auto",
-    "messages": [
-      {"role": "user", "content": "你好"}
-    ]
-  }'
-```
-
-选择 Grok 模型时，请求路径仍为 `/v1/chat/completions`，后端会分发到 `provider=grok` 的账号：
-
-```bash
-curl http://localhost:83/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{
-    "model": "grok-4.20-auto",
-    "messages": [
-      {"role": "user", "content": "你好"}
-    ]
-  }'
-```
-
-Grok Console 与 app-chat 都会返回 OpenAI 兼容结果。显式配置 `browser_bridge_url` 时，后端会先预检并使用 Browser Bridge；未配置时，后端先尝试直接 app-chat 请求，遇到 `403`、`408`、`502`、`503`、`504` 等可回退上游错误时，再探测本机 Bridge 并尝试回退。遇到 403 且配置了 FlareSolverr 时，会尝试刷新 clearance 后重试。
-
-Grok 搜索来源会作为结构化 `search_sources` 返回，并映射为 OpenAI 风格的 `url_citation` annotations。流式响应会在最后一个 `finish_reason=stop` chunk 附带这些 metadata。配置项 `show_search_sources` 默认为 `false`；开启后，非流式文本末尾会追加 Markdown `Sources` 来源列表，适合只显示文本内容的客户端。
-
-### 11.5 图片生成接口
-
-```bash
-curl http://localhost:83/v1/images/generations \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{
-    "model": "grok-imagine-image",
-    "prompt": "一只漂浮在太空里的猫",
-    "n": 1,
-    "response_format": "url"
-  }'
-```
-
-GPT 图片模型仍使用 GPT 图片账号池。Grok 文生图支持 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`，通过 app-chat 返回图片 URL。若上游完成但没有返回图片 URL，会返回 `image_generation_failed`。
-
-### 11.6 图片编辑接口
-
-```bash
-curl http://localhost:83/v1/images/edits \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -F "model=gpt-image-2" \
-  -F "prompt=把这张图改成赛博朋克夜景风格" \
-  -F "n=1" \
-  -F "image=@./input.png"
-```
-
-图片编辑支持 GPT 图片路径和 Grok `grok-imagine-image-edit`。Grok 图片编辑会复用 Grok app-chat 账号池，只支持 `size=1024x1024`，最多 7 张参考图，`n` 最大为 2；prompt 中的 `@IMAGE1`、`@IMAGE2` 等占位符会替换为对应上传资产引用。`/api/image-tasks/edits` 使用同一编辑 handler。
-
-### 11.7 Responses 接口
-
-```bash
-curl http://localhost:83/v1/responses \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{
-    "model": "gpt-5",
-    "input": "生成一张未来感城市天际线图片",
-    "tools": [{"type": "image_generation"}]
-  }'
-```
-
-### 11.8 Messages 接口
-
-```bash
-curl http://localhost:83/v1/messages \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{
-    "model": "gpt-5",
-    "messages": [
-      {"role": "user", "content": "你好"}
-    ],
-    "max_tokens": 256
-  }'
-```
-
-### 11.9 账号导出接口
-
-```bash
-curl http://localhost:83/api/accounts/export \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{
-    "provider": "gpt",
-    "access_tokens": ["ACCESS_TOKEN_1"]
-  }'
-```
-
-`provider` 可取 `gpt` 或 `grok`，接口按服务商返回 TXT 文件：GPT 文件名固定为 `webchat2api-gpt.txt`，Grok 文件名固定为 `webchat2api_grok.txt`。`access_tokens` 为空数组时导出该服务商全部账号；内容仅包含凭据本身，每个账号一行，优先使用清理后的 `access_token`，缺失 `access_token` 时使用清理后的 `sso`。
-
-## 12. 测试与检查
-
-后端单元测试：
-
-```bash
-python3 -m unittest discover -s test -t .
-```
-
-`-t .` 用于指定项目根目录，避免 `test/utils.py` 遮蔽项目内的 `utils` 包。
-
-前端类型检查和构建：
-
-```bash
-cd web
-npm run typecheck
-npm run build
-```
-
-存储后端检查脚本：
-
-```bash
-python scripts/test_storage.py
-```
-
-Browser Bridge 可选健康语义测试位于 `services/browser_bridge/test_health.js`，需要 Node 环境。
-
-## 13. 日志与排错
-
-```bash
-docker ps | grep webchat2api
-docker logs -f webchat2api
-docker exec -it webchat2api sh
-docker restart webchat2api
-docker rm -f webchat2api
-docker build -t webchat2api:latest .
-curl http://localhost:83/health
-```
-
-容器内可检查 Browser Bridge：
-
-```bash
-docker exec -it webchat2api sh
-curl http://127.0.0.1:3080/health
-```
-
-## 14. 常见问题
-
-### 14.1 无法访问管理后台
-
-检查容器是否运行：
-
-```bash
-docker ps
-docker logs -f webchat2api
-```
-
-确认端口映射是否正确：
-
-```bash
--p 83:83
-```
-
-确认防火墙是否放行端口 `83`。
-
-### 14.2 登录密钥错误
-
-确认启动容器时的环境变量：
-
-```bash
--e LOGIN_SECRET=admin
-```
-
-如果修改过密钥，请使用新的密钥登录。
-
-### 14.3 容器无法访问宿主机代理
-
-Linux 环境需要添加：
-
-```bash
---add-host=host.docker.internal:host-gateway
-```
-
-并设置：
-
-```bash
--e PROXY_URL=http://host.docker.internal:7890
-```
-
-### 14.4 端口被占用
-
-检查端口：
-
-```bash
-lsof -i :83
-```
-
-或更换宿主机端口：
-
-```bash
--p 8080:83
-```
-
-访问地址变为：`http://localhost:8080`。
-
-### 14.5 API 返回 401
-
-检查请求头是否包含 Bearer Token：
-
-```http
-Authorization: Bearer YOUR_API_KEY
-```
-
-对 Grok app-chat，401 通常表示 SSO/token 无效或 Cookie 无法完成网页端鉴权。
-
-### 14.6 账号导出返回 400 或导出为空
-
-当前版本已支持 access-token-only 账号导出。若仍遇到导出失败，请检查：
-
-- 是否已选择至少一个账号，或请求中 `access_tokens` 是否为空数组用于导出全部账号。
-- 请求头是否包含管理员密钥或有权限的用户 API Key。
-- 账号是否仍存在于账号池中。
-
-### 14.7 图片生成遇到账号失效
-
-后端会识别 token invalid、token revoked、invalidated oauth token 等失效错误，并在同次图片生成任务中跳过该账号，尝试下一个可用账号。若所有账号都不可用，接口才会返回失败。
-
-Grok 文生图如果上游没有返回图片 URL，会返回 `image_generation_failed`。这表示 app-chat 请求结束，但没有解析到可用图片结果。
-
-### 14.8 Grok 账号无法调用
-
-确认账号导入时已设置 `provider=grok`，并保留 token/cookie 等 Grok 网页端凭据。`type` 字段只表示 plan、subscription 等套餐信息，不会决定服务商。若 Grok 上游返回 402 或 429，后端会按账号受限处理并等待后续恢复检查。
-
-如果调用 app-chat 模型，还需要检查：
-
-- 账号是否有匹配的 `tier` / `model_tier`，如 basic、super、heavy。
-- 账号如果设置了 `capabilities`，是否包含请求模型需要的 `capability`、`mode_id` 或 tier。
-- `browser_bridge_url` 是否可访问，或容器内 `http://127.0.0.1:3080/health` 是否正常。
-- `network_profiles.grok_app_chat` 中的 UA、Cookie、client hints、Statsig 是否与当前账号环境一致。
-- 如遇 403，可配置 `flaresolverr_url` 尝试刷新 clearance，但该路径不能保证成功。
-
-### 14.9 Grok 视频不可用
-
-`grok-imagine-video` 只在模型规格中声明当前能力和路由信息，实际执行时会返回 `unsupported_model`。Grok 图片编辑已支持 `grok-imagine-image-edit`；若图片编辑失败，请优先检查账号 tier/capabilities、app-chat Cookie、Cloudflare clearance 和参考图输入是否符合限制。
-
-## 15. 安全建议
-
-- 生产环境不要使用默认密钥 `admin`。
-- 不要将管理后台直接暴露到公网。
-- 建议通过反向代理启用 HTTPS。
-- 建议限制访问 IP。
-- API Key 不应写入前端代码。
-- 日志中不要输出完整 Token、Cookie、Session、SSO、`cf_clearance` 或其他敏感凭据。
-- 定期更新镜像。
-- 默认运行数据保存在 `data/`，建议做好备份和访问权限控制，禁止提交到代码仓库。
-- 文本试验聊天历史保存在浏览器本地存储中，共用浏览器环境时请注意清理。
-- Browser Bridge 会在真实 Chromium 中使用 SSO Cookie，请只在可信运行环境中启用。
-
-## 16. 更新与维护
+### 13.3 更新与运行检查
 
 远程镜像更新：
 
@@ -966,44 +646,76 @@ docker run -d \
 
 更新后检查 `/health`、`/version`、管理后台登录、账号导出、试验页文本聊天历史、容器内 Browser Bridge `/health`，以及至少一个目标 Grok Console 或 app-chat 模型。
 
-## 17. 交付状态
+## 14. 测试、排障与安全建议
 
-已完成：
+### 14.1 测试与检查
 
-- 项目名称统一为 `webchat2api`。
-- Docker 镜像名建议为 `webchat2api:latest`。
-- 容器名建议为 `webchat2api`。
-- 默认端口为 `83:83`。
-- 默认登录密钥为 `admin`。
-- README 与技术文档已按当前实现更新。
-- `docs/technical-guide.md` 与根目录 `技术文档.md` 保持一致。
+后端单元测试：
 
-## 部署完成提示
-
-```text
-webchat2api 部署完成。
-
-服务地址：
-http://localhost:83
-
-如果部署在服务器上，请访问：
-http://服务器IP:83
-
-管理后台：
-http://localhost:83
-
-默认登录密钥：
-admin
-
-容器名称：
-webchat2api
-
-查看日志：
-docker logs -f webchat2api
-
-重启服务：
-docker restart webchat2api
-
-安全提醒：
-默认登录密钥 admin 仅建议本地测试使用，生产环境请立即修改 LOGIN_SECRET。config.json 和 data/ 是本地运行文件，禁止提交到代码仓库；后端会写入 config.json 保存 Web UI 设置，只读挂载会导致设置保存失败。Grok SSO、Cloudflare Cookie、Browser Bridge 和 FlareSolverr 配置都属于敏感运行信息，不应写入公开仓库或日志。
+```bash
+python3 -m unittest discover -s test -t .
 ```
+
+`-t .` 用于指定项目根目录，避免 `test/utils.py` 遮蔽项目内的 `utils` 包。
+
+前端类型检查和构建：
+
+```bash
+cd web
+npm run typecheck
+npm run build
+```
+
+存储后端检查脚本：
+
+```bash
+python scripts/test_storage.py
+```
+
+Browser Bridge 可选健康语义测试位于 `services/browser_bridge/test_health.js`，需要 Node 环境。
+
+### 14.2 常用排障命令
+
+```bash
+docker ps
+docker logs -f webchat2api
+docker exec -it webchat2api sh
+docker restart webchat2api
+curl http://localhost:83/health
+```
+
+容器内检查 Browser Bridge：
+
+```bash
+docker exec -it webchat2api sh
+curl http://127.0.0.1:3080/health
+```
+
+### 14.3 常见问题
+
+| 问题 | 检查方向 |
+| --- | --- |
+| 管理后台无法登录 | 确认 `LOGIN_SECRET`、`WEBCHAT2API_AUTH_KEY` 或 `config.json` 中的 `auth-key`；不要继续使用默认 `admin`。 |
+| `/v1/models` 缺少 GPT 动态模型 | 检查是否有可用 `provider=gpt` 账号；动态拉取失败时会保留 GPT fallback 与静态 Grok 模型。 |
+| Grok 账号无法调用 | 确认导入时 `provider=grok`，并保留 token/cookie 等网页端凭据；`type` 不决定 provider。 |
+| app-chat 模型不可用 | 检查账号 `tier` / `model_tier`、`capabilities`、Cookie、UA、client hints、Statsig 和 Cloudflare clearance。 |
+| app-chat 返回 401 | 通常表示 SSO/token 无效或 Cookie 无法完成网页端鉴权，账号会按异常处理。 |
+| app-chat 返回 403 | 直接 app-chat `403` 会返回给调用方，不会自动回退到 Browser Bridge，也不会标记账号异常；可配置 `flaresolverr_url` 尝试刷新 clearance。 |
+| app-chat 返回 429 或 402 | 后端按账号受限处理，等待后续恢复检查。 |
+| 图片生成遇到账号失效 | 后端识别 token invalid、token revoked、invalidated oauth token 等失效错误，并在同次任务中跳过该账号继续尝试。 |
+| Grok 文生图无图片 URL | 如果上游完成但没有返回图片 URL，会返回 `image_generation_failed`。 |
+| Grok 视频不可用 | `grok-imagine-video` 只声明当前能力和路由信息，实际执行返回 `unsupported_model`。 |
+| 账号导出返回 400 或为空 | 检查是否选择账号或传空数组导出全部、请求头是否有权限、账号是否仍存在。 |
+
+### 14.4 安全建议
+
+- 生产环境不要使用默认密钥 `admin`。
+- 不要将管理后台直接暴露到公网。
+- 建议通过反向代理启用 HTTPS。
+- 建议限制访问 IP。
+- API Key 不应写入前端代码。
+- 日志中不要输出完整 Token、Cookie、Session、SSO、`cf_clearance` 或其他敏感凭据。
+- 定期更新镜像。
+- 默认运行数据保存在 `data/`，建议做好备份和访问权限控制，禁止提交到代码仓库。
+- 文本试验聊天历史保存在浏览器本地存储中，共用浏览器环境时请注意清理。
+- Browser Bridge 会在真实 Chromium 中使用 SSO Cookie，请只在可信运行环境中启用。
