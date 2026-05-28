@@ -177,7 +177,7 @@ npm run dev
 
 Grok Console 与 grok.com app-chat 是不同上游路径。本项目没有接入官方 xAI API，也不声称提供官方兼容能力。Console 路径可使用 `network_profiles.grok_console.cf_clearance` 附加手动 Cookie；app-chat 路径可使用 `network_profiles.grok_app_chat` 覆盖 UA、impersonate、`cf_clearance`、`cf_cookies`、`sec-ch-ua`、`x-statsig-id` 等字段。
 
-如配置 `flaresolverr_url`，直接 app-chat 请求遇到 Cloudflare 或 403 时会尝试通过 FlareSolverr 刷新 clearance 并重试。Browser Bridge 是独立浏览器路径；显式配置 `browser_bridge_url` 时，后端会优先使用该 Bridge。未配置时，app-chat 默认先走直接请求；直接请求遇到 `403`、`408`、`502`、`503`、`504` 时，才会尝试探测并回退到 `http://127.0.0.1:3080/health` 对应的 Browser Bridge。Browser Bridge 的接口是 `POST /api/chat {sso,payload}` 和 `GET /health`，请求会经真实 Chromium 页面发往 grok.com。Docker 入口脚本会在 `BRIDGE_PORT` 上启动 `services/browser_bridge/server.js`，默认 `3080`；页面池可用 `BRIDGE_MAX_PAGES` 和 `BRIDGE_PAGE_IDLE_MS` 控制。Bridge 如果没有拿到 `x-userid` Cookie，会快速返回 `sso_unavailable`，避免继续使用未鉴权页面。
+如配置 `flaresolverr_url`，直接 app-chat 请求遇到 Cloudflare 或 403 时会尝试通过 FlareSolverr 刷新 clearance 并重试。Browser Bridge 是独立浏览器路径；显式配置 `browser_bridge_url` 时，后端会优先使用该 Bridge。未配置时，app-chat 默认先走直接请求；直接请求遇到 `408`、`502`、`503`、`504` 时，才会尝试探测并回退到 `http://127.0.0.1:3080/health` 对应的 Browser Bridge。直接 app-chat 返回 `403` 会原样返回给调用方，不会自动回退到 Browser Bridge，也不会把账号标记为异常；`401` 会标记账号异常，`429` 会标记账号限流。Browser Bridge 的接口是 `POST /api/chat {sso,payload}` 和 `GET /health`，请求会经真实 Chromium 页面发往 grok.com。Docker 入口脚本会在 `BRIDGE_PORT` 上启动 `services/browser_bridge/server.js`，默认 `3080`；页面池可用 `BRIDGE_MAX_PAGES` 和 `BRIDGE_PAGE_IDLE_MS` 控制。Bridge 如果没有拿到 `x-userid` Cookie，会快速返回 `sso_unavailable`，避免继续使用未鉴权页面。
 
 > [!WARNING]
 > Cloudflare、WAF、账号风控和上游配额都可能变化。手动 clearance、FlareSolverr 和 Browser Bridge 都是尽力而为，不能保证长期可用。
@@ -192,7 +192,7 @@ Grok app-chat 模型会按所需账号层级选号：`basic` 可跑 lite 和 fas
 Authorization: Bearer <LOGIN_SECRET 或用户 API Key>
 ```
 
-OpenAI 兼容接口也接受 `x-api-key: <LOGIN_SECRET 或用户 API Key>`。当前包括 `/v1/models`、`/v1/chat/completions`、`/v1/responses`；`/v1/messages` 也已支持该请求头。图片接口请继续使用 Bearer Token。
+OpenAI 兼容文本接口也接受 `x-api-key: <LOGIN_SECRET 或用户 API Key>`。当前仅包括 `/v1/models`、`/v1/chat/completions`、`/v1/responses` 和 `/v1/messages`。图片生成与图片编辑接口请继续使用 Bearer Token。
 
 健康检查：
 
@@ -213,7 +213,7 @@ curl http://localhost:83/v1/models \
   -H "Authorization: Bearer admin"
 ```
 
-`/v1/models` 会优先使用已导入的 `provider=gpt` 账号动态拉取 GPT 模型；如果没有可用 GPT 账号或拉取失败，会回退到匿名/内置 GPT 模型。Grok 当前使用内置模型列表，因为现有 Grok token/cookie 无法访问 `console.x.ai` 或 `api.x.ai` 的模型列表端点。Grok 示例模型包括 `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent`、`grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`。
+`/v1/models` 会优先使用已导入的 `provider=gpt` 账号动态拉取 GPT 模型；如果没有可用 GPT 账号或拉取失败，会回退到匿名/内置 GPT 文本模型：`auto`、`gpt-5`、`gpt-5-thinking`、`gpt-4o`、`gpt-4o-mini`。GPT 图片模型包括 `gpt-image-2`、`codex-gpt-image-2`。Grok 当前使用内置模型列表，因为现有 Grok token/cookie 无法访问 `console.x.ai` 或 `api.x.ai` 的模型列表端点。Grok Console 文本模型包括 `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent`；app-chat 文本模型包括 `grok-4.20-0309` 系列、`grok-4.20-fast`、`grok-4.20-auto`、`grok-4.20-expert`、`grok-4.20-heavy`、`grok-4.3-beta`；图片模型包括 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`、`grok-imagine-image-edit`，`grok-imagine-video` 仅声明为未支持的视频能力。
 
 聊天接口：
 
@@ -273,7 +273,7 @@ curl http://localhost:83/v1/images/generations \
   }'
 ```
 
-当前 Grok app-chat 图片生成支持 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`；Grok 图片编辑支持 `grok-imagine-image-edit`，限制为 `size=1024x1024`、最多 7 张参考图、`n<=2`。`grok-imagine-video` 暂未支持，请不要把它当成可用的视频接口。ChatGPT 图片生成/编辑仍使用 GPT 服务商账号。
+当前 GPT 图片模型包括 `gpt-image-2` 和 `codex-gpt-image-2`，图片生成/编辑仍使用 GPT 服务商账号。GPT 图片编辑接受 JSON 或表单中的图片输入，可传 URL、data URI 或上传文件，支持多参考图；当前不支持 `file_id`。每张参考图上限为 50MiB。当前 Grok app-chat 图片生成支持 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`；Grok 图片编辑支持 `grok-imagine-image-edit`，限制为 `size=1024x1024`、最多 7 张参考图、`n<=2`。`grok-imagine-video` 暂未支持，请不要把它当成可用的视频接口。
 
 账号导入说明：
 
