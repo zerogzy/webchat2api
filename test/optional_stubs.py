@@ -47,8 +47,9 @@ class StubUploadFile:
 
 
 class StubHeader:
-    def __init__(self, default: object = None, **_: object) -> None:
+    def __init__(self, default: object = None, **kwargs: object) -> None:
         self.default = default
+        self.alias = kwargs.get("alias")
 
 
 class StubQuery:
@@ -314,8 +315,12 @@ def _call_route(func: Callable[..., object], *, headers: dict[str, str], query: 
             kwargs[name] = path_values[name]
         elif name in query:
             kwargs[name] = query[name][0]
-        elif parameter.default is not inspect._empty and hasattr(parameter.default, "default"):
-            kwargs[name] = parameter.default.default
+        elif parameter.default is not inspect._empty:
+            alias = getattr(parameter.default, "alias", None)
+            if alias:
+                kwargs[name] = headers.get(str(alias))
+            elif hasattr(parameter.default, "default"):
+                kwargs[name] = parameter.default.default
     result = func(**kwargs)
     if inspect.isawaitable(result):
         return asyncio.run(cast(Coroutine[Any, Any, object], result))
