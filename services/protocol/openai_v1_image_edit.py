@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Iterator
 
 from services.models import GROK_PROVIDER, resolve_model
+from services.providers import grok
 from services.protocol.conversation import (
     ConversationRequest,
     ImageGenerationError,
@@ -21,18 +22,23 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     size = body.get("size")
     response_format = str(body.get("response_format") or "b64_json")
     base_url = str(body.get("base_url") or "") or None
+    spec = resolve_model(model)
+    if spec.provider == GROK_PROVIDER:
+        if spec.capability != "image_edit":
+            raise ImageGenerationError(
+                f"unsupported Grok image model: {model}",
+                status_code=400,
+                error_type="invalid_request_error",
+                code="unsupported_model",
+                param="model",
+            )
+        outputs = grok.app_chat_image_edit_outputs(body, spec, prompt, images, n, size)
+        if body.get("stream"):
+            return stream_image_chunks(outputs)
+        return collect_image_outputs(outputs)
     encoded_images = encode_images(images)
     if not encoded_images:
         raise ImageGenerationError("image is required")
-    spec = resolve_model(model)
-    if spec.provider == GROK_PROVIDER:
-        raise ImageGenerationError(
-            f"unsupported Grok image model: {model}",
-            status_code=400,
-            error_type="invalid_request_error",
-            code="unsupported_model",
-            param="model",
-        )
     outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,

@@ -83,6 +83,25 @@ class ImagesEditsApiTests(unittest.TestCase):
         self.assertIn("file_id image references are not supported", response.text)
         self.assertEqual(self.handle_calls, [])
 
+    def test_edit_grok_image_edit_model_reaches_same_handler(self):
+        response = self.client.post(
+            "/v1/images/edits",
+            headers=AUTH_HEADERS,
+            json={
+                "model": "grok-imagine-image-edit",
+                "prompt": "edit",
+                "images": [{"image_url": DATA_IMAGE_URL}],
+                "n": 1,
+                "size": "1024x1024",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.handle_calls), 1)
+        payload = self.handle_calls[0]
+        self.assertEqual(payload["model"], "grok-imagine-image-edit")
+        self.assertEqual(payload["images"], [(PNG_BYTES, "image_url.png", "image/png")])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,7 +21,7 @@ HTTPException = cast(type[Exception], getattr(sys.modules["fastapi"], "HTTPExcep
 
 from services.models import resolve_model
 from services.network import flaresolverr
-from services.protocol import openai_v1_chat_complete, openai_v1_response
+from services.protocol import openai_v1_chat_complete, openai_v1_image_edit, openai_v1_response
 from services.protocol.conversation import ImageGenerationError, ImageOutput
 from services.providers import grok
 
@@ -341,7 +341,9 @@ class GrokProviderTests(unittest.TestCase):
 
         response = grok.collect_app_chat_response(events)
 
-        self.assertEqual(response, {"content": "answer", "reasoning_content": "plan "})
+        self.assertEqual(response["content"], "answer")
+        self.assertEqual(response["reasoning_content"], "plan ")
+        self.assertEqual(response["search_sources"], [])
 
     def test_collect_app_chat_response_accumulates_final_tag_tokens(self) -> None:
         events = [
@@ -352,7 +354,80 @@ class GrokProviderTests(unittest.TestCase):
 
         response = grok.collect_app_chat_response(events)
 
-        self.assertEqual(response, {"content": "Hello world", "reasoning_content": ""})
+        self.assertEqual(response["content"], "Hello world")
+        self.assertEqual(response["reasoning_content"], "")
+        self.assertEqual(response["search_sources"], [])
+
+    def test_collect_app_chat_response_extracts_search_sources(self) -> None:
+        events = [
+            {
+                "result": {
+                    "response": {
+                        "token": "answer",
+                        "webSearchResults": {
+                            "results": [
+                                {"url": "https://example.com/a", "title": "Example A"},
+                                {"url": "https://example.com/a", "title": "Duplicate"},
+                            ]
+                        },
+                    }
+                }
+            },
+            {
+                "result": {
+                    "response": {
+                        "xSearchResults": {
+                            "results": [
+                                {"username": "alice", "postId": "123", "text": "  Hello   from X post with normalized text  "},
+                            ]
+                        },
+                        "isSoftStop": True,
+                    }
+                }
+            },
+        ]
+
+        response = grok.collect_app_chat_response(events)
+
+        self.assertEqual(response["content"], "answer")
+        self.assertEqual(response["search_sources"], [
+            {"url": "https://example.com/a", "title": "Example A", "type": "web"},
+            {"url": "https://x.com/alice/status/123", "title": "Hello from X post with normalized text", "type": "x_post"},
+        ])
+
+    def test_format_search_sources_suffix_escapes_markdown_link_text(self) -> None:
+        suffix = grok.format_search_sources_suffix([
+            {"url": "https://example.com/a", "title": r"Look [here] \ now", "type": "web"},
+        ])
+
+        self.assertIn(r"1. [Look \[here\] \\ now](https://example.com/a)", suffix)
+
+    def test_format_search_sources_suffix_filters_urls_that_break_markdown_links(self) -> None:
+        suffix = grok.format_search_sources_suffix([
+            {"url": "https://example.com/good", "title": "Good", "type": "web"},
+            {"url": "https://example.com/bad)tail", "title": "Bad paren", "type": "web"},
+            {"url": "https://example.com/bad path", "title": "Bad space", "type": "web"},
+            {"url": "https://example.com/bad\npath", "title": "Bad control", "type": "web"},
+        ])
+
+        self.assertIn("1. [Good](https://example.com/good)", suffix)
+        self.assertNotIn("Bad paren", suffix)
+        self.assertNotIn("Bad space", suffix)
+        self.assertNotIn("Bad control", suffix)
+
+    def test_strip_search_sources_from_assistant_history(self) -> None:
+        suffix = grok.format_search_sources_suffix([
+            {"url": "https://example.com/a", "title": "Example A", "type": "web"},
+        ])
+        messages = [
+            {"role": "assistant", "content": f"Answer{suffix}"},
+            {"role": "user", "content": "next"},
+        ]
+
+        stripped = grok.strip_search_sources_from_messages(messages)
+
+        self.assertEqual(stripped[0]["content"], "Answer")
+        self.assertEqual(stripped[1]["content"], "next")
 
     def test_message_tag_final_is_not_app_chat_final_event(self) -> None:
         self.assertFalse(grok.is_app_chat_final_event({"result": {"response": {"messageTag": "final"}}}))
@@ -754,6 +829,36 @@ class GrokProviderTests(unittest.TestCase):
         patched.assert_called_once()
         self.assertIn("data:image/png;base64,abc", response["choices"][0]["message"]["content"])
 
+    def test_grok_image_edit_protocol_routes_to_app_chat_edit_outputs(self) -> None:
+        body = {
+            "model": "grok-imagine-image-edit",
+            "prompt": "edit",
+            "images": [(b"png", "input.png", "image/png")],
+            "n": 1,
+            "size": "1024x1024",
+            "response_format": "url",
+        }
+        outputs = [ImageOutput(kind="result", model="grok-imagine-image-edit", index=1, total=1, data=[{"url": "https://assets.grok.com/edit.png"}])]
+        with mock.patch.object(grok, "app_chat_image_edit_outputs", return_value=iter(outputs)) as patched:
+            response = openai_v1_image_edit.handle(body)
+
+        patched.assert_called_once()
+        self.assertEqual(response["data"], [{"url": "https://assets.grok.com/edit.png"}])
+
+    def test_grok_non_image_edit_model_still_unsupported_for_edits(self) -> None:
+        body = {
+            "model": "grok-imagine-image-lite",
+            "prompt": "edit",
+            "images": [(b"png", "input.png", "image/png")],
+            "n": 1,
+        }
+        with self.assertRaises(ImageGenerationError) as context:
+            openai_v1_image_edit.handle(body)
+
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertEqual(context.exception.code, "unsupported_model")
+        self.assertEqual(context.exception.param, "model")
+
     def test_unsupported_grok_image_model_raises_openai_error(self) -> None:
         spec = resolve_model("grok-imagine-image-edit")
         with self.assertRaises(ImageGenerationError) as context:
@@ -762,6 +867,128 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 400)
         self.assertEqual(context.exception.code, "unsupported_model")
         self.assertEqual(context.exception.param, "model")
+
+    def test_grok_image_edit_payload_uses_uploaded_references_and_parent_post(self) -> None:
+        payload = grok.build_grok_image_edit_payload(
+            "edit @file-1",
+            ["https://assets.grok.com/input.png"],
+            "post-1",
+        )
+
+        self.assertEqual(payload["modelName"], "imagine-image-edit")
+        self.assertEqual(payload["message"], "edit @file-1")
+        self.assertTrue(payload["enableImageGeneration"])
+        self.assertTrue(payload["enableImageStreaming"])
+        self.assertEqual(payload["imageGenerationCount"], 2)
+        config = payload["responseMetadata"]["modelConfigOverride"]["modelMap"]["imageEditModelConfig"]
+        self.assertEqual(config["imageReferences"], ["https://assets.grok.com/input.png"])
+        self.assertEqual(config["parentPostId"], "post-1")
+
+    def test_grok_image_edit_upload_payload_and_placeholder_replacement(self) -> None:
+        calls = []
+        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client.access_token = "sso=token; x-userid=user-1"
+
+        def fake_post(url, payload, *, context, referer=None):
+            calls.append((url, payload, context, referer))
+            return {"fileMetadataId": "file-1", "fileUri": "/users/user-1/file-1/content"}
+
+        client._post_direct_json = fake_post
+        reference = client.upload_image_edit_reference(b"png", "input.png", "image/png")
+
+        self.assertEqual(calls[0][0], grok.APP_CHAT_UPLOAD_FILE_URL)
+        self.assertEqual(calls[0][1], {"fileName": "input.png", "fileMimeType": "image/png", "content": "cG5n"})
+        self.assertEqual(reference.content_url, "https://assets.grok.com/users/user-1/file-1/content")
+        self.assertEqual(grok.replace_grok_image_placeholders("edit @IMAGE1 and @IMAGE2", [reference]), "edit @file-1 and @IMAGE2")
+
+    def test_grok_image_edit_extracts_stream_and_model_response_urls(self) -> None:
+        stream_event = {
+            "result": {
+                "response": {
+                    "streamingImageGenerationResponse": {
+                        "progress": 100,
+                        "imageIndex": 1,
+                        "imageUrl": "/generated/edit.png",
+                    }
+                }
+            }
+        }
+        model_event = {
+            "result": {
+                "response": {
+                    "modelResponse": {
+                        "generatedImageUrls": ["https://assets.grok.com/generated/fallback.png"],
+                        "fileAttachments": ["asset-1"],
+                    }
+                }
+            }
+        }
+
+        self.assertEqual(grok.extract_grok_image_edit_final_urls(stream_event), {1: "https://assets.grok.com/generated/edit.png"})
+        self.assertEqual(
+            grok.extract_grok_image_edit_final_urls(model_event, "user-1"),
+            {0: "https://assets.grok.com/users/user-1/asset-1/content"},
+        )
+
+    def test_grok_image_edit_rejects_non_grok_asset_urls(self) -> None:
+        event = {
+            "result": {
+                "response": {
+                    "streamingImageGenerationResponse": {
+                        "progress": 100,
+                        "imageUrl": "https://example.com/generated/edit.png",
+                    },
+                    "modelResponse": {
+                        "generatedImageUrls": ["http://assets.grok.com/insecure.png"],
+                    },
+                }
+            }
+        }
+
+        self.assertEqual(grok.extract_grok_image_edit_final_urls(event), {})
+
+    def test_grok_image_edit_outputs_errors_when_no_final_result(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_app_chat_access_token=mock.Mock(return_value="selected-token"),
+            get_account=mock.Mock(return_value={"access_token": "selected-token"}),
+            mark_text_used=mock.Mock(),
+        )
+        sys.modules["services.account_service"] = types.SimpleNamespace(account_service=account_service)
+        spec = resolve_model("grok-imagine-image-edit")
+
+        with mock.patch.object(grok, "GrokAppChatClient") as client_class:
+            client = client_class.return_value.__enter__.return_value
+            client.upload_image_edit_reference.return_value = grok.GrokImageEditReference("file-1", "https://assets.grok.com/input.png")
+            client.create_image_edit_parent_post.return_value = ("post-1", "edit")
+            client.stream_image_edit_events.return_value = iter([{"result": {"response": {"isSoftStop": True}}}])
+            with self.assertRaises(ImageGenerationError) as context:
+                list(grok.app_chat_image_edit_outputs(
+                    {"prompt": "edit"},
+                    spec,
+                    "edit",
+                    [(b"png", "input.png", "image/png")],
+                    1,
+                    "1024x1024",
+                ))
+
+        self.assertEqual(context.exception.status_code, 502)
+        self.assertEqual(context.exception.code, "image_edit_failed")
+        account_service.mark_text_used.assert_called_once_with("selected-token")
+
+    def test_grok_image_edit_validates_limits_as_openai_request_errors(self) -> None:
+        spec = resolve_model("grok-imagine-image-edit")
+        cases = [
+            ([(b"png", "input.png", "image/png")], 1, "1792x1024", "size"),
+            ([(b"png", "input.png", "image/png")], 3, "1024x1024", "n"),
+            ([(b"png", f"input-{i}.png", "image/png") for i in range(8)], 1, "1024x1024", "image"),
+        ]
+        for images, n, size, param in cases:
+            with self.subTest(param=param):
+                with self.assertRaises(ImageGenerationError) as context:
+                    list(grok.app_chat_image_edit_outputs({"prompt": "edit"}, spec, "edit", images, n, size))
+                self.assertEqual(context.exception.status_code, 400)
+                self.assertEqual(context.exception.error_type, "invalid_request_error")
+                self.assertEqual(context.exception.param, param)
 
     def test_app_chat_error_classification_is_specific(self) -> None:
         cases = {
