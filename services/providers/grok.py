@@ -439,6 +439,14 @@ def _feedback_status(upstream_status: int) -> str | None:
     return None
 
 
+def _app_chat_feedback_status(upstream_status: int) -> str | None:
+    if upstream_status == 401:
+        return "异常"
+    if upstream_status == 429:
+        return "限流"
+    return None
+
+
 def _console_upstream_error_detail(response: object | None) -> str:
     if response is None:
         return ""
@@ -1072,7 +1080,7 @@ def collect_app_chat_response(events: Iterable[dict[str, Any]]) -> dict[str, Any
 
 def classify_app_chat_upstream_error(upstream_status: int, access_token: str | None = None) -> GrokConsoleError:
     status = int(upstream_status)
-    feedback_status = _feedback_status(status)
+    feedback_status = _app_chat_feedback_status(status)
     if access_token and feedback_status:
         from services.account_service import account_service
 
@@ -1436,7 +1444,7 @@ class GrokAppChatClient:
             return
         except GrokConsoleError as exc:
             status = exc.upstream_status or exc.status_code
-            if bridge_first or status not in {403, 408, 502, 503, 504}:
+            if bridge_first or status not in {408, 502, 503, 504}:
                 raise
             bridge_lines = self._try_browser_bridge(payload)
             if bridge_lines is None:
