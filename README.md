@@ -18,7 +18,7 @@
 - 公共接口：提供 `/health`、`/version`、`/auth/login`，AI 接口统一使用 Bearer Token 鉴权
 - GPT/Grok 文本模型：`/v1/models` 优先通过 `provider=gpt` 账号动态拉取 GPT 模型，并合并静态 Grok 模型；`/v1/chat/completions` 按 `model` 自动分发到 GPT 或 Grok 服务商账号
 - Grok app-chat：支持通过 grok.com app-chat 路径访问带 `mode_id` 的 Grok 模型，并可走 Browser Bridge 用真实 Chromium 代理请求
-- Grok 图片生成：`grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro` 通过 app-chat 图片能力生成图片；`grok-imagine-image-edit` 和 `grok-imagine-video` 已列出但暂未实现
+- Grok 图片生成与编辑：`grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro` 通过 app-chat 图片能力生成图片；`grok-imagine-image-edit` 支持 app-chat 图片编辑；`grok-imagine-video` 已列出但暂未实现
 - tier 感知账号选择：Grok app-chat 会按模型所需 `basic`、`super`、`heavy` tier 和账号 `capabilities` 优先选择匹配账号，未匹配时再回退到普通 Grok 轮换
 - Web 管理后台：账号池、用户 API Key、代理、日志、图片任务、图片文件、备份、图片存储和系统配置管理
 - 管理接口：提供 `/api/settings`、`/api/auth/users`、`/api/accounts`、`/api/cpa/*`、`/api/sub2api/*`、`/api/remote-account/*`、`/api/image-tasks/*`、`/api/images*`、`/api/logs`、`/api/proxy/test`、`/api/storage/info`、`/api/backups*`、`/api/backup/test`、`/api/image-storage/*` 等后台能力
@@ -192,6 +192,8 @@ Grok app-chat 模型会按所需账号层级选号：`basic` 可跑 lite 和 fas
 Authorization: Bearer <LOGIN_SECRET 或用户 API Key>
 ```
 
+OpenAI 兼容接口也接受 `x-api-key: <LOGIN_SECRET 或用户 API Key>`。当前包括 `/v1/models`、`/v1/chat/completions`、`/v1/responses`；`/v1/messages` 也已支持该请求头。图片接口请继续使用 Bearer Token。
+
 健康检查：
 
 ```bash
@@ -241,6 +243,8 @@ curl http://localhost:83/v1/chat/completions \
   }'
 ```
 
+Grok 搜索来源会写入响应中的结构化 `search_sources`，并在 OpenAI 风格消息里转换为 `url_citation` annotations。流式响应会在最终 `finish_reason=stop` chunk 附带这些 metadata。`show_search_sources` 默认关闭；开启后，非流式文本末尾会追加 Markdown `Sources` 列表，便于不读取 annotations 的客户端显示来源。
+
 GPT 图片生成接口：
 
 ```bash
@@ -269,7 +273,7 @@ curl http://localhost:83/v1/images/generations \
   }'
 ```
 
-当前 Grok app-chat 图片生成支持 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`。`grok-imagine-image-edit` 和 `grok-imagine-video` 暂未支持，请不要把它们当成可用的图生图或视频接口。ChatGPT 图片生成/编辑仍使用 GPT 服务商账号。
+当前 Grok app-chat 图片生成支持 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`；Grok 图片编辑支持 `grok-imagine-image-edit`，限制为 `size=1024x1024`、最多 7 张参考图、`n<=2`。`grok-imagine-video` 暂未支持，请不要把它当成可用的视频接口。ChatGPT 图片生成/编辑仍使用 GPT 服务商账号。
 
 账号导入说明：
 
@@ -324,6 +328,7 @@ cp config.example.json config.json
 | `image_poll_timeout_secs` | `120` | 图片任务轮询超时时间 |
 | `auto_remove_rate_limited_accounts` | `false` | 是否自动移除限流账号 |
 | `auto_remove_invalid_accounts` | `true` | 是否自动移除失效账号 |
+| `show_search_sources` | `false` | 是否在非流式文本末尾追加 Markdown `Sources` 来源列表；结构化 `search_sources` 和 `url_citation` annotations 不依赖该开关 |
 | `log_levels` | `debug`、`error`、`info`、`warning` | 日志级别过滤配置 |
 | `sensitive_words` | `[]` | 本地敏感词，命中后直接拦截文本请求 |
 | `global_system_prompt` | 空 | 全局系统提示词 |

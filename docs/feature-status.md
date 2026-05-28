@@ -7,12 +7,13 @@
 | 公共健康与版本接口 | ✅ | 已提供 `GET /health`、`GET /version` 和 `POST /auth/login`。默认登录密钥仍为 `admin`，生产环境必须修改。 |
 | OpenAI 兼容 `GET /v1/models` | ✅ | 优先通过 `provider=gpt` 账号动态拉取 GPT 模型，失败时回退到匿名或内置 GPT 模型，并合并静态 Grok 文本模型、GPT 图片模型和 Grok app-chat 图片模型。 |
 | GPT/Grok 文本服务商拆分 | ✅ | 账号 `provider` 选择 `gpt` 或 `grok`，`type` 只记录套餐、订阅或计划信息，不再用于选择服务商。 |
-| OpenAI 兼容 `POST /v1/chat/completions` | ✅ | GPT 模型走 ChatGPT 链路，Grok 文本模型走 `provider=grok` 账号；Grok 模型会按账号 `tier` 和 `capabilities` 路由。 |
+| OpenAI 兼容 `POST /v1/chat/completions` | ✅ | GPT 模型走 ChatGPT 链路，Grok 文本模型走 `provider=grok` 账号；Grok 模型会按账号 `tier` 和 `capabilities` 路由。Grok 搜索来源支持结构化 `search_sources`、OpenAI 风格 `url_citation` annotations，流式最终 stop chunk 会附带 metadata；`show_search_sources` 默认关闭，开启后非流式文本追加 Markdown `Sources`。 |
 | Grok 流式兼容响应 | ✅ | Grok 上游文本结果可封装为 OpenAI 兼容的流式 chunk，已有相关测试覆盖。 |
 | OpenAI 兼容 `POST /v1/images/generations` | ✅ | 已支持图片生成，并可通过 `n` 返回多张图片；GPT 图片模型使用 GPT 服务商账号，Grok app-chat 图片模型使用 Grok SSO 账号。 |
-| OpenAI 兼容 `POST /v1/images/edits` | ⚠️ | GPT 图片编辑已支持上传图片编辑和多参考图输入；Grok `image_edit` 模型已列入模型表，但 app-chat 图片编辑链路尚未支持。 |
+| OpenAI 兼容 `POST /v1/images/edits` | ✅ | GPT 图片编辑已支持上传图片编辑和多参考图输入；Grok `grok-imagine-image-edit` 通过 app-chat upload-file、media post 和 image-edit stream 支持，限制为 `1024x1024`、最多 7 张参考图、`n<=2`。 |
 | OpenAI 兼容 `POST /v1/responses` | ✅ | 已支持图片生成工具调用。 |
 | Anthropic 兼容 `POST /v1/messages` | ✅ | 路由和协议实现已存在，测试包含非流式与流式调用用例。 |
+| `x-api-key` 兼容鉴权 | ✅ | `/v1/models`、`/v1/chat/completions`、`/v1/responses` 和 `/v1/messages` 支持 `x-api-key`；图片生成和图片编辑接口仍使用 Bearer Token。 |
 | 后台管理接口 | ✅ | 已提供 `/api/settings`、`/api/auth/users`、`/api/accounts`、`/api/cpa/*`、`/api/sub2api/*`、`/api/remote-account/*`、`/api/image-tasks/*`、`/api/images*`、`/api/logs`、`/api/proxy/test`、`/api/storage/info`、`/api/backups*`、`/api/backup/test`、`/api/image-storage/*`。 |
 | 前端管理后台 | ✅ | 已支持 `/`、`/accounts`、`/image`、`/image-manager`、`/logs`、`/settings`、`/login`，覆盖账号池、用户 API Key、代理、日志、图片任务、图片文件、备份、图片存储和系统配置管理。 |
 | 前端试验页 | ✅ | 已支持文生文聊天、文本模型批量可用性测试、文生图、图生图、图片队列和图片历史。 |
@@ -33,7 +34,7 @@
 | FlareSolverr clearance 刷新 | ⚠️ | 配置 `flaresolverr_url` 后，直接 app-chat 请求遇到 403 时会尝试刷新 Cloudflare Cookie 并重试；这是 best-effort clearance 支持，不保证绕过所有 Cloudflare、WAF 或账号限制。 |
 | Browser Bridge | ✅ | Docker 镜像内置 Chromium 与 Browser Bridge，`scripts/entrypoint.sh` 会启动 `services/browser_bridge/server.js`；提供 `/health` 和 `/api/chat`，缺少 `x-userid` Cookie 时快速返回 `sso_unavailable`，页面池可通过 `BRIDGE_MAX_PAGES` 和 `BRIDGE_PAGE_IDLE_MS` 配置。 |
 | Grok app-chat 图片生成 | ✅ | `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro` 已通过 Grok app-chat 链路接入，账号池会按模型 tier、capability 和图片额度选择账号。 |
-| Grok app-chat 图片编辑与视频 | ❌ | `grok-imagine-image-edit` 和 `grok-imagine-video` 已作为模型能力暴露用于状态标识，但当前 app-chat 运行链路只支持图片生成，尚未支持图片编辑或视频生成。 |
+| Grok app-chat 图片编辑与视频 | ⚠️ | `grok-imagine-image-edit` 已支持 app-chat 图片编辑，限制为 `1024x1024`、最多 7 张参考图、`n<=2`；`grok-imagine-video` 已作为模型能力暴露用于状态标识，但当前视频生成链路尚未支持。 |
 | GPT Turnstile 求解 | ⚠️ | 默认启用 `enable_turnstile_solver` 并在上游要求时尝试生成 Sentinel Turnstile Token；真实 GPT 挑战仍可能失败。 |
 | Docker 自托管部署 | ✅ | 当前发布目标使用 Docker CLI 或 Docker Compose，默认服务端口为 `83`；提供默认 bridge、本地构建和 Linux host 网络 Compose 文件，`data/` 需要持久化。 |
 | 配置文件卫生 | ✅ | `config.json` 已在 `.gitignore` 中忽略，仓库提供 `config.example.json` 作可提交示例文件；`.env.example` 覆盖存储后端、数据库和 Git 存储变量。 |

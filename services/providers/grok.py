@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 import threading
 import time
 import uuid
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
@@ -25,8 +27,19 @@ CONSOLE_RESPONSES_URL = f"{CONSOLE_BASE_URL}/v1/responses"
 APP_CHAT_BASE_URL = "https://grok.com"
 APP_CHAT_NEW_CONVERSATION_URL = f"{APP_CHAT_BASE_URL}/rest/app-chat/conversations/new"
 APP_CHAT_RATE_LIMITS_URL = f"{APP_CHAT_BASE_URL}/rest/rate-limits"
+APP_CHAT_UPLOAD_FILE_URL = f"{APP_CHAT_BASE_URL}/rest/app-chat/upload-file"
+APP_CHAT_MEDIA_POST_CREATE_URL = f"{APP_CHAT_BASE_URL}/rest/media/post/create"
 GROK_ASSET_BASE_URL = "https://assets.grok.com/"
 GROK_APP_CHAT_STATSIG_ID = "0196a8f6-0501-79f8-8d74-a2f2c0f5f5f5"
+GROK_IMAGE_EDIT_MODEL_NAME = "imagine-image-edit"
+GROK_IMAGE_EDIT_MODEL_KIND = "imagine"
+GROK_IMAGE_EDIT_MEDIA_TYPE = "MEDIA_POST_TYPE_IMAGE"
+GROK_IMAGE_EDIT_SIZE = "1024x1024"
+GROK_IMAGE_EDIT_MAX_REFERENCES = 7
+GROK_IMAGE_EDIT_MAX_N = 2
+SEARCH_SOURCES_MARKER = "[webchat2api-sources]: #"
+_GROK_IMAGE_PLACEHOLDER_RE = re.compile(r"@IMAGE(\d+)\b", re.IGNORECASE)
+_SEARCH_SOURCES_BLOCK_RE = re.compile(r"\n{0,2}\[webchat2api-sources\]: #\n+## Sources\n(?:\d+\. \[[^\n\]]*\]\([^\n)]*\)\n?)+\s*", re.MULTILINE)
 _APP_CHAT_CLEARANCE_LOCK = threading.Lock()
 
 _BRIDGE_DEFAULT_URL = "http://127.0.0.1:3080"
@@ -70,6 +83,12 @@ class GrokConsoleCompletion:
 class GrokConsoleStreamDelta:
     content: str = ""
     reasoning_content: str = ""
+
+
+@dataclass(frozen=True)
+class GrokImageEditReference:
+    file_id: str
+    content_url: str
 
 
 _THINKING_SUMMARY_RE = re.compile(
@@ -888,10 +907,154 @@ def extract_app_chat_image_url(event: dict[str, Any]) -> str:
     return GROK_ASSET_BASE_URL + image_url.lstrip("/")
 
 
-def collect_app_chat_response(events: Iterable[dict[str, Any]]) -> dict[str, str]:
+def _search_source_text(value: object) -> str:
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if text:
+                    parts.append(str(text))
+        return " ".join(" ".join(parts).split())
+    return ""
+
+
+def _search_source_title(value: object, fallback: str) -> str:
+    title = _search_source_text(value)
+    if not title:
+        return fallback
+    return title[:80].rstrip()
+
+
+def _event_response(event: dict[str, Any]) -> dict[str, Any]:
+    result = event.get("result") if isinstance(event.get("result"), dict) else {}
+    response = result.get("response")
+    return response if isinstance(response, dict) else {}
+
+
+def _app_chat_search_container(event: dict[str, Any], key: str) -> dict[str, Any]:
+    response = _event_response(event)
+    for source in (response, event.get("result") if isinstance(event.get("result"), dict) else {}, event):
+        if isinstance(source, dict) and isinstance(source.get(key), dict):
+            return source[key]
+    return {}
+
+
+def extract_app_chat_search_sources(event: dict[str, Any]) -> list[dict[str, str]]:
+    sources: list[dict[str, str]] = []
+    web_results = _app_chat_search_container(event, "webSearchResults").get("results")
+    if isinstance(web_results, list):
+        for item in web_results:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            sources.append({
+                "url": url,
+                "title": _search_source_title(item.get("title") or item.get("name"), url),
+                "type": "web",
+            })
+    x_results = _app_chat_search_container(event, "xSearchResults").get("results")
+    if isinstance(x_results, list):
+        for item in x_results:
+            if not isinstance(item, dict):
+                continue
+            username = str(item.get("username") or item.get("screenName") or "").strip().lstrip("@")
+            post_id = str(item.get("postId") or item.get("id") or "").strip()
+            if not username or not post_id:
+                continue
+            sources.append({
+                "url": f"https://x.com/{username}/status/{post_id}",
+                "title": _search_source_title(item.get("text") or item.get("fullText") or item.get("content"), f"@{username}"),
+                "type": "x_post",
+            })
+    return sources
+
+
+def dedupe_search_sources(sources: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for source in sources:
+        url = str(source.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        deduped.append({
+            "url": url,
+            "title": str(source.get("title") or url).strip() or url,
+            "type": str(source.get("type") or "web").strip() or "web",
+        })
+    return deduped
+
+
+def _markdown_link_text(value: object) -> str:
+    return str(value or "Source").replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]").strip() or "Source"
+
+
+def _markdown_link_url(value: object) -> str:
+    url = str(value or "").strip()
+    if not url or any(ord(char) < 32 or char.isspace() or char == ")" for char in url):
+        return ""
+    return url
+
+
+def format_search_sources_suffix(sources: Iterable[dict[str, str]]) -> str:
+    deduped = dedupe_search_sources(sources)
+    if not deduped:
+        return ""
+    lines = ["", "", SEARCH_SOURCES_MARKER, "## Sources"]
+    for source in deduped:
+        title = _markdown_link_text(source.get("title") or source.get("url") or "Source")
+        url = _markdown_link_url(source.get("url"))
+        if url:
+            lines.append(f"{len(lines) - 3}. [{title}]({url})")
+    return "\n".join(lines) if len(lines) > 4 else ""
+
+
+def append_search_sources_suffix(content: str, sources: Iterable[dict[str, str]]) -> str:
+    suffix = format_search_sources_suffix(sources)
+    return f"{content}{suffix}" if suffix else content
+
+
+def strip_search_sources_suffix(content: str) -> str:
+    return _SEARCH_SOURCES_BLOCK_RE.sub("", content).rstrip()
+
+
+def strip_search_sources_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stripped: list[dict[str, Any]] = []
+    for message in messages:
+        if message.get("role") != "assistant":
+            stripped.append(message)
+            continue
+        next_message = dict(message)
+        content = next_message.get("content")
+        if isinstance(content, str):
+            next_message["content"] = strip_search_sources_suffix(content)
+        elif isinstance(content, list):
+            blocks: list[Any] = []
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    next_block = dict(block)
+                    next_block["text"] = strip_search_sources_suffix(next_block["text"])
+                    blocks.append(next_block)
+                else:
+                    blocks.append(block)
+            next_message["content"] = blocks
+        stripped.append(next_message)
+    return stripped
+
+
+def collect_app_chat_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
+    search_sources: list[dict[str, str]] = []
     for event in events:
+        search_sources.extend(extract_app_chat_search_sources(event))
         token, thinking = extract_app_chat_token(event)
         if token:
             if thinking:
@@ -900,7 +1063,11 @@ def collect_app_chat_response(events: Iterable[dict[str, Any]]) -> dict[str, str
                 content_parts.append(token)
         if is_app_chat_final_event(event):
             break
-    return {"content": "".join(content_parts), "reasoning_content": "".join(reasoning_parts)}
+    return {
+        "content": "".join(content_parts),
+        "reasoning_content": "".join(reasoning_parts),
+        "search_sources": dedupe_search_sources(search_sources),
+    }
 
 
 def classify_app_chat_upstream_error(upstream_status: int, access_token: str | None = None) -> GrokConsoleError:
@@ -923,6 +1090,170 @@ def classify_app_chat_upstream_error(upstream_status: int, access_token: str | N
     if status in {408, 504}:
         return GrokConsoleError(f"Grok app-chat upstream timeout (HTTP {status})", _openai_status(status), status)
     return GrokConsoleError(f"Grok app-chat upstream error (HTTP {status})", _openai_status(status), status)
+
+
+def _resolve_grok_asset_url(value: str) -> str:
+    url = str(value or "").strip()
+    if not url:
+        return ""
+    if url.startswith(("http://", "https://")):
+        parsed = urlparse(url)
+        if parsed.scheme == "https" and parsed.netloc == "assets.grok.com":
+            return url
+        return ""
+    return GROK_ASSET_BASE_URL + url.lstrip("/")
+
+
+def _extract_x_user_id(access_token: str) -> str:
+    for name, value in _cookie_items(_app_chat_cookie(access_token)):
+        if name == "x-userid":
+            return value
+    return ""
+
+
+def resolve_grok_asset_reference(file_id: str, file_uri: str = "", user_id: str = "") -> str:
+    if file_uri:
+        return _resolve_grok_asset_url(file_uri)
+    if file_id and user_id:
+        return f"{GROK_ASSET_BASE_URL}users/{user_id}/{file_id}/content"
+    return ""
+
+
+def _invalid_image_edit_request(message: str, param: str | None = None) -> ImageGenerationError:
+    return ImageGenerationError(
+        message,
+        status_code=400,
+        error_type="invalid_request_error",
+        code="invalid_request_error",
+        param=param,
+    )
+
+
+def validate_grok_image_edit_request(
+    images: list[tuple[bytes, str, str]],
+    n: int,
+    size: str | None,
+) -> None:
+    normalized_size = str(size or GROK_IMAGE_EDIT_SIZE).strip().lower()
+    if normalized_size != GROK_IMAGE_EDIT_SIZE:
+        raise _invalid_image_edit_request(
+            f"Grok image edit only supports size {GROK_IMAGE_EDIT_SIZE}",
+            "size",
+        )
+    if n < 1 or n > GROK_IMAGE_EDIT_MAX_N:
+        raise _invalid_image_edit_request("Grok image edit supports n between 1 and 2", "n")
+    if not images:
+        raise _invalid_image_edit_request("image is required", "image")
+    if len(images) > GROK_IMAGE_EDIT_MAX_REFERENCES:
+        raise _invalid_image_edit_request("Grok image edit supports at most 7 reference images", "image")
+
+
+def build_grok_image_edit_payload(prompt: str, image_references: list[str], parent_post_id: str) -> dict[str, Any]:
+    return {
+        "temporary": True,
+        "modelName": GROK_IMAGE_EDIT_MODEL_NAME,
+        "message": prompt,
+        "enableImageGeneration": True,
+        "returnImageBytes": False,
+        "returnRawGrokInXaiRequest": False,
+        "enableImageStreaming": True,
+        "imageGenerationCount": GROK_IMAGE_EDIT_MAX_N,
+        "forceConcise": False,
+        "enableSideBySide": True,
+        "sendFinalMetadata": True,
+        "isReasoning": False,
+        "disableTextFollowUps": True,
+        "responseMetadata": {
+            "modelConfigOverride": {
+                "modelMap": {
+                    "imageEditModel": GROK_IMAGE_EDIT_MODEL_KIND,
+                    "imageEditModelConfig": {
+                        "imageReferences": image_references,
+                        "parentPostId": parent_post_id,
+                    },
+                }
+            }
+        },
+        "disableMemory": True,
+        "forceSideBySide": False,
+    }
+
+
+def build_grok_media_post_payload(media_type: str, media_url: str = "", prompt: str = "") -> dict[str, Any]:
+    payload: dict[str, Any] = {"mediaType": media_type}
+    if media_url:
+        payload["mediaUrl"] = media_url
+    if prompt:
+        payload["prompt"] = prompt
+    return payload
+
+
+def replace_grok_image_placeholders(prompt: str, references: list[GrokImageEditReference]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        image_number = int(match.group(1))
+        if image_number < 1 or image_number > len(references):
+            return match.group(0)
+        return f"@{references[image_number - 1].file_id}"
+
+    return _GROK_IMAGE_PLACEHOLDER_RE.sub(replace, prompt)
+
+
+def _extract_grok_streaming_image_response(event: dict[str, Any]) -> dict[str, Any]:
+    result_obj = event.get("result")
+    result = result_obj if isinstance(result_obj, dict) else {}
+    response_obj = result.get("response")
+    response = response_obj if isinstance(response_obj, dict) else {}
+    stream = response.get("streamingImageGenerationResponse")
+    return stream if isinstance(stream, dict) else {}
+
+
+def _extract_grok_model_response(event: dict[str, Any]) -> dict[str, Any]:
+    result_obj = event.get("result")
+    result = result_obj if isinstance(result_obj, dict) else {}
+    response_obj = result.get("response")
+    response = response_obj if isinstance(response_obj, dict) else {}
+    model_response = response.get("modelResponse")
+    return model_response if isinstance(model_response, dict) else {}
+
+
+def extract_grok_image_edit_final_urls(event: dict[str, Any], user_id: str = "") -> dict[int, str]:
+    urls: dict[int, str] = {}
+    stream = _extract_grok_streaming_image_response(event)
+    if stream:
+        try:
+            progress = int(stream.get("progress") or 0)
+        except (TypeError, ValueError):
+            progress = 0
+        moderated = stream.get("moderated") is True or stream.get("isModerated") is True
+        if progress >= 100 and not moderated:
+            raw_url = stream.get("imageUrl")
+            asset_id = stream.get("assetId")
+            resolved = resolve_grok_asset_reference(
+                str(asset_id or "").strip(),
+                "",
+                user_id,
+            ) or _resolve_grok_asset_url(str(raw_url or ""))
+            if resolved:
+                try:
+                    index = int(stream.get("imageIndex") or 0)
+                except (TypeError, ValueError):
+                    index = 0
+                if index >= 0:
+                    urls[index] = resolved
+    model_response = _extract_grok_model_response(event)
+    attachments = model_response.get("fileAttachments")
+    if isinstance(attachments, list):
+        for index, asset_id in enumerate(attachments):
+            resolved = resolve_grok_asset_reference(str(asset_id or "").strip(), "", user_id)
+            if resolved:
+                urls.setdefault(index, resolved)
+    generated_urls = model_response.get("generatedImageUrls")
+    if isinstance(generated_urls, list):
+        for index, url in enumerate(generated_urls):
+            resolved = _resolve_grok_asset_url(str(url or ""))
+            if resolved:
+                urls.setdefault(index, resolved)
+    return urls
 
 
 class GrokAppChatClient:
@@ -1113,6 +1444,87 @@ class GrokAppChatClient:
             logger.info({"event": "grok_app_chat_direct_fallback_to_bridge", "status": status})
             yield from app_chat_line_events(bridge_lines)
 
+    def _post_direct_json(self, url: str, payload: dict[str, Any], *, context: str, referer: str | None = None) -> dict[str, Any]:
+        headers = app_chat_headers(self.access_token, self.account)
+        if referer:
+            headers["Referer"] = referer
+        try:
+            response = self._call_with_retry(
+                lambda: self.session.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.network_profile.timeout,
+                ),
+                context=context,
+            )
+        except requests.exceptions.RequestException as exc:
+            raise GrokConsoleError(f"Grok app-chat {context} request failed: {exc}", 502) from exc
+        if response.status_code == 403 and self._refresh_clearance():
+            headers = app_chat_headers(self.access_token, self.account)
+            if referer:
+                headers["Referer"] = referer
+            try:
+                response = self._call_with_retry(
+                    lambda: self.session.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=self.network_profile.timeout,
+                    ),
+                    context=f"{context}_flaresolverr",
+                )
+            except requests.exceptions.RequestException as exc:
+                raise GrokConsoleError(f"Grok app-chat {context} request failed: {exc}", 502) from exc
+        if response.status_code >= 400:
+            raise classify_app_chat_upstream_error(int(response.status_code), self.access_token)
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise GrokConsoleError(f"Grok app-chat {context} returned an invalid response", 502) from exc
+        if not isinstance(data, dict):
+            raise GrokConsoleError(f"Grok app-chat {context} returned an invalid response", 502)
+        return data
+
+    def upload_image_edit_reference(self, data: bytes, filename: str, mime_type: str) -> GrokImageEditReference:
+        payload = {
+            "fileName": filename or "image.png",
+            "fileMimeType": mime_type or "application/octet-stream",
+            "content": base64.b64encode(data).decode("ascii"),
+        }
+        result = self._post_direct_json(APP_CHAT_UPLOAD_FILE_URL, payload, context="upload_file")
+        file_id = str(result.get("fileMetadataId") or result.get("fileId") or "").strip()
+        file_uri = str(result.get("fileUri") or "").strip()
+        content_url = resolve_grok_asset_reference(file_id, file_uri, _extract_x_user_id(self.access_token))
+        if not file_id or not content_url:
+            raise GrokConsoleError("Grok image edit upload returned an invalid response", 502)
+        return GrokImageEditReference(file_id=file_id, content_url=content_url)
+
+    def create_image_edit_parent_post(self, prompt: str) -> tuple[str, str]:
+        result = self._post_direct_json(
+            APP_CHAT_MEDIA_POST_CREATE_URL,
+            build_grok_media_post_payload(GROK_IMAGE_EDIT_MEDIA_TYPE, prompt=prompt),
+            context="media_post_create",
+            referer=f"{APP_CHAT_BASE_URL}/imagine",
+        )
+        post = result.get("post")
+        if not isinstance(post, dict):
+            raise GrokConsoleError("Grok image edit create-post returned no post payload", 502)
+        post_id = str(post.get("id") or "").strip()
+        if not post_id:
+            raise GrokConsoleError("Grok image edit create-post returned no post id", 502)
+        post_prompt = str(post.get("originalPrompt") or post.get("prompt") or "").strip()
+        return post_id, post_prompt or prompt
+
+    def stream_image_edit_events(
+        self,
+        prompt: str,
+        image_references: list[str],
+        parent_post_id: str,
+    ) -> Iterator[dict[str, Any]]:
+        payload = build_grok_image_edit_payload(prompt, image_references, parent_post_id)
+        yield from self.stream_events(payload)
+
 
 def validate_grok_access_token(access_token: str, account: dict[str, Any] | None = None) -> dict[str, Any]:
     with GrokAppChatClient(access_token, account) as client:
@@ -1135,7 +1547,7 @@ def app_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messages: 
     account_service.mark_text_used(access_token)
 
 
-def app_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> dict[str, str]:
+def app_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> dict[str, Any]:
     return collect_app_chat_response(app_chat_completion_events(body, spec, messages))
 
 
@@ -1184,6 +1596,67 @@ def app_chat_image_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n
         yield ImageOutput(kind="result", model=spec.id, index=1, total=n, data=format_image_result(image_items, prompt, "url")["data"])
         return
     raise ImageGenerationError("Grok image generation did not return an image", status_code=502, code="image_generation_failed")
+
+
+def app_chat_image_edit_outputs(
+    body: dict[str, Any],
+    spec: ModelSpec,
+    prompt: str,
+    images: list[tuple[bytes, str, str]],
+    n: int = 1,
+    size: str | None = None,
+) -> Iterator[ImageOutput]:
+    validate_grok_image_edit_request(images, n, size)
+
+    from services.account_service import account_service
+
+    access_token = account_service.get_grok_app_chat_access_token(spec)
+    if not access_token:
+        raise ImageGenerationError("no available Grok account", status_code=503, code="no_available_account")
+    account = account_service.get_account(access_token)
+    try:
+        with GrokAppChatClient(access_token, account) as client:
+            references = [
+                client.upload_image_edit_reference(data, filename, mime_type)
+                for data, filename, mime_type in images
+            ]
+            edit_prompt = replace_grok_image_placeholders(prompt, references)
+            parent_post_id, edit_prompt = client.create_image_edit_parent_post(edit_prompt)
+            final_urls: dict[int, str] = {}
+            user_id = _extract_x_user_id(access_token)
+            for event in client.stream_image_edit_events(
+                edit_prompt,
+                [reference.content_url for reference in references],
+                parent_post_id,
+            ):
+                stream = _extract_grok_streaming_image_response(event)
+                if stream:
+                    try:
+                        progress = int(stream.get("progress") or 0)
+                    except (TypeError, ValueError):
+                        progress = 0
+                    yield ImageOutput(
+                        kind="progress",
+                        model=spec.id,
+                        index=1,
+                        total=n,
+                        text=str(progress) if progress else "",
+                        upstream_event_type="app_chat.image_edit_progress",
+                    )
+                final_urls.update(extract_grok_image_edit_final_urls(event, user_id))
+                if is_app_chat_final_event(event):
+                    break
+    except GrokConsoleError as exc:
+        raise ImageGenerationError(str(exc), status_code=exc.status_code) from exc
+    account_service.mark_text_used(access_token)
+    image_items = [
+        {"url": url, "revised_prompt": prompt}
+        for _, url in sorted(final_urls.items())[:n]
+    ]
+    if image_items:
+        yield ImageOutput(kind="result", model=spec.id, index=1, total=n, data=image_items)
+        return
+    raise ImageGenerationError("Grok image edit did not return an image", status_code=502, code="image_edit_failed")
 
 
 def console_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> GrokConsoleCompletion:
