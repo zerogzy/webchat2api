@@ -1,8 +1,8 @@
 # webchat2api 技术指南
 
-版本：0.0.8
+版本：0.0.9
 
-本文是 webchat2api 0.0.8 的 canonical 技术手册，面向部署、集成、运维和排障。文档只描述当前实现，不代表 OpenAI 或 xAI 官方 API 支持。
+本文是 webchat2api 0.0.9 的 canonical 技术手册，面向部署、集成、运维和排障。文档只描述当前实现，不代表 OpenAI 或 xAI 官方 API 支持。
 
 ## 1. 项目定位与边界
 
