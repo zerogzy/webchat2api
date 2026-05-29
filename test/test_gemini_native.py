@@ -102,6 +102,18 @@ class GeminiNativeProtocolTests(unittest.TestCase):
         self.assertEqual(chunks[1]["candidates"][0]["content"]["parts"], [{"text": "lo"}])
         self.assertEqual(chunks[-1]["candidates"][0]["finishReason"], "STOP")
 
+    def test_stream_generate_content_skips_empty_text_chunk(self) -> None:
+        with mock.patch.object(gemini_provider, "synthetic_stream_content", return_value=iter([""])):
+            chunks = list(gemini_native.stream_generate_content(
+                "gemini-2.5-pro",
+                _native_body("Hi"),
+                completion_func=lambda body, spec, messages: gemini_provider.GeminiCompletion(""),
+            ))
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["candidates"][0]["content"]["parts"], [])
+        self.assertEqual(chunks[0]["candidates"][0]["finishReason"], "STOP")
+
     def test_inline_media_without_text_rejects(self) -> None:
         with self.assertRaises(HTTPException) as raised:
             gemini_native.generate_content(
