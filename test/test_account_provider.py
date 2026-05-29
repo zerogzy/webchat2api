@@ -120,6 +120,7 @@ def patched_grok_validation(return_value: object = None, side_effect: Exception 
 
 from services.account_service import AccountService
 import services.account_service as account_service_module
+from services.providers import registry as provider_registry
 from services.models import GEMINI_PROVIDER, GROK_PROVIDER, GPT_PROVIDER, resolve_model
 
 account_service_module.log_service.add = lambda *args, **kwargs: None
@@ -449,15 +450,118 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(account["status"], "正常")
         self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
 
+    def test_same_access_token_is_scoped_by_provider(self) -> None:
+        storage = MemoryStorage()
+        service = AccountService(storage)
+        service.add_account_items([
+            {"access_token": "shared-token", "provider": GPT_PROVIDER, "status": "正常"},
+            {"access_token": "shared-token", "provider": GROK_PROVIDER, "status": "正常"},
+            {"access_token": "__Secure-1PSID=shared-token; __Secure-1PSIDTS=ts", "provider": GEMINI_PROVIDER, "status": "正常"},
+        ])
+
+        self.assertEqual(len(service.list_accounts()), 3)
+        self.assertEqual(len(storage.accounts), 3)
+        self.assertEqual(service.list_tokens(provider=GPT_PROVIDER), ["shared-token"])
+        self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), ["shared-token"])
+        self.assertEqual(service.list_tokens(provider=GEMINI_PROVIDER), ["__Secure-1PSID=shared-token; __Secure-1PSIDTS=ts"])
+
+    def test_add_accounts_can_target_non_default_provider(self) -> None:
+        service = AccountService(MemoryStorage())
+
+        result = service.add_accounts(["shared-token"], provider=GROK_PROVIDER)
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(service.list_tokens(provider=GPT_PROVIDER), [])
+        self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), ["shared-token"])
+        self.assertEqual(service.get_account("shared-token", provider=GROK_PROVIDER)["provider"], GROK_PROVIDER)
+
+    def test_provider_scoped_delete_update_refresh_and_export_do_not_cross_providers(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "shared-token", "provider": GPT_PROVIDER, "status": "正常", "quota": 1},
+            {"access_token": "shared-token", "provider": GROK_PROVIDER, "status": "正常"},
+        ])
+
+        update_result = service.update_account("shared-token", {"status": "禁用"}, provider=GROK_PROVIDER)
+        self.assertIsNotNone(update_result)
+        self.assertEqual(service.get_account("shared-token", provider=GPT_PROVIDER)["status"], "正常")
+        self.assertEqual(service.get_account("shared-token", provider=GROK_PROVIDER)["status"], "禁用")
+
+        with patched_grok_validation(return_value={"rateLimits": []}) as validate:
+            refresh_result = service.refresh_accounts(["shared-token"], provider=GROK_PROVIDER)
+        validate.assert_called_once()
+        self.assertEqual(refresh_result["refreshed"], 1)
+        self.assertEqual(refresh_result["items"][0]["provider"], GROK_PROVIDER)
+        self.assertEqual(service.get_account("shared-token", provider=GPT_PROVIDER)["status"], "正常")
+
+        self.assertEqual(
+            [item["access_token"] for item in service.build_export_items(["shared-token"], provider=GROK_PROVIDER)],
+            ["shared-token"],
+        )
+        delete_result = service.delete_accounts(["shared-token"], provider=GROK_PROVIDER)
+        self.assertEqual(delete_result["removed"], 1)
+        self.assertIsNotNone(service.get_account("shared-token", provider=GPT_PROVIDER))
+        self.assertIsNone(service.get_account("shared-token", provider=GROK_PROVIDER))
+
+    def test_delete_limited_accounts_can_filter_by_provider(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "gpt-token", "provider": GPT_PROVIDER, "status": "限流"},
+            {"access_token": "grok-token", "provider": GROK_PROVIDER, "status": "限流"},
+        ])
+
+        result = service.delete_limited_accounts(provider=GROK_PROVIDER)
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual([item["access_token"] for item in service.list_accounts()], ["gpt-token"])
+
     def test_image_and_refresh_candidates_do_not_use_grok_for_image(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
-            {"access_token": "grok-token", "provider": "grok", "quota": 5, "status": "限流"},
+            {"access_token": "grok-token", "provider": "grok", "quota": 5, "status": "正常", "tier": "supergrok"},
+            {"access_token": "gemini-token", "provider": "gemini", "quota": 5, "status": "正常"},
             {"access_token": "gpt-token", "provider": "gpt", "quota": 5, "status": "正常"},
         ])
 
         self.assertEqual(service._list_ready_candidate_tokens(), ["gpt-token"])
         self.assertEqual(service.list_limited_tokens(), [])
+
+    def test_registry_exposes_independent_account_strategies(self) -> None:
+        gpt_strategy = provider_registry.account_strategy(GPT_PROVIDER)
+        grok_strategy = provider_registry.account_strategy(GROK_PROVIDER)
+        gemini_strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
+
+        self.assertEqual(gpt_strategy.normalize_access_token({"accessToken": "gpt-token"}), "gpt-token")
+        self.assertEqual(grok_strategy.normalize_access_token({"access_token": "sso=grok-token"}), "grok-token")
+        self.assertEqual(
+            gemini_strategy.normalize_access_token({"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts"}),
+            "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts",
+        )
+        self.assertIsNot(gpt_strategy, grok_strategy)
+        self.assertIsNot(grok_strategy, gemini_strategy)
+
+    def test_registry_provider_definitions_expose_capabilities_and_models(self) -> None:
+        definitions = provider_registry.provider_definitions()
+
+        self.assertEqual(set(definitions), {GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER})
+        self.assertIn("image", definitions[GPT_PROVIDER].capabilities)
+        self.assertIn("image_edit", definitions[GROK_PROVIDER].capabilities)
+        self.assertEqual(definitions[GEMINI_PROVIDER].capabilities, frozenset({"chat"}))
+        self.assertTrue(any(spec.provider == GPT_PROVIDER for spec in definitions[GPT_PROVIDER].model_specs))
+        self.assertTrue(any(spec.provider == GROK_PROVIDER for spec in definitions[GROK_PROVIDER].model_specs))
+        self.assertTrue(any(spec.provider == GEMINI_PROVIDER for spec in definitions[GEMINI_PROVIDER].model_specs))
+
+    def test_account_service_uses_registry_account_strategy(self) -> None:
+        service = AccountService(MemoryStorage())
+        strategy = Mock(wraps=provider_registry.account_strategy(GPT_PROVIDER))
+
+        with patch.object(account_service_module, "account_strategy", return_value=strategy) as patched:
+            result = service.add_account_items([{"accessToken": "gpt-token", "provider": "gpt"}])
+
+        self.assertEqual(result["added"], 1)
+        patched.assert_called()
+        self.assertEqual(strategy.normalize_access_token.call_count, 2)
+
 
 
 if __name__ == "__main__":
