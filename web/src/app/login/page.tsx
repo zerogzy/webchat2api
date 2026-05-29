@@ -52,24 +52,24 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="grid min-h-[calc(100vh-1rem)] w-full place-items-center px-4 py-6">
-      <div className="absolute inset-x-4 top-10 hidden h-32 rounded-full bg-[radial-gradient(circle,rgba(214,205,178,0.5),transparent_70%)] blur-3xl sm:block" />
-      <Card className="relative w-full max-w-[505px] overflow-hidden rounded-[34px] border-white/80 bg-white/82 shadow-[var(--shadow-lift)]">
-        <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-stone-200 via-amber-200 to-lime-200" />
+    <div className="grid min-h-[calc(100vh-1rem)] w-full place-items-center px-2 py-6 sm:px-4">
+      <div className="absolute inset-x-4 top-10 hidden h-32 rounded-full bg-[radial-gradient(circle,var(--surface-amber),transparent_70%)] opacity-50 blur-3xl sm:block" />
+      <Card className="relative w-full max-w-[505px] overflow-hidden rounded-[34px] border-white/80 bg-card/88 shadow-[var(--shadow-lift)]">
+        <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-secondary via-[var(--surface-amber)] to-accent" />
         <CardContent className="space-y-8 p-6 sm:p-8">
           <div className="space-y-4 text-center">
-            <div className="mx-auto inline-flex size-14 items-center justify-center rounded-[22px] border border-white/75 bg-[linear-gradient(145deg,var(--primary),oklch(0.42_0.035_78))] text-white shadow-[0_18px_42px_-26px_rgba(68,64,60,0.95)]">
+            <div className="mx-auto inline-flex size-14 items-center justify-center rounded-[22px] border border-white/75 bg-[linear-gradient(145deg,var(--primary),var(--chart-5))] text-primary-foreground shadow-[0_18px_42px_-26px_oklch(0.22_0.024_65_/_0.95)]">
               <LockKeyhole className="size-5" />
             </div>
             <div className="space-y-2">
-              <p className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Management Console</p>
-              <h1 className="text-3xl font-semibold tracking-tight text-stone-950">欢迎回来</h1>
-              <p className="mx-auto max-w-sm text-sm leading-6 text-stone-500">输入密钥后继续使用账号管理和图片生成功能。</p>
+              <p className="text-xs font-semibold tracking-[0.18em] text-muted-foreground uppercase">Management Console</p>
+              <h1 className="text-3xl font-semibold tracking-tight text-foreground">欢迎回来</h1>
+              <p className="mx-auto max-w-sm text-sm leading-6 text-muted-foreground">输入密钥后继续进入温暖的玻璃控制台，管理账号、图片生成与系统配置。</p>
             </div>
           </div>
 
           <div className="space-y-3">
-            <label htmlFor="auth-key" className="block text-sm font-medium text-stone-700">
+            <label htmlFor="auth-key" className="block text-sm font-medium text-foreground">
               密钥
             </label>
             <Input
@@ -83,12 +83,12 @@ export default function LoginPage() {
                 }
               }}
               placeholder="请输入密钥"
-              className="h-13 rounded-2xl border-stone-200 bg-white/82 px-4"
+              className="h-13 rounded-2xl border-white/80 bg-card/82 px-4 shadow-inner shadow-stone-200/30 focus-visible:ring-ring/45"
             />
           </div>
 
           <Button
-            className="h-13 w-full rounded-2xl"
+            className="h-13 w-full rounded-2xl shadow-[0_18px_42px_-28px_oklch(0.22_0.024_65_/_0.9)]"
             onClick={() => void handleLogin()}
             disabled={isSubmitting}
           >

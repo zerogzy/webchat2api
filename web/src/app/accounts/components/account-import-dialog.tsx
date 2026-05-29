@@ -35,9 +35,14 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { createAccounts, type Account, type AccountImportPayload } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import {
+  accountImportProviderOptions,
+  getAccountProviderDefinition,
+} from "@/providers/registry";
+import type { ProviderId } from "@/providers/types";
 
 type ImportMethod = "menu" | "token" | "session" | "cpa";
-type ImportProvider = "gpt" | "grok";
+type ImportProvider = ProviderId;
 
 type AccountImportDialogProps = {
   disabled?: boolean;
@@ -50,12 +55,6 @@ type PendingCpaImport = {
   parsedFileCount: number;
   errorCount: number;
 };
-
-const sessionUrl = "https://chatgpt.com/api/auth/session";
-const providerOptions: { label: string; value: ImportProvider }[] = [
-  { label: "GPT", value: "gpt" },
-  { label: "Grok", value: "grok" },
-];
 
 function normalizeProvider(value: unknown): ImportProvider | string {
   const provider = typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -107,37 +106,6 @@ function readFileAsText(file: File) {
   });
 }
 
-function getTokenImportCopy(provider: ImportProvider) {
-  if (provider === "grok") {
-    return {
-      label: "Grok Token / Cookie 列表",
-      placeholder: "每行一个 Grok token 或 cookie，sso= 前缀可选；不要粘贴 ChatGPT Session JSON...",
-      fileHelp: "支持 `.txt`，每行一个 Grok token 或 cookie；ChatGPT Session JSON 不是 Grok 的导入来源。",
-    };
-  }
-
-  return {
-    label: "Access Token 列表",
-    placeholder: "每行一个 Access Token...",
-    fileHelp: "支持 `.txt`，文件内容也是一行一个 Token。",
-  };
-}
-
-function getSessionImportCopy(provider: ImportProvider) {
-  if (provider === "grok") {
-    return {
-      help: "Grok 请优先使用 Token 导入：当前后端支持每行一个 token 或 cookie，`sso=` 前缀可选。GPT 的 Session JSON 不是 Grok 的正确来源。",
-      label: "Grok token / cookie",
-      placeholder: "每行一个 Grok token 或 cookie，sso= 前缀可选...",
-    };
-  }
-
-  return {
-    help: "",
-    label: "Session JSON",
-    placeholder: '粘贴完整 JSON，例如包含 "accessToken" 的对象...',
-  };
-}
 
 function MethodCard({
   title,
@@ -212,8 +180,10 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     setIsSubmitting(true);
     try {
       const data = await createAccounts(normalizedTokens, accountPayloads);
-      const hasGrokImport = accountPayloads.some((item) => item.provider === "grok");
-      const refreshText = hasGrokImport ? "Grok 按提交内容加入号池；仅 GPT 账号会自动刷新信息" : "已自动刷新 GPT 账号信息";
+      const hasNonRefreshableImport = accountPayloads.some(
+        (item) => item.provider && !getAccountProviderDefinition(item.provider).refresh.enabled,
+      );
+      const refreshText = hasNonRefreshableImport ? "按提交内容加入号池；仅 GPT 账号会自动刷新信息" : "已自动刷新 GPT 账号信息";
       onImported(data.items);
       setOpen(false);
       resetState();
@@ -241,7 +211,8 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
 
   const handleImportTokenText = async () => {
     const tokens = splitTokens(tokenInput);
-    await submitTokens(tokens, "Access Token 导入完成", buildTokenPayloads(tokens, importProvider));
+    const providerDefinition = getAccountProviderDefinition(importProvider);
+    await submitTokens(tokens, providerDefinition.importTokenCopy.successLabel, buildTokenPayloads(tokens, importProvider));
   };
 
   const handleTxtSelected = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -273,14 +244,17 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   };
 
   const handleImportSessionJson = async () => {
-    if (importProvider === "grok") {
+    const providerDefinition = getAccountProviderDefinition(importProvider);
+    const sessionCopy = providerDefinition.importSessionCopy;
+
+    if (!sessionCopy.parseJsonAccessToken) {
       const tokens = splitTokens(sessionInput);
-      await submitTokens(tokens, "Grok Token / Cookie 导入完成", buildTokenPayloads(tokens, "grok"));
+      await submitTokens(tokens, sessionCopy.successLabel, buildTokenPayloads(tokens, importProvider));
       return;
     }
 
     if (!sessionInput.trim()) {
-      toast.error("请先粘贴完整 GPT Session JSON");
+      toast.error(sessionCopy.emptyMessage ?? "请先粘贴完整 Session JSON");
       return;
     }
 
@@ -293,9 +267,9 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
         return;
       }
 
-      await submitTokens([token], "GPT Session JSON 导入完成", buildTokenPayloads([token], importProvider));
+      await submitTokens([token], sessionCopy.successLabel, buildTokenPayloads([token], importProvider));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "GPT Session JSON 解析失败";
+      const message = error instanceof Error ? error.message : (sessionCopy.parseErrorMessage ?? "Session JSON 解析失败");
       toast.error(message);
     }
   };
@@ -346,7 +320,8 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   const renderMethodBody = () => {
     if (method === "token") {
       const tokenCount = splitTokens(tokenInput).length;
-      const tokenCopy = getTokenImportCopy(importProvider);
+      const providerDefinition = getAccountProviderDefinition(importProvider);
+      const tokenCopy = providerDefinition.importTokenCopy;
 
       return (
         <div className="space-y-4">
@@ -368,7 +343,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {providerOptions.map((option) => (
+                {accountImportProviderOptions.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>
@@ -415,7 +390,8 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     }
 
     if (method === "session") {
-      const sessionCopy = getSessionImportCopy(importProvider);
+      const providerDefinition = getAccountProviderDefinition(importProvider);
+      const sessionCopy = providerDefinition.importSessionCopy;
 
       return (
         <div className="space-y-4">
@@ -434,7 +410,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {providerOptions.map((option) => (
+                {accountImportProviderOptions.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>
@@ -443,16 +419,16 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             </Select>
           </div>
           <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-600">
-            {importProvider === "gpt" ? (
+            {sessionCopy.parseJsonAccessToken && sessionCopy.sessionUrl ? (
               <>
                 打开{" "}
                 <a
-                  href={sessionUrl}
+                  href={sessionCopy.sessionUrl}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-1 font-medium text-stone-900 underline underline-offset-4"
                 >
-                  {sessionUrl}
+                  {sessionCopy.sessionUrl}
                   <ExternalLink className="size-3.5" />
                 </a>
                 ，复制页面返回的完整 JSON，系统会自动提取其中的 `accessToken` 导入。
@@ -495,7 +471,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             <div className="space-y-2">
               <div className="text-sm font-medium text-stone-800">多选本地 CPA JSON 文件</div>
               <div className="text-sm leading-6 text-stone-500">
-                每个文件应为一个 JSON 对象。系统会从对象中自动提取 `access_token` 或 `accessToken`，并保留 `provider`；缺省按 GPT 导入。Grok 请确认 token/cookie 字段已按后端支持格式提供。
+                每个文件应为一个 JSON 对象。系统会从对象中自动提取 `access_token` 或 `accessToken`，并保留 `provider`；缺省按 GPT 导入。Grok/Gemini 请确认 token/cookie 字段已按后端支持格式提供。
               </div>
             </div>
             <Button
@@ -529,14 +505,14 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     return (
       <div className="space-y-3">
         <MethodCard
-          title="导入 Access Token / Grok Cookie"
-          description="GPT 使用 access token；Grok 可粘贴当前后端支持的 token 或 cookie，一行一个。"
+          title="导入 Access Token / Cookie"
+          description="GPT 使用 access token；Grok/Gemini 可粘贴当前后端支持的 token 或 cookie，一行一个。"
           icon={KeyRound}
           onClick={() => setMethod("token")}
         />
         <MethodCard
-          title="导入 GPT Session JSON"
-          description="仅适用于 chatgpt.com 的 session JSON；Grok 请不要使用 GPT Session JSON。"
+          title="导入 Session JSON / Cookie"
+          description="GPT 可粘贴 chatgpt.com session JSON；Grok/Gemini 请按提示粘贴 cookie/session。"
           icon={FileJson}
           onClick={() => setMethod("session")}
         />
@@ -571,6 +547,9 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   };
 
   const footerDisabled = disabled || isSubmitting;
+  const selectedProviderDefinition = getAccountProviderDefinition(importProvider);
+  const selectedTokenCopy = selectedProviderDefinition.importTokenCopy;
+  const selectedSessionCopy = selectedProviderDefinition.importSessionCopy;
 
   return (
     <>
@@ -589,18 +568,18 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
               {method === "menu"
                 ? "导入账户"
                 : method === "token"
-                  ? "导入 Access Token / Grok Cookie"
+                  ? "导入 Access Token / Cookie"
                   : method === "session"
                     ? "导入 Session JSON"
                     : "导入 CPA JSON"}
             </DialogTitle>
             <DialogDescription className="text-sm leading-6">
               {method === "menu"
-                ? "选择一种导入方式。GPT 导入会自动拉取邮箱、套餐类型和图像额度；Grok 会作为 Grok 文本模型账号加入号池。"
+                ? "选择一种导入方式。GPT 导入会自动拉取邮箱、套餐类型和图像额度；Grok/Gemini 会按提交内容加入号池。"
                 : method === "token"
-                  ? "支持手动粘贴或从 TXT 文件导入，一行一个；Grok 支持 token 或 cookie，sso= 前缀可选。"
+                  ? "支持手动粘贴或从 TXT 文件导入，一行一个；Grok 支持 token 或 cookie，sso= 前缀可选；Gemini 需包含 __Secure-1PSID。"
                   : method === "session"
-                    ? "GPT Session JSON 会自动提取 accessToken；Grok 请改用 Token / Cookie 导入，GPT Session JSON 不是 Grok 来源。"
+                    ? "GPT Session JSON 会自动提取 accessToken；Grok/Gemini 请按提示粘贴 cookie/session。"
                     : "支持一次读取多个本地 JSON 文件，并在提交前做数量确认。"}
             </DialogDescription>
           </DialogHeader>
@@ -623,7 +602,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                 disabled={footerDisabled}
               >
                 {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
-                导入 Token
+                {selectedTokenCopy.submitLabel}
               </Button>
             ) : null}
             {method === "session" ? (
@@ -633,7 +612,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                 disabled={footerDisabled}
               >
                 {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
-                {importProvider === "grok" ? "导入 Grok Token / Cookie" : "导入 JSON"}
+                {selectedSessionCopy.submitLabel}
               </Button>
             ) : null}
             {method === "cpa" ? (

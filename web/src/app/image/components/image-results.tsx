@@ -82,7 +82,7 @@ export function ImageResults({
   if (!selectedConversation) {
     return (
       <div className="flex h-full min-h-[260px] items-center justify-center text-center sm:min-h-[420px]">
-        <div className="w-full max-w-4xl">
+        <div className="w-full max-w-4xl rounded-[32px] border border-dashed border-stone-200/80 bg-white/45 px-6 py-10 shadow-[var(--shadow-soft)] backdrop-blur-sm sm:px-10 sm:py-14">
           <h1
             className="text-2xl font-semibold tracking-tight text-stone-950 sm:text-3xl md:text-5xl"
             style={{
@@ -92,13 +92,18 @@ export function ImageResults({
             Turn ideas into images
           </h1>
           <p
-            className="mx-auto mt-3 max-w-[280px] text-sm italic tracking-[0.01em] text-stone-500 sm:mt-4 sm:max-w-none sm:text-[15px]"
+            className="mx-auto mt-3 max-w-[280px] text-sm italic tracking-[0.01em] text-stone-500 sm:mt-4 sm:max-w-xl sm:text-[15px]"
             style={{
               fontFamily: '"Palatino Linotype","Book Antiqua","URW Palladio L","Times New Roman",serif',
             }}
           >
             在同一窗口里保留本地历史与任务状态，并从已有结果图继续发起新的无状态编辑。
           </p>
+          <div className="mx-auto mt-6 grid max-w-xl gap-2 text-left text-xs text-stone-500 sm:grid-cols-3">
+            <span className="rounded-2xl border border-stone-200/80 bg-white/70 px-3 py-2">1. 写提示词</span>
+            <span className="rounded-2xl border border-stone-200/80 bg-white/70 px-3 py-2">2. 可粘贴参考图</span>
+            <span className="rounded-2xl border border-stone-200/80 bg-white/70 px-3 py-2">3. 结果可继续编辑</span>
+          </div>
         </div>
       </div>
     );
@@ -107,6 +112,8 @@ export function ImageResults({
   return (
     <div className="mx-auto flex w-full max-w-[980px] flex-col gap-5 sm:gap-8">
       {selectedConversation.turns.map((turn, turnIndex) => {
+        const turnLabel = `第 ${turnIndex + 1} 轮`;
+        const modeLabel = turn.mode === "edit" ? "编辑图" : "文生图";
         const referenceLightboxImages = turn.referenceImages.map((image, index) => ({
           id: `${turn.id}-reference-${index}`,
           src: image.dataUrl,
@@ -131,10 +138,8 @@ export function ImageResults({
               <div className="flex justify-end">
                 <div className="max-w-[90%] px-1 py-1 text-[14px] leading-6 text-stone-900 sm:max-w-[82%] sm:text-[15px] sm:leading-7">
                   <div className="mb-1.5 flex flex-wrap justify-end gap-2 text-[11px] text-stone-400 sm:mb-2">
-                    <span>第 {turnIndex + 1} 轮</span>
-                    <span>
-                      {turn.mode === "edit" ? "编辑图" : "文生图"}
-                    </span>
+                    <span>{turnLabel}</span>
+                    <span>{modeLabel}</span>
                     <span>{getTurnStatusLabel(turn.status)}</span>
                     <span>{formatConversationTime(turn.createdAt)}</span>
                   </div>
@@ -162,9 +167,9 @@ export function ImageResults({
 
             {!turn.resultsDeleted ? (
               <div className="flex justify-start">
-                <div className="w-full p-1">
+                <div className="w-full rounded-[24px] border border-white/70 bg-white/62 p-3 shadow-[var(--shadow-soft)] backdrop-blur-sm sm:p-4">
                   {turn.referenceImages.length > 0 ? (
-                    <div className="mb-4 flex flex-col items-end">
+                    <div className="mb-4 flex flex-col items-end rounded-[20px] border border-stone-200/80 bg-white/55 p-3">
                       <div className="mb-3 text-xs font-medium text-stone-500">本轮参考图</div>
                       <div className="flex flex-wrap justify-end gap-3">
                         {turn.referenceImages.map((image, index) => (
@@ -197,14 +202,16 @@ export function ImageResults({
                   ) : null}
 
                   <div className="mb-3 flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500 sm:mb-4 sm:gap-2 sm:text-xs">
-                    <span className="rounded-full bg-stone-100 px-3 py-1">{turn.count} 张</span>
-                    <span className="rounded-full bg-stone-100 px-3 py-1">{getTurnStatusLabel(turn.status)}</span>
+                    <span className="rounded-full border border-stone-200 bg-white/80 px-3 py-1">{turn.count} 张</span>
+                    <span className="rounded-full border border-stone-200 bg-white/80 px-3 py-1">{turn.size}</span>
+                    <span className="max-w-full truncate rounded-full border border-stone-200 bg-white/80 px-3 py-1">{turn.model}</span>
+                    <span className="rounded-full border border-stone-200 bg-stone-100/80 px-3 py-1">{getTurnStatusLabel(turn.status)}</span>
                     {turn.status === "queued" ? (
-                      <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">等待当前对话中的前序任务完成</span>
+                      <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-amber-700">等待当前对话中的前序任务完成</span>
                     ) : null}
                   </div>
 
-                  <div className="grid grid-cols-3 gap-2 sm:block sm:columns-2 sm:gap-4 sm:space-y-4 xl:columns-3">
+                  <div className="grid grid-cols-2 gap-2 sm:block sm:columns-2 sm:gap-4 sm:space-y-4 xl:columns-3">
                     {turn.images.map((image, index) => {
                       const imageSrc = image.status === "success" ? getStoredImageSrc(image) : "";
                       if (image.status === "success" && imageSrc) {
@@ -221,7 +228,7 @@ export function ImageResults({
                             <button
                               type="button"
                               onClick={() => onOpenLightbox(successfulTurnImages, currentIndex)}
-                              className="group block aspect-square w-full cursor-zoom-in overflow-hidden rounded-xl sm:aspect-auto"
+                              className="group block aspect-square w-full cursor-zoom-in overflow-hidden rounded-2xl border border-stone-200/80 bg-stone-100/70 shadow-sm transition hover:border-stone-300 sm:aspect-auto"
                             >
                               <img
                                 src={imageSrc}
@@ -236,7 +243,7 @@ export function ImageResults({
                                 }}
                               />
                             </button>
-                            <div className="flex flex-col gap-1 px-0.5 py-1 text-[10px] sm:flex-row sm:items-center sm:justify-between sm:gap-2 sm:px-3 sm:py-3 sm:text-xs">
+                            <div className="flex flex-col gap-1 px-1 py-2 text-[10px] sm:flex-row sm:items-center sm:justify-between sm:gap-2 sm:px-3 sm:py-3 sm:text-xs">
                               <div className="min-w-0 text-stone-500">
                                 <span>结果 {index + 1}</span>
                                 {imageMeta ? <span className="block text-stone-400 sm:ml-2 sm:inline">{imageMeta}</span> : null}
@@ -273,7 +280,7 @@ export function ImageResults({
                           <div
                             key={image.id}
                             className={cn(
-                              "break-inside-avoid overflow-hidden rounded-xl border border-rose-200 bg-rose-50 sm:rounded-none",
+                              "break-inside-avoid overflow-hidden rounded-2xl border border-rose-200 bg-rose-50 shadow-sm",
                               "aspect-square",
                               turn.size === "1:1" && "sm:aspect-square",
                               turn.size === "16:9" && "sm:aspect-video",
@@ -301,7 +308,7 @@ export function ImageResults({
                         <div
                           key={image.id}
                           className={cn(
-                            "break-inside-avoid overflow-hidden rounded-xl border border-stone-200/80 bg-stone-100/80 sm:rounded-none",
+                            "break-inside-avoid overflow-hidden rounded-2xl border border-stone-200/80 bg-stone-100/80 shadow-inner",
                             turn.size === "1:1" && "aspect-square",
                             turn.size === "16:9" && "aspect-video",
                             turn.size === "9:16" && "aspect-[9/16]",
@@ -326,12 +333,12 @@ export function ImageResults({
                   </div>
 
                   {turn.status === "error" && turn.error ? (
-                    <div className="mt-4 border-l-2 border-amber-300 bg-amber-50/70 px-4 py-3 text-sm leading-6 text-amber-700">
+                    <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-700">
                       {turn.error}
                     </div>
                   ) : null}
 
-                  <div className="mt-3 flex items-center gap-1.5 text-[11px] sm:mt-4">
+                  <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] sm:mt-4">
                     <button
                       type="button"
                       onClick={() => void onRegenerateTurn(selectedConversation.id, turn.id)}

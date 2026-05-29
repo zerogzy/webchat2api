@@ -64,7 +64,7 @@ function SettingsPageContent() {
     <>
       <SettingsDataController />
       <SettingsHeader />
-      <section className="space-y-6">
+      <section className="space-y-5 sm:space-y-6 lg:space-y-7">
         <ConfigCard />
         <BackupSettingsCard />
         <UserKeysCard />

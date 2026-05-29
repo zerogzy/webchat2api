@@ -9,7 +9,6 @@ import {
   ChevronRight,
   CircleAlert,
   CircleOff,
-  Copy,
   Download,
   LoaderCircle,
   Pencil,
@@ -53,23 +52,28 @@ import {
   type AccountStatus,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
+import {
+  accountProviderDefinitions,
+  accountProviderFilterOptions as baseAccountProviderFilterOptions,
+  accountProviderSupportsTokenExport,
+  getAccountProviderDefinition,
+  getAccountProviderLabel,
+  isProviderAccount,
+  normalizeAccountProvider,
+} from "@/providers/registry";
+
 import { cn } from "@/lib/utils";
 
 import { AccountImportDialog } from "./components/account-import-dialog";
 
-const accountProviderOptions: { label: string; value: AccountProvider | "all" }[] = [
-  { label: "全部服务", value: "all" },
-  { label: "GPT", value: "gpt" },
-  { label: "Grok", value: "grok" },
-];
-
-const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = [
-  { label: "全部状态", value: "all" },
-  { label: "正常", value: "正常" },
-  { label: "限流", value: "限流" },
-  { label: "异常", value: "异常" },
-  { label: "禁用", value: "禁用" },
-];
+const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] =
+  [
+    { label: "全部状态", value: "all" },
+    { label: "正常", value: "正常" },
+    { label: "限流", value: "限流" },
+    { label: "异常", value: "异常" },
+    { label: "禁用", value: "禁用" },
+  ];
 
 const statusMeta: Record<
   AccountStatus,
@@ -86,28 +90,44 @@ const statusMeta: Record<
 
 const metricCards = [
   { key: "total", label: "账户总数", color: "text-stone-900", icon: UserRound },
-  { key: "active", label: "正常账户", color: "text-emerald-600", icon: CheckCircle2 },
-  { key: "limited", label: "限流账户", color: "text-orange-500", icon: CircleAlert },
-  { key: "abnormal", label: "异常账户", color: "text-rose-500", icon: CircleOff },
+  {
+    key: "active",
+    label: "正常账户",
+    color: "text-emerald-600",
+    icon: CheckCircle2,
+  },
+  {
+    key: "limited",
+    label: "限流账户",
+    color: "text-orange-500",
+    icon: CircleAlert,
+  },
+  {
+    key: "abnormal",
+    label: "异常账户",
+    color: "text-rose-500",
+    icon: CircleOff,
+  },
   { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
-  { key: "quota", label: "GPT 图像额度", color: "text-amber-600", icon: RefreshCw },
+  {
+    key: "quota",
+    label:
+      getAccountProviderDefinition("gpt").quota.metricLabel ?? "GPT 图像额度",
+    color: "text-amber-600",
+    icon: RefreshCw,
+  },
 ] as const;
 
-function normalizeAccountProvider(provider: AccountProvider | null | undefined) {
-  const normalized = String(provider || "gpt").trim().toLowerCase();
-  return normalized || "gpt";
-}
-
-function isGptAccount(account: Account) {
-  return normalizeAccountProvider(account.provider) === "gpt";
-}
-
-function isGrokAccount(account: Account) {
-  return normalizeAccountProvider(account.provider) === "grok";
+function isGeminiAccount(account: Account) {
+  return isProviderAccount(account, "gemini");
 }
 
 function isUnlimitedImageQuotaAccount(account: Account) {
-  return isGptAccount(account) && (account.type === "pro" || account.type === "prolite");
+  const providerDefinition = getAccountProviderDefinition(account.provider);
+  return (
+    providerDefinition.quota.applicable &&
+    providerDefinition.quota.unlimitedTypes.includes(account.type)
+  );
 }
 
 function imageQuotaUnknown(account: Account) {
@@ -122,8 +142,9 @@ function formatCompact(value: number) {
 }
 
 function formatQuota(account: Account) {
-  if (!isGptAccount(account)) {
-    return "不适用";
+  const providerDefinition = getAccountProviderDefinition(account.provider);
+  if (!providerDefinition.quota.applicable) {
+    return providerDefinition.quota.unavailableLabel;
   }
   if (isUnlimitedImageQuotaAccount(account)) {
     return "∞";
@@ -159,23 +180,27 @@ function formatRestoreAt(value?: string | null) {
 }
 
 function formatQuotaSummary(accounts: Account[]) {
-  const availableGptAccounts = accounts.filter((account) => isGptAccount(account) && account.status === "正常");
-  if (availableGptAccounts.length === 0) {
+  const quotaProvider = getAccountProviderDefinition("gpt");
+  const availableQuotaAccounts = accounts.filter(
+    (account) =>
+      normalizeAccountProvider(account.provider) === quotaProvider.id &&
+      account.status === "正常",
+  );
+  if (availableQuotaAccounts.length === 0) {
     return "—";
   }
-  if (availableGptAccounts.some(isUnlimitedImageQuotaAccount)) {
+  if (availableQuotaAccounts.some(isUnlimitedImageQuotaAccount)) {
     return "∞";
   }
-  if (availableGptAccounts.some(imageQuotaUnknown)) {
+  if (availableQuotaAccounts.some(imageQuotaUnknown)) {
     return "未知";
   }
-  return formatCompact(availableGptAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
-}
-
-function maskToken(token?: string) {
-  if (!token) return "—";
-  if (token.length <= 18) return token;
-  return `${token.slice(0, 16)}...${token.slice(-8)}`;
+  return formatCompact(
+    availableQuotaAccounts.reduce(
+      (sum, account) => sum + Math.max(0, account.quota),
+      0,
+    ),
+  );
 }
 
 function renderPrivacyEmail(email?: string | null) {
@@ -185,14 +210,20 @@ function renderPrivacyEmail(email?: string | null) {
   }
   const atIndex = value.indexOf("@");
   if (atIndex < 0) {
-    return <span className="transition duration-150 blur-sm hover:blur-none">{value}</span>;
+    return (
+      <span className="transition duration-150 blur-sm hover:blur-none">
+        {value}
+      </span>
+    );
   }
   const localPart = value.slice(0, atIndex + 1);
   const domain = value.slice(atIndex + 1);
   return (
     <span className="group inline-flex max-w-full items-center">
       <span className="truncate">{localPart}</span>
-      <span className="truncate transition duration-150 blur-sm group-hover:blur-none">{domain}</span>
+      <span className="truncate transition duration-150 blur-sm group-hover:blur-none">
+        {domain}
+      </span>
     </span>
   );
 }
@@ -211,10 +242,48 @@ function displayAccountType(account: Account) {
 }
 
 function displayAccountProvider(account: Account) {
-  const provider = normalizeAccountProvider(account.provider);
-  if (provider === "gpt") return "GPT";
-  if (provider === "grok") return "Grok";
-  return provider;
+  return getAccountProviderLabel(account.provider);
+}
+
+function accountToken(account: Account) {
+  return typeof account.access_token === "string"
+    ? account.access_token.trim()
+    : "";
+}
+
+function accountRowKey(account: Account, index: number) {
+  const token = accountToken(account);
+  if (token) return token;
+  return `sanitized-${normalizeAccountProvider(account.provider)}-${account.email ?? ""}-${account.type ?? ""}-${index}`;
+}
+
+function maskAccountToken(token: string) {
+  const normalized = token.trim();
+  if (!normalized) return "";
+  if (normalized.length <= 12) return "token hidden";
+  return `${normalized.slice(0, 6)}...${normalized.slice(-4)}`;
+}
+
+function accountTokenDisplay(account: Account) {
+  const token = accountToken(account);
+  if (token) return maskAccountToken(token);
+  const providerDefinition = getAccountProviderDefinition(account.provider);
+  return !token && isGeminiAccount(account) && account.has_gemini_session
+    ? providerDefinition.tokenHiddenLabel
+    : "凭据已隐藏";
+}
+
+function accountTokens(accounts: Account[]) {
+  return accounts.map(accountToken).filter(Boolean);
+}
+
+function keepExistingSelection(ids: string[], items: Account[]) {
+  const keys = new Set(items.map((item, index) => accountRowKey(item, index)));
+  return ids.filter((id) => keys.has(id));
+}
+
+function accountExportProviderLabel(provider: AccountExportProvider) {
+  return getAccountProviderDefinition(provider).label;
 }
 
 function AccountsPageContent() {
@@ -223,8 +292,12 @@ function AccountsPageContent() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
-  const [providerFilter, setProviderFilter] = useState<AccountProvider | "all">("all");
-  const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">("all");
+  const [providerFilter, setProviderFilter] = useState<AccountProvider | "all">(
+    "all",
+  );
+  const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">(
+    "all",
+  );
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState("10");
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
@@ -243,7 +316,7 @@ function AccountsPageContent() {
     try {
       const data = await fetchAccounts();
       setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      setSelectedIds((prev) => keepExistingSelection(prev, data.items));
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载账户失败";
       toast.error(message);
@@ -266,20 +339,34 @@ function AccountsPageContent() {
     const normalizedQuery = query.trim().toLowerCase();
     return accounts.filter((account) => {
       const searchMatched =
-        normalizedQuery.length === 0 || (account.email ?? "").toLowerCase().includes(normalizedQuery);
-      const typeMatched = typeFilter === "all" || displayAccountType(account) === typeFilter;
-      const providerMatched = providerFilter === "all" || normalizeAccountProvider(account.provider) === providerFilter;
-      const statusMatched = statusFilter === "all" || account.status === statusFilter;
+        normalizedQuery.length === 0 ||
+        (account.email ?? "").toLowerCase().includes(normalizedQuery);
+      const typeMatched =
+        typeFilter === "all" || displayAccountType(account) === typeFilter;
+      const providerMatched =
+        providerFilter === "all" ||
+        normalizeAccountProvider(account.provider) === providerFilter;
+      const statusMatched =
+        statusFilter === "all" || account.status === statusFilter;
       return searchMatched && typeMatched && providerMatched && statusMatched;
     });
   }, [accounts, providerFilter, query, statusFilter, typeFilter]);
 
-  const pageCount = Math.max(1, Math.ceil(filteredAccounts.length / Number(pageSize)));
+  const pageCount = Math.max(
+    1,
+    Math.ceil(filteredAccounts.length / Number(pageSize)),
+  );
   const safePage = Math.min(page, pageCount);
   const startIndex = (safePage - 1) * Number(pageSize);
-  const currentRows = filteredAccounts.slice(startIndex, startIndex + Number(pageSize));
+  const currentRows = filteredAccounts.slice(
+    startIndex,
+    startIndex + Number(pageSize),
+  );
   const allCurrentSelected =
-    currentRows.length > 0 && currentRows.every((row) => selectedIds.includes(row.access_token));
+    currentRows.length > 0 &&
+    currentRows.every((row, index) =>
+      selectedIds.includes(accountRowKey(row, startIndex + index)),
+    );
 
   const summary = useMemo(() => {
     const total = accounts.length;
@@ -295,48 +382,87 @@ function AccountsPageContent() {
   const accountTypeOptions = useMemo(
     () => [
       { label: "全部计划/池", value: "all" },
-      ...Array.from(new Set(accounts.map(displayAccountType))).map((type) => ({ label: type, value: type })),
+      ...Array.from(new Set(accounts.map(displayAccountType))).map((type) => ({
+        label: type,
+        value: type,
+      })),
     ],
     [accounts],
   );
 
   const accountProviderFilterOptions = useMemo(() => {
-    const knownValues = new Set(accountProviderOptions.map((option) => option.value));
-    const extraProviders = Array.from(new Set(accounts.map((account) => normalizeAccountProvider(account.provider))))
+    const knownValues = new Set(
+      baseAccountProviderFilterOptions.map((option) => option.value),
+    );
+    const extraProviders = Array.from(
+      new Set(
+        accounts.map((account) => normalizeAccountProvider(account.provider)),
+      ),
+    )
       .filter((provider) => !knownValues.has(provider))
       .map((provider) => ({ label: provider, value: provider }));
-    return [...accountProviderOptions, ...extraProviders];
+    return [...baseAccountProviderFilterOptions, ...extraProviders];
   }, [accounts]);
 
-  const selectedGptTokens = useMemo(() => {
+  const providerTokenGroups = useMemo(
+    () =>
+      accountProviderDefinitions.map((provider) => ({
+        provider,
+        tokens: accountTokens(
+          accounts.filter((account) => isProviderAccount(account, provider.id)),
+        ),
+      })),
+    [accounts],
+  );
+
+  const selectedProviderTokenGroups = useMemo(() => {
     const selectedSet = new Set(selectedIds);
-    return accounts
-      .filter((item) => selectedSet.has(item.access_token) && isGptAccount(item))
-      .map((item) => item.access_token);
+    return accountProviderDefinitions.map((provider) => ({
+      provider,
+      tokens: accounts
+        .filter(
+          (item) =>
+            selectedSet.has(accountRowKey(item, accounts.indexOf(item))) &&
+            isProviderAccount(item, provider.id),
+        )
+        .map(accountToken)
+        .filter(Boolean),
+    }));
   }, [accounts, selectedIds]);
 
-  const selectedGrokTokens = useMemo(() => {
-    const selectedSet = new Set(selectedIds);
-    return accounts
-      .filter((item) => selectedSet.has(item.access_token) && isGrokAccount(item))
-      .map((item) => item.access_token);
-  }, [accounts, selectedIds]);
+  const refreshableProvider =
+    accountProviderDefinitions.find((provider) => provider.refresh.enabled) ??
+    getAccountProviderDefinition("gpt");
+  const refreshableTokens =
+    providerTokenGroups.find(
+      (item) => item.provider.id === refreshableProvider.id,
+    )?.tokens ?? [];
+  const selectedRefreshableTokens =
+    selectedProviderTokenGroups.find(
+      (item) => item.provider.id === refreshableProvider.id,
+    )?.tokens ?? [];
 
   const selectedTokens = useMemo(() => {
     const selectedSet = new Set(selectedIds);
-    return accounts.filter((item) => selectedSet.has(item.access_token)).map((item) => item.access_token);
+    return accounts
+      .filter((item) =>
+        selectedSet.has(accountRowKey(item, accounts.indexOf(item))),
+      )
+      .map(accountToken)
+      .filter(Boolean);
   }, [accounts, selectedIds]);
 
-  const gptTokens = useMemo(() => accounts.filter(isGptAccount).map((item) => item.access_token), [accounts]);
-
-  const grokTokens = useMemo(() => accounts.filter(isGrokAccount).map((item) => item.access_token), [accounts]);
+  const hasGeminiAccounts = useMemo(
+    () => accounts.some(isGeminiAccount),
+    [accounts],
+  );
 
   const abnormalTokens = useMemo(() => {
-    return accounts.filter((item) => item.status === "异常").map((item) => item.access_token);
+    return accountTokens(accounts.filter((item) => item.status === "异常"));
   }, [accounts]);
 
   const limitedTokens = useMemo(() => {
-    return accounts.filter((item) => item.status === "限流").map((item) => item.access_token);
+    return accountTokens(accounts.filter((item) => item.status === "限流"));
   }, [accounts]);
 
   const paginationItems = useMemo(() => {
@@ -363,7 +489,7 @@ function AccountsPageContent() {
     try {
       const data = await deleteAccounts(tokens);
       setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      setSelectedIds((prev) => keepExistingSelection(prev, data.items));
       toast.success(`删除 ${data.removed ?? 0} 个账户`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除账户失败";
@@ -383,10 +509,11 @@ function AccountsPageContent() {
     try {
       const data = await deleteLimitedAccounts();
       setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      setSelectedIds((prev) => keepExistingSelection(prev, data.items));
       toast.success(`移除 ${data.removed ?? 0} 个限流账户`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "移除限流账户失败";
+      const message =
+        error instanceof Error ? error.message : "移除限流账户失败";
       toast.error(message);
     } finally {
       setIsDeleting(false);
@@ -403,7 +530,7 @@ function AccountsPageContent() {
     try {
       const data = await refreshAccounts(accessTokens);
       setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      setSelectedIds((prev) => keepExistingSelection(prev, data.items));
       if (data.errors.length > 0) {
         const firstError = data.errors[0]?.error;
         toast.error(
@@ -413,7 +540,8 @@ function AccountsPageContent() {
         toast.success(`刷新成功 ${data.refreshed} 个 GPT 账户`);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "刷新 GPT 账户失败";
+      const message =
+        error instanceof Error ? error.message : "刷新 GPT 账户失败";
       toast.error(message);
     } finally {
       setIsRefreshing(false);
@@ -431,14 +559,22 @@ function AccountsPageContent() {
       return;
     }
 
+    const token = accountToken(editingAccount);
+    if (!token) {
+      toast.error(
+        "脱敏账号不能在列表中直接编辑，请重新导入或通过后端管理接口处理",
+      );
+      return;
+    }
+
     setIsUpdating(true);
     try {
-      const data = await updateAccount(editingAccount.access_token, {
+      const data = await updateAccount(token, {
         provider: editProvider,
         status: editStatus,
       });
       setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      setSelectedIds((prev) => keepExistingSelection(prev, data.items));
       setEditingAccount(null);
       toast.success("账号信息已更新");
     } catch (error) {
@@ -449,9 +585,13 @@ function AccountsPageContent() {
     }
   };
 
-  const handleExportAccounts = async (provider: AccountExportProvider, tokens: string[]) => {
-    if (tokens.length === 0) {
-      toast.error(`没有可导出的 ${provider === "gpt" ? "GPT" : "Grok"} 账户`);
+  const handleExportAccounts = async (
+    provider: AccountExportProvider,
+    tokens: string[],
+  ) => {
+    if (!accountProviderSupportsTokenExport(provider, tokens.length)) {
+      const label = accountExportProviderLabel(provider);
+      toast.error(`没有可导出的 ${label} 账户`);
       return;
     }
 
@@ -459,7 +599,8 @@ function AccountsPageContent() {
     try {
       const data = await exportAccounts(provider, tokens);
       downloadBlob(data.blob, data.filename);
-      toast.success(`${provider === "gpt" ? "GPT" : "Grok"} TXT 文件已导出`);
+      const label = accountExportProviderLabel(provider);
+      toast.success(`${label} TXT 文件已导出`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "导出账户失败";
       toast.error(message);
@@ -470,89 +611,142 @@ function AccountsPageContent() {
 
   const toggleSelectAll = (checked: boolean) => {
     if (checked) {
-      setSelectedIds((prev) => Array.from(new Set([...prev, ...currentRows.map((item) => item.access_token)])));
+      setSelectedIds((prev) =>
+        Array.from(
+          new Set([
+            ...prev,
+            ...currentRows.map((item, index) =>
+              accountRowKey(item, startIndex + index),
+            ),
+          ]),
+        ),
+      );
       return;
     }
-    setSelectedIds((prev) => prev.filter((id) => !currentRows.some((row) => row.access_token === id)));
+    setSelectedIds((prev) =>
+      prev.filter(
+        (id) =>
+          !currentRows.some(
+            (row, index) => accountRowKey(row, startIndex + index) === id,
+          ),
+      ),
+    );
   };
 
   return (
     <>
-      <section className="rounded-[28px] border border-white/70 bg-white/50 p-5 shadow-[var(--shadow-soft)] backdrop-blur-sm lg:p-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="space-y-1">
+      <section className="relative overflow-hidden rounded-[28px] border border-white/70 bg-white/55 p-5 shadow-[var(--shadow-soft)] backdrop-blur-sm before:pointer-events-none before:absolute before:inset-x-6 before:top-0 before:h-px before:bg-white/90 lg:p-6">
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+          <div className="space-y-2">
             <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
               Account Pool
             </div>
-            <h1 className="text-2xl font-semibold tracking-tight">号池管理</h1>
+            <h1 className="text-2xl font-semibold tracking-tight text-stone-950">
+              号池管理
+            </h1>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/70 bg-white/45 p-2 shadow-sm">
             <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void loadAccounts()}
-            disabled={isLoading || isRefreshing || isDeleting}
-          >
-            <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
-            刷新
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleRefreshAccounts(gptTokens)}
-            disabled={isLoading || isRefreshing || isDeleting || gptTokens.length === 0}
-          >
-            <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
-            刷新 GPT 账号信息和额度
-          </Button>
-          <AccountImportDialog
-            disabled={isLoading || isRefreshing || isDeleting}
-            onImported={(items) => {
-              setAccounts(items);
-              setSelectedIds([]);
-              setPage(1);
-            }}
-          />
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleExportAccounts("gpt", gptTokens)}
-            disabled={gptTokens.length === 0 || isExporting || isDeleting}
-          >
-            {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-            导出 GPT TXT
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleExportAccounts("grok", grokTokens)}
-            disabled={grokTokens.length === 0 || isExporting || isDeleting}
-          >
-            {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-            导出 Grok TXT
-          </Button>
-        </div>
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/85 px-4 text-stone-700 shadow-sm hover:bg-white"
+              onClick={() => void loadAccounts()}
+              disabled={isLoading || isRefreshing || isDeleting}
+            >
+              <RefreshCw
+                className={cn("size-4", isLoading ? "animate-spin" : "")}
+              />
+              刷新
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/85 px-4 text-stone-700 shadow-sm hover:bg-white"
+              onClick={() => void handleRefreshAccounts(refreshableTokens)}
+              disabled={
+                isLoading ||
+                isRefreshing ||
+                isDeleting ||
+                refreshableTokens.length === 0
+              }
+            >
+              <RefreshCw
+                className={cn("size-4", isRefreshing ? "animate-spin" : "")}
+              />
+              {refreshableProvider.refresh.buttonLabel}
+            </Button>
+            <AccountImportDialog
+              disabled={isLoading || isRefreshing || isDeleting}
+              onImported={(items) => {
+                setAccounts(items);
+                setSelectedIds([]);
+                setPage(1);
+              }}
+            />
+            {providerTokenGroups.map(({ provider, tokens }) => {
+              const exportTokens = provider.canExportWithoutTokens
+                ? []
+                : tokens;
+              const canExport = accountProviderSupportsTokenExport(
+                provider.id,
+                tokens.length,
+              );
+              const showGeminiPresence =
+                provider.id === "gemini" ? hasGeminiAccounts : true;
+              return (
+                <Button
+                  key={provider.id}
+                  variant="outline"
+                  className="h-10 rounded-xl border-stone-200 bg-white/85 px-4 text-stone-700 shadow-sm hover:bg-white"
+                  onClick={() =>
+                    void handleExportAccounts(provider.id, exportTokens)
+                  }
+                  disabled={
+                    !showGeminiPresence ||
+                    !canExport ||
+                    isExporting ||
+                    isDeleting
+                  }
+                >
+                  {isExporting ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Download className="size-4" />
+                  )}
+                  {provider.exportButtonLabel}
+                </Button>
+              );
+            })}
+          </div>
         </div>
       </section>
 
-      <Dialog open={Boolean(editingAccount)} onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}>
+      <Dialog
+        open={Boolean(editingAccount)}
+        onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}
+      >
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
           <DialogHeader className="gap-2">
             <DialogTitle>编辑账户</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              手动修改账号服务商和状态。GPT 套餐与图像额度由刷新结果维护；Grok 可手动归类为对应计划、池或订阅。
+              手动修改账号服务商和状态。GPT
+              套餐与图像额度由刷新结果维护；Grok/Gemini
+              可手动归类为对应计划、池或订阅。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">服务商</label>
-              <Select value={editProvider} onValueChange={(value) => setEditProvider(value)}>
+              <label className="text-sm font-medium text-stone-700">
+                服务商
+              </label>
+              <Select
+                value={editProvider}
+                onValueChange={(value) => setEditProvider(value)}
+              >
                 <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {accountProviderOptions
+                  {baseAccountProviderFilterOptions
                     .filter((option) => option.value !== "all")
                     .map((option) => (
                       <SelectItem key={option.value} value={option.value}>
@@ -564,7 +758,10 @@ function AccountsPageContent() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">状态</label>
-              <Select value={editStatus} onValueChange={(value) => setEditStatus(value as AccountStatus)}>
+              <Select
+                value={editStatus}
+                onValueChange={(value) => setEditStatus(value as AccountStatus)}
+              >
                 <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
                   <SelectValue />
                 </SelectTrigger>
@@ -594,27 +791,45 @@ function AccountsPageContent() {
               onClick={() => void handleUpdateAccount()}
               disabled={isUpdating}
             >
-              {isUpdating ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              {isUpdating ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : null}
               保存修改
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <section className="space-y-3">
+      <section className="space-y-4">
         <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
           {metricCards.map((item) => {
             const Icon = item.icon;
             const value = summary[item.key];
             return (
-              <Card key={item.key} className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+              <Card
+                key={item.key}
+                className="group overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm transition hover:-translate-y-0.5 hover:shadow-[var(--shadow-soft)]"
+              >
                 <CardContent className="p-4">
                   <div className="mb-4 flex items-start justify-between">
-                    <span className="text-xs font-medium text-stone-400">{item.label}</span>
-                    <Icon className="size-4 text-stone-400" />
+                    <span className="text-xs font-semibold tracking-[0.12em] text-stone-400 uppercase">
+                      {item.label}
+                    </span>
+                    <span className="rounded-xl bg-stone-100/80 p-2 text-stone-400 transition group-hover:bg-stone-200/70 group-hover:text-stone-600">
+                      <Icon className="size-4" />
+                    </span>
                   </div>
-                  <div className={cn("text-[1.75rem] font-semibold tracking-tight", item.color)}>
-                    <span className={typeof value === "number" ? "" : "text-[1.1rem]"}>
+                  <div
+                    className={cn(
+                      "text-[1.75rem] font-semibold tracking-tight",
+                      item.color,
+                    )}
+                  >
+                    <span
+                      className={
+                        typeof value === "number" ? "" : "text-[1.1rem]"
+                      }
+                    >
                       {typeof value === "number" ? formatCompact(value) : value}
                     </span>
                   </div>
@@ -623,20 +838,26 @@ function AccountsPageContent() {
             );
           })}
         </div>
-        <p className="text-xs text-stone-400">GPT 图像额度仅统计正常 GPT 账号；Grok 账号用于 Grok 文本模型，不参与图像额度统计。</p>
+        <p className="rounded-2xl border border-white/60 bg-white/45 px-4 py-2 text-xs leading-5 text-stone-500 shadow-sm">
+          GPT 图像额度仅统计正常 GPT 账号；Grok 账号用于 Grok
+          文本模型，不参与图像额度统计。
+        </p>
       </section>
 
       <section className="space-y-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex flex-col gap-3 rounded-[24px] border border-white/70 bg-white/45 p-3 shadow-sm lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-3 px-1">
             <h2 className="text-lg font-semibold tracking-tight">账户列表</h2>
-            <Badge variant="secondary" className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700">
+            <Badge
+              variant="secondary"
+              className="rounded-lg bg-stone-200/80 px-2.5 py-1 text-stone-700 shadow-sm"
+            >
               {filteredAccounts.length}
             </Badge>
           </div>
 
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
-            <div className="relative min-w-[260px]">
+          <div className="grid gap-2 sm:grid-cols-2 lg:flex lg:items-center">
+            <div className="relative min-w-0 sm:col-span-2 lg:min-w-[260px]">
               <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
               <Input
                 value={query}
@@ -645,7 +866,7 @@ function AccountsPageContent() {
                   setPage(1);
                 }}
                 placeholder="搜索邮箱"
-                className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
+                className="h-10 rounded-xl border-stone-200 bg-white/90 pl-10 shadow-sm"
               />
             </div>
             <Select
@@ -655,7 +876,7 @@ function AccountsPageContent() {
                 setPage(1);
               }}
             >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/90 shadow-sm lg:w-[150px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -673,7 +894,7 @@ function AccountsPageContent() {
                 setPage(1);
               }}
             >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/90 shadow-sm lg:w-[150px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -691,7 +912,7 @@ function AccountsPageContent() {
                 setPage(1);
               }}
             >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/90 shadow-sm lg:w-[150px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -706,14 +927,18 @@ function AccountsPageContent() {
         </div>
 
         {isLoading && accounts.length === 0 ? (
-          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+          <Card className="rounded-[24px] border-white/80 bg-white/90 shadow-[var(--shadow-soft)]">
             <CardContent className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
               <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
                 <LoaderCircle className="size-5 animate-spin" />
               </div>
               <div className="space-y-1">
-                <p className="text-sm font-medium text-stone-700">正在加载账户</p>
-                <p className="text-sm text-stone-500">从后端同步账号列表和状态。</p>
+                <p className="text-sm font-medium text-stone-700">
+                  正在加载账户
+                </p>
+                <p className="text-sm text-stone-500">
+                  从后端同步账号列表和状态。
+                </p>
               </div>
             </CardContent>
           </Card>
@@ -721,83 +946,109 @@ function AccountsPageContent() {
 
         <Card
           className={cn(
-            "overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm",
+            "overflow-hidden rounded-[24px] border-white/80 bg-white/90 shadow-[var(--shadow-soft)]",
             isLoading && accounts.length === 0 ? "hidden" : "",
           )}
         >
           <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-col gap-3 border-b border-stone-100 bg-stone-50/35 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
                 <Button
                   variant="ghost"
-                  className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                  onClick={() => void handleRefreshAccounts(selectedGptTokens)}
-                  disabled={selectedGptTokens.length === 0 || isRefreshing}
+                  className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
+                  onClick={() =>
+                    void handleRefreshAccounts(selectedRefreshableTokens)
+                  }
+                  disabled={
+                    selectedRefreshableTokens.length === 0 || isRefreshing
+                  }
                 >
-                  {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-                  刷新选中 GPT 账号信息和额度
+                  {isRefreshing ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="size-4" />
+                  )}
+                  {refreshableProvider.refresh.selectedButtonLabel}
                 </Button>
                 <Button
                   variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                  className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
                   onClick={() => void handleDeleteTokens(abnormalTokens)}
                   disabled={abnormalTokens.length === 0 || isDeleting}
                 >
-                  {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                  {isDeleting ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="size-4" />
+                  )}
                   移除异常账号
                 </Button>
                 <Button
                   variant="ghost"
-                  className="h-8 rounded-lg px-3 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
+                  className="h-8 rounded-lg px-3 text-amber-700 hover:bg-amber-50 hover:text-amber-800"
                   onClick={() => void handleDeleteLimitedAccounts()}
                   disabled={limitedTokens.length === 0 || isDeleting}
                 >
-                  {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                  {isDeleting ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="size-4" />
+                  )}
                   移除限流账号
                 </Button>
                 <Button
                   variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                  className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
                   onClick={() => void handleDeleteTokens(selectedTokens)}
                   disabled={selectedTokens.length === 0 || isDeleting}
                 >
-                  {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                  {isDeleting ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="size-4" />
+                  )}
                   删除所选
                 </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                  onClick={() => void handleExportAccounts("gpt", selectedGptTokens)}
-                  disabled={selectedGptTokens.length === 0 || isExporting || isDeleting}
-                >
-                  {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-                  导出所选 GPT TXT
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                  onClick={() => void handleExportAccounts("grok", selectedGrokTokens)}
-                  disabled={selectedGrokTokens.length === 0 || isExporting || isDeleting}
-                >
-                  {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-                  导出所选 Grok TXT
-                </Button>
+                {selectedProviderTokenGroups
+                  .filter(({ provider }) => !provider.canExportWithoutTokens)
+                  .map(({ provider, tokens }) => (
+                    <Button
+                      key={provider.id}
+                      variant="ghost"
+                      className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
+                      onClick={() =>
+                        void handleExportAccounts(provider.id, tokens)
+                      }
+                      disabled={
+                        tokens.length === 0 || isExporting || isDeleting
+                      }
+                    >
+                      {isExporting ? (
+                        <LoaderCircle className="size-4 animate-spin" />
+                      ) : (
+                        <Download className="size-4" />
+                      )}
+                      {provider.selectedExportButtonLabel}
+                    </Button>
+                  ))}
                 {selectedIds.length > 0 ? (
-                  <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
+                  <span className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-semibold text-stone-600 shadow-sm">
                     已选择 {selectedIds.length} 项
                   </span>
                 ) : null}
               </div>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[920px] text-left">
-                <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
+            <div className="overflow-x-auto overscroll-x-contain">
+              <table className="w-full min-w-[920px] text-left text-sm">
+                <thead className="border-b border-stone-100 bg-stone-50/60 text-[11px] tracking-[0.18em] text-stone-500 uppercase">
                   <tr>
                     <th className="w-12 px-4 py-3">
                       <Checkbox
                         checked={allCurrentSelected}
-                        onCheckedChange={(checked) => toggleSelectAll(Boolean(checked))}
+                        onCheckedChange={(checked) =>
+                          toggleSelectAll(Boolean(checked))
+                        }
                       />
                     </th>
                     <th className="w-56 px-4 py-3">token</th>
@@ -813,23 +1064,27 @@ function AccountsPageContent() {
                   </tr>
                 </thead>
                 <tbody>
-                  {currentRows.map((account) => {
+                  {currentRows.map((account, index) => {
                     const status = statusMeta[account.status];
                     const StatusIcon = status.icon;
 
+                    const rowKey = accountRowKey(account, startIndex + index);
+                    const token = accountToken(account);
+                    const tokenDisplay = accountTokenDisplay(account);
+
                     return (
                       <tr
-                        key={account.access_token}
-                        className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
+                        key={rowKey}
+                        className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/80"
                       >
                         <td className="px-4 py-3">
                           <Checkbox
-                            checked={selectedIds.includes(account.access_token)}
+                            checked={selectedIds.includes(rowKey)}
                             onCheckedChange={(checked) => {
                               setSelectedIds((prev) =>
                                 checked
-                                  ? Array.from(new Set([...prev, account.access_token]))
-                                  : prev.filter((item) => item !== account.access_token),
+                                  ? Array.from(new Set([...prev, rowKey]))
+                                  : prev.filter((item) => item !== rowKey),
                               );
                             }}
                           />
@@ -837,47 +1092,48 @@ function AccountsPageContent() {
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <span
-                              className="max-w-[240px] truncate font-medium tracking-tight text-stone-700 transition duration-150 blur-sm hover:blur-none"
-                              title={account.access_token}
+                              className="max-w-[240px] truncate rounded-lg bg-stone-100/70 px-2 py-1 font-medium tracking-tight text-stone-700"
+                              title={
+                                token
+                                  ? "完整 token 已隐藏，请使用导出功能获取凭据"
+                                  : tokenDisplay
+                              }
                             >
-                              {account.access_token}
+                              {tokenDisplay}
                             </span>
-                            <button
-                              type="button"
-                              className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
-                              onClick={() => {
-                                void navigator.clipboard.writeText(account.access_token);
-                                toast.success("token 已复制");
-                              }}
-                            >
-                              <Copy className="size-4" />
-                            </button>
                           </div>
                         </td>
                         <td className="px-4 py-3">
                           <Badge
-                            variant={isGrokAccount(account) ? "info" : "outline"}
-                            className="rounded-md px-2.5 py-1 font-semibold"
+                            variant={
+                              getAccountProviderDefinition(account.provider)
+                                .badgeVariant
+                            }
+                            className="rounded-md px-2.5 py-1 font-semibold shadow-sm"
                           >
                             {displayAccountProvider(account)}
                           </Badge>
                         </td>
                         <td className="px-4 py-3">
                           <div className="space-y-1">
-                            <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-700">
+                            <Badge
+                              variant="secondary"
+                              className="rounded-md bg-stone-100 text-stone-700"
+                            >
                               {displayAccountType(account)}
                             </Badge>
-                            {isGrokAccount(account) ? (
-                              <div className="text-[11px] leading-4 text-stone-400">Grok 文本模型计划/池</div>
-                            ) : (
-                              <div className="text-[11px] leading-4 text-stone-400">GPT 套餐</div>
-                            )}
+                            <div className="text-[11px] leading-4 text-stone-400">
+                              {
+                                getAccountProviderDefinition(account.provider)
+                                  .metadataLabel
+                              }
+                            </div>
                           </div>
                         </td>
                         <td className="px-4 py-3">
                           <Badge
                             variant={status.badge}
-                            className="inline-flex items-center gap-1 rounded-md px-2 py-1"
+                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 shadow-sm"
                           >
                             <StatusIcon className="size-3.5" />
                             {account.status}
@@ -886,15 +1142,24 @@ function AccountsPageContent() {
                         <td className="px-4 py-3">
                           <div className="space-y-1 text-xs leading-5 text-stone-500">
                             <div>{renderPrivacyEmail(account.email)}</div>
-                            {isGrokAccount(account) ? (
-                              <div className="text-stone-400">用于 Grok 文本模型，不用于 ChatGPT 图像生成。</div>
-                            ) : (
-                              <div className="text-stone-400">用于 GPT 账号元数据与图像额度。</div>
-                            )}
+                            <div className="text-stone-400">
+                              {
+                                getAccountProviderDefinition(account.provider)
+                                  .accountInfoHelp
+                              }
+                            </div>
                           </div>
                         </td>
                         <td className="px-4 py-3">
-                          <Badge variant={isGptAccount(account) ? "info" : "secondary"} className="rounded-md">
+                          <Badge
+                            variant={
+                              getAccountProviderDefinition(account.provider)
+                                .quota.applicable
+                                ? "info"
+                                : "secondary"
+                            }
+                            className="rounded-md px-2.5 py-1 shadow-sm"
+                          >
                             {formatQuota(account)}
                           </Badge>
                         </td>
@@ -903,19 +1168,27 @@ function AccountsPageContent() {
                             const restore = formatRestoreAt(account.restore_at);
                             return (
                               <div className="space-y-0.5">
-                                {restore.relative ? <div className="font-medium text-stone-700">{restore.relative}</div> : null}
+                                {restore.relative ? (
+                                  <div className="font-medium text-stone-700">
+                                    {restore.relative}
+                                  </div>
+                                ) : null}
                                 <div>{restore.absolute}</div>
                               </div>
                             );
                           })()}
                         </td>
-                        <td className="px-4 py-3 text-stone-500">{account.success}</td>
-                        <td className="px-4 py-3 text-stone-500">{account.fail}</td>
+                        <td className="px-4 py-3 text-stone-500">
+                          {account.success}
+                        </td>
+                        <td className="px-4 py-3 text-stone-500">
+                          {account.fail}
+                        </td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-1 text-stone-400">
                             <button
                               type="button"
-                              className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                              className="rounded-lg p-2 transition hover:bg-white hover:text-stone-700"
                               onClick={() => openEditDialog(account)}
                               disabled={isUpdating}
                             >
@@ -923,18 +1196,33 @@ function AccountsPageContent() {
                             </button>
                             <button
                               type="button"
-                              className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                              onClick={() => void handleRefreshAccounts([account.access_token])}
-                              disabled={isRefreshing || !isGptAccount(account)}
-                              title={isGptAccount(account) ? "刷新 GPT 账号信息和额度" : "Grok 账号当前不支持账号刷新"}
+                              className="rounded-lg p-2 transition hover:bg-white hover:text-stone-700"
+                              onClick={() =>
+                                void handleRefreshAccounts([token])
+                              }
+                              disabled={
+                                isRefreshing ||
+                                !getAccountProviderDefinition(account.provider)
+                                  .refresh.enabled ||
+                                !token
+                              }
+                              title={
+                                getAccountProviderDefinition(account.provider)
+                                  .refresh.rowTitle
+                              }
                             >
-                              <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
+                              <RefreshCw
+                                className={cn(
+                                  "size-4",
+                                  isRefreshing ? "animate-spin" : "",
+                                )}
+                              />
                             </button>
                             <button
                               type="button"
-                              className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
-                              onClick={() => void handleDeleteTokens([account.access_token])}
-                              disabled={isDeleting}
+                              className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-600"
+                              onClick={() => void handleDeleteTokens([token])}
+                              disabled={isDeleting || !token}
                             >
                               <Trash2 className="size-4" />
                             </button>
@@ -948,23 +1236,30 @@ function AccountsPageContent() {
 
               {!isLoading && currentRows.length === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-                  <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                  <div className="rounded-2xl bg-stone-100/80 p-3 text-stone-500 shadow-inner">
                     <Search className="size-5" />
                   </div>
                   <div className="space-y-1">
-                    <p className="text-sm font-medium text-stone-700">没有匹配的账户</p>
-                    <p className="text-sm text-stone-500">调整筛选条件或搜索关键字后重试。</p>
+                    <p className="text-sm font-medium text-stone-700">
+                      没有匹配的账户
+                    </p>
+                    <p className="text-sm text-stone-500">
+                      调整筛选条件或搜索关键字后重试。
+                    </p>
                   </div>
                 </div>
               ) : null}
             </div>
 
-            <div className="border-t border-stone-100 px-4 py-4">
-              <div className="flex items-center justify-center gap-3 overflow-x-auto whitespace-nowrap">
+            <div className="border-t border-stone-100 bg-stone-50/30 px-4 py-4">
+              <div className="flex items-center justify-start gap-3 overflow-x-auto whitespace-nowrap md:justify-center">
                 <div className="shrink-0 text-sm text-stone-500">
-                显示第 {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
-                {Math.min(startIndex + Number(pageSize), filteredAccounts.length)} 条，共{" "}
-                {filteredAccounts.length} 条
+                  显示第 {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
+                  {Math.min(
+                    startIndex + Number(pageSize),
+                    filteredAccounts.length,
+                  )}{" "}
+                  条，共 {filteredAccounts.length} 条
                 </div>
 
                 <span className="shrink-0 text-sm leading-none text-stone-500">
@@ -998,7 +1293,10 @@ function AccountsPageContent() {
                 </Button>
                 {paginationItems.map((item, index) =>
                   item === "..." ? (
-                    <span key={`ellipsis-${index}`} className="px-1 text-sm text-stone-400">
+                    <span
+                      key={`ellipsis-${index}`}
+                      className="px-1 text-sm text-stone-400"
+                    >
                       ...
                     </span>
                   ) : (
@@ -1022,7 +1320,9 @@ function AccountsPageContent() {
                   size="icon"
                   className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
                   disabled={safePage >= pageCount}
-                  onClick={() => setPage((prev) => Math.min(pageCount, prev + 1))}
+                  onClick={() =>
+                    setPage((prev) => Math.min(pageCount, prev + 1))
+                  }
                 >
                   <ChevronRight className="size-4" />
                 </Button>

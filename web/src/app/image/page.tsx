@@ -27,8 +27,11 @@ import {
   fetchImageTasks,
   fetchModels,
   type Account,
+  type AccountProvider,
   type ImageTask,
+  type ModelInfo,
 } from "@/lib/api";
+import { getAccountProviderDefinition } from "@/providers/registry";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 import {
@@ -42,7 +45,6 @@ import {
   type ImageConversation,
   type ImageConversationMode,
   type ImageTurn,
-  type ImageTurnStatus,
   type StoredImage,
   type StoredReferenceImage,
 } from "@/store/image-conversations";
@@ -59,11 +61,27 @@ const IMAGE_SIZE_STORAGE_KEY = "webchat2api:image_last_size";
 const IMAGE_COUNT_STORAGE_KEY = "webchat2api:image_last_count";
 const IMAGE_MODEL_STORAGE_KEY = "webchat2api:image_last_model";
 const TEXT_MODEL_STORAGE_KEY = "webchat2api:text_last_model";
+const IMAGE_PROVIDER_STORAGE_KEY = "webchat2api:image_last_provider";
+const TEXT_PROVIDER_STORAGE_KEY = "webchat2api:text_last_provider";
 const FALLBACK_IMAGE_MODELS = ["gpt-image-2", "codex-gpt-image-2"];
 const FALLBACK_TEXT_MODELS = ["gpt-4.1-mini", "gpt-4o-mini", "gpt-3.5-turbo"];
 const FALLBACK_GROK_TEXT_MODELS = ["grok-4.3"];
+const SUPPORTED_TEST_PROVIDERS = ["gpt", "grok", "gemini"] as const;
 const IMAGE_MODEL_KEYWORDS = ["image", "dall-e", "gpt-image", "codex-gpt-image"];
-const KNOWN_TEXT_MODEL_PREFIXES = ["gpt-", "grok-"];
+const KNOWN_TEXT_MODEL_PREFIXES = ["gpt-", "grok-", "gemini-"];
+const IMAGE_CAPABILITIES = ["image", "image_edit"];
+const IMAGE_PROVIDER_UNSUPPORTED_COPY: Record<TestProviderId, string> = {
+  gpt: "当前 GPT 模型列表未返回图像能力。",
+  grok: "当前 Grok 模型列表未返回图像能力。",
+  gemini: "Gemini 暂未提供图像生成/编辑接口，请切换到文本试验或选择其他服务。",
+};
+const IMAGE_PROVIDER_NO_METADATA_COPY: Record<TestProviderId, string | undefined> = {
+  gpt: undefined,
+  grok: "当前无法确认 Grok 图像能力，已禁用服务选择。",
+  gemini: "Gemini 暂未提供图像生成/编辑接口，请切换到文本试验或选择其他服务。",
+};
+
+type TestProviderId = (typeof SUPPORTED_TEST_PROVIDERS)[number];
 
 type ExperimentMode = "text" | "image";
 type TextModelTestStatus = "pending" | "testing" | "success" | "error";
@@ -241,14 +259,62 @@ function uniqueModelIds(items: string[]) {
   return models;
 }
 
-function isImageModel(model: string) {
+function isImageModel(model: string, metadata?: ModelInfo) {
+  if (metadata?.capability && IMAGE_CAPABILITIES.includes(metadata.capability)) {
+    return true;
+  }
   const normalized = model.toLowerCase();
   return IMAGE_MODEL_KEYWORDS.some((keyword) => normalized.includes(keyword));
 }
 
-function isTextModel(model: string) {
+function isTextModel(model: string, metadata?: ModelInfo) {
+  if (metadata?.capability) {
+    return metadata.capability === "chat";
+  }
   const normalized = model.toLowerCase();
   return !isImageModel(normalized) || KNOWN_TEXT_MODEL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+}
+
+function normalizeTestProvider(provider: AccountProvider | null | undefined): TestProviderId {
+  const normalized = String(provider || "gpt").trim().toLowerCase();
+  return SUPPORTED_TEST_PROVIDERS.includes(normalized as TestProviderId) ? (normalized as TestProviderId) : "gpt";
+}
+
+function providerFromModelId(model: string): TestProviderId {
+  const normalized = model.toLowerCase();
+  if (normalized.startsWith("grok-")) {
+    return "grok";
+  }
+  if (normalized.startsWith("gemini-")) {
+    return "gemini";
+  }
+  return "gpt";
+}
+
+function modelProvider(model: string, metadata?: ModelInfo) {
+  return normalizeTestProvider(metadata?.provider || providerFromModelId(model));
+}
+
+function providerMatches(model: string, provider: TestProviderId, metadata?: ModelInfo) {
+  return modelProvider(model, metadata) === provider;
+}
+
+function fallbackTextModelsForProvider(provider: TestProviderId, hasMetadata: boolean) {
+  if (provider === "gpt") {
+    return FALLBACK_TEXT_MODELS;
+  }
+  if (provider === "grok" && !hasMetadata) {
+    return FALLBACK_GROK_TEXT_MODELS;
+  }
+  return [];
+}
+
+function fallbackImageModelsForProvider(provider: TestProviderId) {
+  return provider === "gpt" ? FALLBACK_IMAGE_MODELS : [];
+}
+
+function pickProviderScopedModel(models: string[], current: string) {
+  return models.includes(current) ? current : (models[0] ?? "");
 }
 
 function pickStoredModel(storageKey: string, fallback: string) {
@@ -256,6 +322,39 @@ function pickStoredModel(storageKey: string, fallback: string) {
     return fallback;
   }
   return window.localStorage.getItem(storageKey) || fallback;
+}
+
+function ProviderSelect({
+  value,
+  onChange,
+  availability,
+}: {
+  value: TestProviderId;
+  onChange: (value: TestProviderId) => void;
+  availability?: Partial<Record<TestProviderId, { disabled: boolean; reason?: string }>>;
+}) {
+  return (
+    <div className="min-w-0 space-y-2">
+      <label className="text-xs font-semibold tracking-[0.14em] text-stone-500 uppercase">服务</label>
+      <Select value={value} onValueChange={(nextValue) => onChange(normalizeTestProvider(nextValue))}>
+        <SelectTrigger className="h-11 rounded-2xl border-stone-200 bg-white/90 text-stone-800 shadow-none">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {SUPPORTED_TEST_PROVIDERS.map((provider) => {
+            const state = availability?.[provider];
+            const definition = getAccountProviderDefinition(provider);
+            return (
+              <SelectItem key={provider} value={provider} disabled={state?.disabled}>
+                <span>{definition.label}</span>
+                {state?.reason ? <span className="ml-2 text-xs text-stone-400">{state.reason}</span> : null}
+              </SelectItem>
+            );
+          })}
+        </SelectContent>
+      </Select>
+    </div>
+  );
 }
 
 function ModelSelect({
@@ -320,12 +419,14 @@ function ExperimentModeSwitch({
 function TextExperimentPanel({
   prompt,
   messages,
+  provider,
   model,
   models,
   isLoading,
   isTestingModels,
   modelTestResults,
   onPromptChange,
+  onProviderChange,
   onModelChange,
   onSubmit,
   onTestModels,
@@ -333,12 +434,14 @@ function TextExperimentPanel({
 }: {
   prompt: string;
   messages: TextChatMessage[];
+  provider: TestProviderId;
   model: string;
   models: string[];
   isLoading: boolean;
   isTestingModels: boolean;
   modelTestResults: TextModelTestResult[];
   onPromptChange: (value: string) => void;
+  onProviderChange: (value: TestProviderId) => void;
   onModelChange: (value: string) => void;
   onSubmit: () => void | Promise<void>;
   onTestModels: () => void | Promise<void>;
@@ -432,8 +535,9 @@ function TextExperimentPanel({
               placeholder="输入要发送给模型的文本，例如：用三句话总结这个服务的用途。"
               className="min-h-[92px] resize-none rounded-[18px] border-transparent bg-white px-4 py-3 text-[15px] leading-7 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:border-stone-200 focus-visible:ring-stone-300"
             />
-            <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0 flex-1 sm:max-w-[320px]">
+            <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+              <div className="grid min-w-0 flex-1 gap-2 sm:max-w-[520px] sm:grid-cols-[160px_minmax(0,1fr)]">
+                <ProviderSelect value={provider} onChange={onProviderChange} />
                 <ModelSelect value={model} models={models} label="模型" onChange={onModelChange} />
               </div>
               <div className="flex items-center justify-between gap-3 sm:justify-end">
@@ -685,8 +789,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [imagePrompt, setImagePrompt] = useState("");
+  const [imageProvider, setImageProvider] = useState<TestProviderId>("gpt");
   const [imageModel, setImageModel] = useState(FALLBACK_IMAGE_MODELS[0]);
   const [textPrompt, setTextPrompt] = useState("");
+  const [textProvider, setTextProvider] = useState<TestProviderId>("gpt");
   const [textModel, setTextModel] = useState(FALLBACK_TEXT_MODELS[0]);
   const [textMessages, setTextMessages] = useState<TextChatMessage[]>([]);
   const [isLoadingTextHistory, setIsLoadingTextHistory] = useState(true);
@@ -694,7 +800,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [isTestingTextModels, setIsTestingTextModels] = useState(false);
   const [textModelTestResults, setTextModelTestResults] = useState<TextModelTestResult[]>([]);
   const [experimentMode, setExperimentMode] = useState<ExperimentMode>("text");
-  const [modelIds, setModelIds] = useState<string[]>([]);
+  const [modelMetadata, setModelMetadata] = useState<ModelInfo[]>([]);
   const [imageCount, setImageCount] = useState("1");
   const [imageSize, setImageSize] = useState("");
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
@@ -716,19 +822,54 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   >(null);
 
   const parsedCount = useMemo(() => Number(clampImageCount(imageCount)), [imageCount]);
+  const modelMetadataById = useMemo(
+    () => new Map(modelMetadata.map((model) => [model.id, model])),
+    [modelMetadata],
+  );
   const selectedConversation = useMemo(
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
   );
   const imageModelOptions = useMemo(() => {
-    const discovered = modelIds.filter(isImageModel);
-    return uniqueModelIds([...discovered, ...FALLBACK_IMAGE_MODELS, imageModel]);
-  }, [imageModel, modelIds]);
+    const discovered = modelMetadata
+      .filter((model) => providerMatches(model.id, imageProvider, model) && isImageModel(model.id, model))
+      .map((model) => model.id);
+    const fallbacks = modelMetadata.length === 0 ? fallbackImageModelsForProvider(imageProvider) : [];
+    return uniqueModelIds([...discovered, ...fallbacks]);
+  }, [imageProvider, modelMetadata]);
   const textModelOptions = useMemo(() => {
-    const discovered = modelIds.filter(isTextModel);
-    const grokFallbacks = modelIds.length === 0 ? FALLBACK_GROK_TEXT_MODELS : [];
-    return uniqueModelIds([...discovered, ...FALLBACK_TEXT_MODELS, ...grokFallbacks, textModel]);
-  }, [modelIds, textModel]);
+    const discovered = modelMetadata
+      .filter((model) => providerMatches(model.id, textProvider, model) && isTextModel(model.id, model))
+      .map((model) => model.id);
+    return uniqueModelIds([
+      ...discovered,
+      ...fallbackTextModelsForProvider(textProvider, modelMetadata.length > 0),
+      textModel,
+    ]).filter((model) => providerMatches(model, textProvider, modelMetadataById.get(model)));
+  }, [modelMetadata, modelMetadataById, textModel, textProvider]);
+  const imageProviderOptions = useMemo(
+    () =>
+      SUPPORTED_TEST_PROVIDERS.map((provider) => {
+        const providerModels = modelMetadata.filter(
+          (model) => providerMatches(model.id, provider, model) && isImageModel(model.id, model),
+        );
+        const fallbackModels = fallbackImageModelsForProvider(provider);
+        const disabled = modelMetadata.length > 0 ? providerModels.length === 0 : fallbackModels.length === 0;
+        return {
+          value: provider,
+          label: getAccountProviderDefinition(provider).label,
+          disabled,
+          reason: disabled ? "暂不支持图像" : undefined,
+        };
+      }),
+    [modelMetadata],
+  );
+  const imageModeUnavailableMessage =
+    imageModelOptions.length === 0
+      ? modelMetadata.length > 0
+        ? IMAGE_PROVIDER_UNSUPPORTED_COPY[imageProvider]
+        : IMAGE_PROVIDER_NO_METADATA_COPY[imageProvider]
+      : undefined;
   const activeTaskCount = useMemo(
     () =>
       conversations.reduce((sum, conversation) => {
@@ -759,6 +900,18 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             : "";
 
   useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(IMAGE_PROVIDER_STORAGE_KEY, imageProvider);
+    }
+  }, [imageProvider]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(TEXT_PROVIDER_STORAGE_KEY, textProvider);
+    }
+  }, [textProvider]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const loadModels = async () => {
@@ -767,15 +920,11 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         if (cancelled) {
           return;
         }
-        const nextModelIds = uniqueModelIds(data.data.map((model) => model.id));
-        setModelIds(nextModelIds);
-        const imageModels = nextModelIds.filter(isImageModel);
-        const textModels = nextModelIds.filter(isTextModel);
-        setImageModel((current) => (imageModels.includes(current) ? current : imageModels[0] || current));
-        setTextModel((current) => (textModels.includes(current) ? current : textModels[0] || current));
+        const nextModels = data.data.filter((model) => model.id.trim());
+        setModelMetadata(nextModels);
       } catch {
         if (!cancelled) {
-          setModelIds([]);
+          setModelMetadata([]);
         }
       }
     };
@@ -787,9 +936,24 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   }, []);
 
   useEffect(() => {
-    if (typeof window !== "undefined" && imageModel) {
-      window.localStorage.setItem(IMAGE_MODEL_STORAGE_KEY, imageModel);
+    setImageModel((current) => pickProviderScopedModel(imageModelOptions, current));
+  }, [imageModelOptions]);
+
+  useEffect(() => {
+    setTextModel((current) => pickProviderScopedModel(textModelOptions, current));
+  }, [textModelOptions]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
     }
+
+    if (imageModel) {
+      window.localStorage.setItem(IMAGE_MODEL_STORAGE_KEY, imageModel);
+      return;
+    }
+
+    window.localStorage.removeItem(IMAGE_MODEL_STORAGE_KEY);
   }, [imageModel]);
 
   useEffect(() => {
@@ -842,8 +1006,14 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         const storedCount = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_COUNT_STORAGE_KEY) : null;
         const storedImageModel = pickStoredModel(IMAGE_MODEL_STORAGE_KEY, FALLBACK_IMAGE_MODELS[0]);
         const storedTextModel = pickStoredModel(TEXT_MODEL_STORAGE_KEY, FALLBACK_TEXT_MODELS[0]);
+        const storedImageProvider =
+          typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_PROVIDER_STORAGE_KEY) : null;
+        const storedTextProvider =
+          typeof window !== "undefined" ? window.localStorage.getItem(TEXT_PROVIDER_STORAGE_KEY) : null;
         setImageSize(storedSize || "");
         setImageCount(storedCount ? clampImageCount(storedCount) : "1");
+        setImageProvider(normalizeTestProvider(storedImageProvider || providerFromModelId(storedImageModel)));
+        setTextProvider(normalizeTestProvider(storedTextProvider || providerFromModelId(storedTextModel)));
         setImageModel(storedImageModel);
         setTextModel(storedTextModel);
 
@@ -1211,6 +1381,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
 
     setSelectedConversationId(conversationId);
+    setImageProvider(modelProvider(turn.model, modelMetadataById.get(turn.model)));
     setImagePrompt(turn.prompt);
     setImageModel(turn.model || FALLBACK_IMAGE_MODELS[0]);
     setImageCount(String(Math.max(1, turn.count || turn.images.length || 1)));
@@ -1224,7 +1395,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
     textareaRef.current?.focus();
     toast.success("已复用这条提示词配置");
-  }, []);
+  }, [modelMetadataById]);
 
   const openLightbox = useCallback((images: ImageLightboxItem[], index: number) => {
     if (images.length === 0) {
@@ -1513,6 +1684,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
 
     const effectiveImageMode: ImageConversationMode = referenceImageFiles.length > 0 ? "edit" : "generate";
+    if (imageModeUnavailableMessage || imageModelOptions.length === 0 || !imageModelOptions.includes(imageModel)) {
+      toast.error(imageModeUnavailableMessage || "当前服务暂无可用图像模型");
+      return;
+    }
 
     const targetConversation = selectedConversationId
       ? conversationsRef.current.find((conversation) => conversation.id === selectedConversationId) ?? null
@@ -1677,16 +1852,47 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     toast.success("模型批量测试完成");
   };
 
+  const imageProviderLabel = getAccountProviderDefinition(imageProvider).label;
+  const selectedConversationTurnCount = selectedConversation?.turns.length ?? 0;
+  const selectedConversationStats = selectedConversation ? getImageConversationStats(selectedConversation) : null;
+  const selectedConversationStatus = selectedConversationStats
+    ? selectedConversationStats.running > 0
+      ? `${selectedConversationStats.running} 个处理中`
+      : selectedConversationStats.queued > 0
+        ? `${selectedConversationStats.queued} 个排队中`
+        : `${selectedConversationTurnCount} 轮记录`
+    : "新草稿";
+
   return (
     <>
       <section className="mx-auto flex h-[calc(100dvh-5.5rem)] min-h-0 w-full max-w-[1380px] flex-col gap-3 overflow-hidden px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:h-[calc(100dvh-5.25rem)] sm:px-3 sm:pb-5">
         <div className="rounded-[28px] border border-white/80 bg-white/58 px-4 py-3 shadow-[var(--shadow-soft)] backdrop-blur-xl sm:px-5">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="min-w-0">
               <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">试验页面</div>
-              <p className="mt-0.5 truncate text-sm text-stone-500">
-                文生文走聊天接口，文生图保留队列和历史。
-              </p>
+              <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-end sm:gap-3">
+                <h1 className="text-xl font-semibold tracking-tight text-stone-950 sm:text-2xl">图像试验工作台</h1>
+                <p className="text-sm text-stone-500">文生文走聊天接口，文生图保留队列和历史。</p>
+              </div>
+              {experimentMode === "image" ? (
+                <div className="mt-3 flex gap-2 overflow-x-auto pb-1 text-xs text-stone-600 sm:flex-wrap sm:overflow-visible sm:pb-0">
+                  <span className="shrink-0 rounded-full border border-stone-200/80 bg-white/75 px-3 py-1.5 shadow-sm">
+                    服务 {imageProviderLabel}
+                  </span>
+                  <span className="max-w-[240px] shrink-0 truncate rounded-full border border-stone-200/80 bg-white/75 px-3 py-1.5 shadow-sm sm:max-w-[320px]">
+                    模型 {imageModel || "待选择"}
+                  </span>
+                  <span className="shrink-0 rounded-full border border-amber-200/80 bg-amber-50/80 px-3 py-1.5 text-amber-800 shadow-sm">
+                    额度 {availableQuota}
+                  </span>
+                  <span className="shrink-0 rounded-full border border-lime-200/80 bg-lime-50/80 px-3 py-1.5 text-lime-800 shadow-sm">
+                    {activeTaskCount > 0 ? `${activeTaskCount} 个活跃任务` : "任务空闲"}
+                  </span>
+                  <span className="shrink-0 rounded-full border border-stone-200/80 bg-white/75 px-3 py-1.5 shadow-sm">
+                    {selectedConversationStatus}
+                  </span>
+                </div>
+              ) : null}
             </div>
             <ExperimentModeSwitch mode={experimentMode} onChange={setExperimentMode} />
           </div>
@@ -1696,19 +1902,21 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           <TextExperimentPanel
             prompt={textPrompt}
             messages={textMessages}
+            provider={textProvider}
             model={textModel}
             models={textModelOptions}
             isLoading={isSubmittingText}
             isTestingModels={isTestingTextModels}
             modelTestResults={textModelTestResults}
             onPromptChange={setTextPrompt}
+            onProviderChange={setTextProvider}
             onModelChange={setTextModel}
             onSubmit={handleTextSubmit}
             onTestModels={handleBatchTextModelTest}
             onClearMessages={handleClearTextMessages}
           />
         ) : (
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-hidden sm:gap-3 lg:grid-cols-[240px_minmax(0,1fr)]">
+          <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-hidden sm:gap-3 lg:grid-cols-[260px_minmax(0,1fr)]">
             <div className="hidden h-full min-h-0 rounded-[24px] border border-white/70 bg-white/45 px-3 shadow-[var(--shadow-soft)] backdrop-blur-sm lg:block">
               <ImageSidebar
             conversations={conversations}
@@ -1755,10 +1963,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         </Dialog>
 
             <div className="flex min-h-0 flex-col gap-2 sm:gap-4">
-          <div className="flex items-center justify-between gap-2 px-1 lg:hidden">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 px-1 lg:hidden">
             <Button
               variant="outline"
-              className="h-10 flex-1 rounded-2xl border-stone-200 bg-white/90 text-stone-700 shadow-sm"
+              className="h-10 min-w-0 rounded-2xl border-stone-200 bg-white/90 text-stone-700 shadow-sm"
               onClick={() => setIsHistoryOpen(true)}
             >
               <History className="mr-2 size-4" />
@@ -1783,7 +1991,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
           <div
             ref={resultsViewportRef}
-            className="hide-scrollbar min-h-0 flex-1 overscroll-contain overflow-y-auto px-1 py-2 sm:px-4 sm:py-4"
+            className="hide-scrollbar min-h-0 flex-1 overscroll-contain overflow-y-auto rounded-[24px] border border-white/60 bg-white/25 px-1 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] sm:px-4 sm:py-4"
           >
             <ImageResults
               selectedConversation={selectedConversation}
@@ -1804,6 +2012,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             imageSize={imageSize}
             imageModel={imageModel}
             imageModels={imageModelOptions}
+            imageProvider={imageProvider}
+            imageProviderOptions={imageProviderOptions}
+            imageModeUnavailableMessage={imageModeUnavailableMessage}
             availableQuota={availableQuota}
             activeTaskCount={activeTaskCount}
             referenceImages={referenceImages}
@@ -1813,6 +2024,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             onImageCountChange={(value) => setImageCount(value ? clampImageCount(value) : "")}
             onImageSizeChange={setImageSize}
             onImageModelChange={setImageModel}
+            onImageProviderChange={(value) => setImageProvider(normalizeTestProvider(value))}
             onSubmit={handleSubmit}
             onPickReferenceImage={() => fileInputRef.current?.click()}
             onReferenceImageChange={handleReferenceImageChange}

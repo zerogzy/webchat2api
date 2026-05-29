@@ -1,0 +1,47 @@
+import type { AccountProviderDefinition } from "./types";
+
+export const gptProvider: AccountProviderDefinition = {
+  id: "gpt",
+  label: "GPT",
+  filterLabel: "GPT",
+  exportFilename: "webchat2api-gpt.txt",
+  exportButtonLabel: "导出 GPT TXT",
+  selectedExportButtonLabel: "导出所选 GPT TXT",
+  canExportWithoutTokens: false,
+  importTokenCopy: {
+    label: "Access Token 列表",
+    placeholder: "每行一个 Access Token...",
+    fileHelp: "支持 `.txt`，文件内容也是一行一个 Token。",
+    successLabel: "Access Token 导入完成",
+    submitLabel: "导入 Token",
+  },
+  importSessionCopy: {
+    label: "Session JSON",
+    placeholder: '粘贴完整 JSON，例如包含 "accessToken" 的对象...',
+    help: "",
+    successLabel: "GPT Session JSON 导入完成",
+    submitLabel: "导入 JSON",
+    emptyMessage: "请先粘贴完整 GPT Session JSON",
+    parseErrorMessage: "GPT Session JSON 解析失败",
+    parseJsonAccessToken: true,
+    sessionUrl: "https://chatgpt.com/api/auth/session",
+  },
+  importMethods: ["token", "session", "cpa", "remote-cpa", "sub2api"],
+  metadataLabel: "GPT 套餐",
+  accountInfoHelp: "用于 GPT 账号元数据与图像额度。",
+  tokenHiddenLabel: "凭据已隐藏",
+  badgeVariant: "outline",
+  quota: {
+    applicable: true,
+    metricLabel: "GPT 图像额度",
+    unavailableLabel: "不适用",
+    unlimitedTypes: ["pro", "prolite"],
+    unknownField: "image_quota_unknown",
+  },
+  refresh: {
+    enabled: true,
+    buttonLabel: "刷新 GPT 账号信息和额度",
+    selectedButtonLabel: "刷新选中 GPT 账号信息和额度",
+    rowTitle: "刷新 GPT 账号信息和额度",
+  },
+};
