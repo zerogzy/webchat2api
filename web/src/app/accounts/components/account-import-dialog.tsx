@@ -24,6 +24,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { createAccounts, type Account, type AccountImportPayload } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -155,6 +156,8 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   const [tokenInput, setTokenInput] = useState("");
   const [importProvider, setImportProvider] = useState<ImportProvider>("gpt");
   const [sessionInput, setSessionInput] = useState("");
+  const [geminiSecure1Psid, setGeminiSecure1Psid] = useState("");
+  const [geminiSecure1Psidts, setGeminiSecure1Psidts] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pendingCpaImport, setPendingCpaImport] = useState<PendingCpaImport | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -170,6 +173,8 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     setTokenInput("");
     setImportProvider("gpt");
     setSessionInput("");
+    setGeminiSecure1Psid("");
+    setGeminiSecure1Psidts("");
     setPendingCpaImport(null);
     setConfirmOpen(false);
   };
@@ -215,6 +220,20 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
 
   const buildTokenPayloads = (tokens: string[]): AccountImportPayload[] => tokens.map((token) => ({ access_token: token, provider: importProvider }));
 
+  const buildGeminiSessionPayload = (secure1Psid: string, secure1Psidts: string): AccountImportPayload => {
+    const accessToken = `__Secure-1PSID=${secure1Psid}; __Secure-1PSIDTS=${secure1Psidts}`;
+    return {
+      access_token: accessToken,
+      provider: "gemini",
+      "__Secure-1PSID": secure1Psid,
+      "__Secure-1PSIDTS": secure1Psidts,
+      cookies: {
+        "__Secure-1PSID": secure1Psid,
+        "__Secure-1PSIDTS": secure1Psidts,
+      },
+    };
+  };
+
   const handleImportTokenText = async () => {
     const tokens = splitTokens(tokenInput);
     await submitTokens(tokens, providerDefinition.importTokenCopy.successLabel, buildTokenPayloads(tokens));
@@ -250,6 +269,20 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
 
   const handleImportSessionJson = async () => {
     const sessionCopy = providerDefinition.importSessionCopy;
+
+    if (importProvider === "gemini") {
+      const secure1Psid = geminiSecure1Psid.trim();
+      const secure1Psidts = geminiSecure1Psidts.trim();
+
+      if (!secure1Psid || !secure1Psidts) {
+        toast.error("请分别填写 __Secure-1PSID 和 __Secure-1PSIDTS");
+        return;
+      }
+
+      const accountPayload = buildGeminiSessionPayload(secure1Psid, secure1Psidts);
+      await submitTokens([accountPayload.access_token], sessionCopy.successLabel, [accountPayload]);
+      return;
+    }
 
     if (!sessionCopy.parseJsonAccessToken) {
       const tokens = splitTokens(sessionInput);
@@ -464,15 +497,40 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             <div className="font-medium">风险提示</div>
             <div>不要使用自己的大号，尽量使用不常用的小号进行导入，避免出现封号风险。本项目不承担任何封号风险责任。</div>
           </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-stone-700">{sessionCopy.label}</label>
-            <Textarea
-              placeholder={sessionCopy.placeholder}
-              value={sessionInput}
-              onChange={(event) => setSessionInput(event.target.value)}
-              className="min-h-48 resize-none rounded-xl border-stone-200 font-mono text-xs"
-            />
-          </div>
+          {importProvider === "gemini" ? (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">__Secure-1PSID</label>
+                <Input
+                  value={geminiSecure1Psid}
+                  onChange={(event) => setGeminiSecure1Psid(event.target.value)}
+                  placeholder="只填写 __Secure-1PSID 的值"
+                  className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs"
+                />
+                <p className="text-xs leading-5 text-stone-500">不要包含 cookie 名称，只粘贴等号右侧的完整值。</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">__Secure-1PSIDTS</label>
+                <Input
+                  value={geminiSecure1Psidts}
+                  onChange={(event) => setGeminiSecure1Psidts(event.target.value)}
+                  placeholder="只填写 __Secure-1PSIDTS 的值"
+                  className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs"
+                />
+                <p className="text-xs leading-5 text-stone-500">一个框只填一个值，提交时会自动组合为 Gemini cookie。</p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">{sessionCopy.label}</label>
+              <Textarea
+                placeholder={sessionCopy.placeholder}
+                value={sessionInput}
+                onChange={(event) => setSessionInput(event.target.value)}
+                className="min-h-48 resize-none rounded-xl border-stone-200 font-mono text-xs"
+              />
+            </div>
+          )}
         </div>
       );
     }

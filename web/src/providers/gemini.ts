@@ -16,9 +16,9 @@ export const geminiProvider: AccountProviderDefinition = {
     submitLabel: "导入 Gemini Cookie",
   },
   importSessionCopy: {
-    label: "Gemini cookie / session",
-    placeholder: "每行一组 Gemini cookie/session，需包含 __Secure-1PSID，可包含 __Secure-1PSIDTS...",
-    help: "Gemini 请粘贴每行一组 cookie/session，需包含 `__Secure-1PSID`，可包含 `__Secure-1PSIDTS`。GPT 的 Session JSON 不是 Gemini 的正确来源。",
+    label: "Gemini Cookie 双字段",
+    placeholder: "分别填写 __Secure-1PSID 和 __Secure-1PSIDTS 的值",
+    help: "Gemini Session 导入请分别填写两个 cookie 值：一个框填写 `__Secure-1PSID`，另一个框填写 `__Secure-1PSIDTS`。不要粘贴整段 cookie 文本或 GPT Session JSON。",
     successLabel: "Gemini Cookie 导入完成",
     submitLabel: "导入 Gemini Cookie",
     parseJsonAccessToken: false,
@@ -26,7 +26,7 @@ export const geminiProvider: AccountProviderDefinition = {
   importMethods: ["session", "cpa"],
   importFlowCopy: {
     providerDescription: "导入 Gemini cookie/session JSON；不是普通 Bearer token。",
-    methodIntro: "Gemini 需要 cookie/session 凭据，至少包含 __Secure-1PSID；后端会将可用字段归一化为账号池凭据。",
+    methodIntro: "Gemini 需要分别填写 __Secure-1PSID 和 __Secure-1PSIDTS；后端会将可用字段归一化为账号池凭据。",
     emptyMethodsLabel: "当前没有可用的 Gemini 导入方式。",
     cpaHelp: "JSON 文件应包含 Gemini cookie/session 字段或 access_token/accessToken 形式的归一化凭据；导入时会强制归入 Gemini 分组。",
     remoteCpaDescription: "当前 Gemini 不提供远程 CPA 快捷入口。",
