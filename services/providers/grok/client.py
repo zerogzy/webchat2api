@@ -7,11 +7,12 @@ import threading
 import time
 import uuid
 from urllib.parse import urlparse
+from ipaddress import ip_address
 from dataclasses import dataclass
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, cast
 
-from curl_cffi import requests
-from fastapi import HTTPException
+from curl_cffi import requests  # type: ignore[import-not-found]
+from fastapi import HTTPException  # type: ignore[import-not-found]
 
 from services.config import config
 from services.providers.base import GROK_PROVIDER, ModelSpec
@@ -441,9 +442,9 @@ def _feedback_status(upstream_status: int) -> str | None:
 
 
 def _app_chat_feedback_status(upstream_status: int) -> str | None:
-    if upstream_status == 401:
+    if upstream_status in {401, 403}:
         return "异常"
-    if upstream_status == 429:
+    if upstream_status in {402, 429}:
         return "限流"
     return None
 
@@ -580,7 +581,7 @@ def _cookie_items(cookie_header: str) -> list[tuple[str, str]]:
     items: list[tuple[str, str]] = []
     for fragment in str(cookie_header or "").split(";"):
         name, separator, value = fragment.strip().partition("=")
-        clean_name = " ".join(name.strip().split())
+        clean_name = " ".join(name.strip().split()).lower()
         clean_value = " ".join(value.strip().split())
         if separator and clean_name:
             items.append((clean_name, clean_value))
@@ -630,10 +631,32 @@ def _extract_raw_sso(access_token: str) -> str:
     return token
 
 
+def _is_loopback_bridge_url(value: str) -> bool:
+    parsed = urlparse(str(value or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        return False
+    host = parsed.hostname.lower()
+    if host == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _detect_bridge_url() -> str:
     configured = config.browser_bridge_url
     if configured:
-        return configured
+        bridge_url = str(configured).strip().rstrip("/")
+        if not _is_loopback_bridge_url(bridge_url):
+            raise GrokConsoleError(
+                "Grok app-chat Browser Bridge URL must be loopback",
+                400,
+                None,
+                code="grok_browser_bridge_url_not_loopback",
+                extra_detail={"bridge_code": "bridge_url_not_loopback"},
+            )
+        return bridge_url
     global _bridge_detected_url, _bridge_probed
     if _bridge_probed:
         return _bridge_detected_url or ""
@@ -693,6 +716,18 @@ def _parse_bridge_json_response(response: object) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _safe_bridge_message(bridge_code: str) -> str:
+    if bridge_code == "navigation_timeout":
+        return "Grok app-chat navigation timed out via Browser Bridge"
+    if bridge_code == "sso_unavailable":
+        return "Grok app-chat authentication failed via Browser Bridge"
+    if bridge_code == "page_not_prepared":
+        return "Grok app-chat Browser Bridge page was not prepared"
+    if bridge_code in {"bridge_unavailable", "browser_bridge_unavailable"}:
+        return "Grok app-chat Browser Bridge unavailable"
+    return "Grok app-chat via Browser Bridge failed"
+
+
 def _bridge_error_from_payload(
     payload: dict[str, Any] | None,
     upstream_status: int | None = None,
@@ -702,19 +737,8 @@ def _bridge_error_from_payload(
     raw_code = data.get("code") or data.get("last_error_code") or default_code
     bridge_code = str(raw_code or default_code)
     status = _BRIDGE_ERROR_STATUS.get(bridge_code, _openai_status(upstream_status or 503))
-    message = str(data.get("error") or data.get("last_error") or "Browser Bridge is unavailable")
-    if bridge_code == "navigation_timeout":
-        message = f"Grok app-chat navigation timed out via Browser Bridge: {message}"
-    elif bridge_code == "sso_unavailable":
-        message = f"Grok app-chat authentication failed via Browser Bridge: {message}"
-    elif bridge_code == "page_not_prepared":
-        message = f"Grok app-chat Browser Bridge page was not prepared: {message}"
-    elif bridge_code in {"bridge_unavailable", "browser_bridge_unavailable"}:
-        message = f"Grok app-chat Browser Bridge unavailable: {message}"
-    else:
-        message = f"Grok app-chat via Browser Bridge failed: {message}"
     return GrokConsoleError(
-        message,
+        _safe_bridge_message(bridge_code),
         status,
         upstream_status,
         code=_browser_bridge_error_code(bridge_code),
@@ -731,7 +755,7 @@ def _preflight_browser_bridge_health(bridge_url: str) -> None:
             health = _parse_bridge_json_response(response)
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         raise GrokConsoleError(
-            f"Grok app-chat Browser Bridge unavailable: {exc}",
+            "Grok app-chat Browser Bridge unavailable",
             503,
             None,
             code="grok_browser_bridge_unavailable",
@@ -850,6 +874,8 @@ def parse_app_chat_payload_line(line: str | bytes) -> dict[str, Any] | None:
         payload = str(line or "").strip()
     if not payload or payload == "[DONE]":
         return None
+    if payload.startswith(("event:", "id:", "retry:")):
+        return None
     if payload.startswith("data:"):
         payload = payload[5:].strip()
     if not payload or payload == "[DONE]":
@@ -858,31 +884,101 @@ def parse_app_chat_payload_line(line: str | bytes) -> dict[str, Any] | None:
         data = json.loads(payload)
     except json.JSONDecodeError:
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    nested = data.get("data")
+    if isinstance(nested, dict) and not any(key in data for key in ("result", "response", "token", "finalMetadata")):
+        return nested
+    return data
+
+
+def _parse_app_chat_data_parts(data_parts: list[str]) -> dict[str, Any] | None:
+    if not data_parts:
+        return None
+    event = parse_app_chat_payload_line("data: " + "\n".join(data_parts))
+    if event is not None:
+        return event
+    if len(data_parts) > 1:
+        return parse_app_chat_payload_line("data: " + "".join(data_parts))
+    return None
 
 
 def app_chat_line_events(lines: Iterable[str | bytes]) -> Iterator[dict[str, Any]]:
+    data_parts: list[str] = []
     for line in lines:
-        event = parse_app_chat_payload_line(line)
+        raw = line.decode("utf-8", errors="replace") if isinstance(line, bytes) else str(line or "")
+        stripped = raw.strip()
+        if not stripped:
+            event = _parse_app_chat_data_parts(data_parts)
+            data_parts.clear()
+            if event is not None:
+                yield event
+            continue
+        if stripped.startswith("data:"):
+            data_parts.append(stripped[5:].strip())
+            continue
+        event = _parse_app_chat_data_parts(data_parts)
+        data_parts.clear()
         if event is not None:
             yield event
+        event = parse_app_chat_payload_line(stripped)
+        if event is not None:
+            yield event
+    event = _parse_app_chat_data_parts(data_parts)
+    if event is not None:
+        yield event
+
+
+def _event_result(event: dict[str, Any]) -> dict[str, Any]:
+    result = event.get("result")
+    if isinstance(result, dict):
+        return result
+    data = event.get("data")
+    if isinstance(data, dict) and isinstance(data.get("result"), dict):
+        return data["result"]
+    return {}
+
+
+def _event_response(event: dict[str, Any]) -> dict[str, Any]:
+    result = _event_result(event)
+    response = result.get("response")
+    if isinstance(response, dict):
+        return response
+    response = event.get("response")
+    return response if isinstance(response, dict) else {}
+
+
+def _app_chat_metadata(event: dict[str, Any]) -> dict[str, Any]:
+    result = _event_result(event)
+    response = _event_response(event)
+    for source in (response, result, event):
+        for key in ("finalMetadata", "final_metadata", "responseMetadata", "metadata"):
+            if isinstance(source, dict) and key in source:
+                value = source.get(key)
+                return value if isinstance(value, dict) else {}
+    return {}
+
+
+def _app_chat_has_final_metadata(event: dict[str, Any]) -> bool:
+    result = _event_result(event)
+    response = _event_response(event)
+    return any(isinstance(source, dict) and any(key in source for key in ("finalMetadata", "final_metadata")) for source in (response, result, event))
 
 
 def extract_app_chat_token(event: dict[str, Any]) -> tuple[str, bool]:
-    result = event.get("result") if isinstance(event.get("result"), dict) else {}
-    response = result.get("response") if isinstance(result.get("response"), dict) else {}
-    token = response.get("token")
+    response = _event_response(event)
+    token = response.get("token") or event.get("token")
     if not token:
         return "", False
-    return str(token), response.get("isThinking") is True
+    return str(token), response.get("isThinking") is True or event.get("isThinking") is True
 
 
 def is_app_chat_final_event(event: dict[str, Any]) -> bool:
-    result = event.get("result") if isinstance(event.get("result"), dict) else {}
-    response = result.get("response") if isinstance(result.get("response"), dict) else {}
-    if response.get("isSoftStop") is True:
+    result = _event_result(event)
+    response = _event_response(event)
+    if response.get("isSoftStop") is True or result.get("isSoftStop") is True or event.get("isSoftStop") is True:
         return True
-    if "finalMetadata" in response or "finalMetadata" in result:
+    if _app_chat_has_final_metadata(event):
         return True
     return False
 
@@ -900,20 +996,85 @@ def _app_chat_json_data(attachment: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _app_chat_attachment_json_values(attachment: dict[str, Any]) -> list[dict[str, Any]]:
+    values = [_app_chat_json_data(attachment)]
+    for key in ("json", "data", "metadata"):
+        value = attachment.get(key)
+        if isinstance(value, dict):
+            values.append(value)
+    return [value for value in values if value]
+
+
+def _app_chat_image_chunk_values(event: dict[str, Any]) -> list[dict[str, Any]]:
+    response = _event_response(event)
+    values: list[dict[str, Any]] = []
+    for key in ("streamingImageGenerationResponse", "imageGenerationResponse", "image_chunk", "imageChunk"):
+        value = response.get(key)
+        if isinstance(value, dict):
+            values.append(value)
+    attachment_obj = response.get("cardAttachment")
+    attachment: dict[str, Any] = attachment_obj if isinstance(attachment_obj, dict) else {}
+    for json_data in _app_chat_attachment_json_values(attachment):
+        for key in ("image_chunk", "imageChunk", "image", "media"):
+            value = json_data.get(key)
+            if isinstance(value, dict):
+                values.append(value)
+        values.append(json_data)
+    metadata = _app_chat_metadata(event)
+    for key in ("image_chunk", "imageChunk", "streamingImageGenerationResponse"):
+        value = metadata.get(key)
+        if isinstance(value, dict):
+            values.append(value)
+    return values
+
+
+def _is_moderated_or_blocked(value: dict[str, Any]) -> bool:
+    return any(value.get(key) is True for key in ("moderated", "isModerated", "blocked", "isBlocked", "contentFiltered"))
+
+
+def app_chat_moderation_message(event: dict[str, Any]) -> str:
+    response = _event_response(event)
+    candidates = [response, _event_result(event), event, _app_chat_metadata(event)]
+    candidates.extend(_app_chat_image_chunk_values(event))
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if not _is_moderated_or_blocked(candidate) and str(candidate.get("status") or "").lower() not in {"blocked", "moderated"}:
+            continue
+        for key in ("message", "error", "reason", "blockReason", "moderationReason", "statusMessage"):
+            value = candidate.get(key)
+            if value:
+                return str(value)
+        return "Grok blocked this image request"
+    return ""
+
+
+def _resolve_app_chat_image_url(value: object) -> str:
+    resolved = _resolve_grok_asset_url(str(value or ""))
+    if resolved:
+        return resolved
+    text = str(value or "").strip()
+    if text and not urlparse(text).scheme:
+        return GROK_ASSET_BASE_URL + text.lstrip("/")
+    return ""
+
+
 def extract_app_chat_image_url(event: dict[str, Any]) -> str:
-    result = event.get("result") if isinstance(event.get("result"), dict) else {}
-    response = result.get("response") if isinstance(result.get("response"), dict) else {}
-    attachment = response.get("cardAttachment") if isinstance(response.get("cardAttachment"), dict) else {}
-    json_data = _app_chat_json_data(attachment)
-    chunk = json_data.get("image_chunk") if isinstance(json_data.get("image_chunk"), dict) else {}
-    progress = chunk.get("progress")
-    moderated = chunk.get("moderated") is True or chunk.get("isModerated") is True
-    image_url = str(chunk.get("imageUrl") or "").strip()
-    if progress != 100 or moderated or not image_url:
-        return ""
-    if image_url.startswith(("http://", "https://")):
-        return image_url
-    return GROK_ASSET_BASE_URL + image_url.lstrip("/")
+    for chunk in _app_chat_image_chunk_values(event):
+        try:
+            progress = int(chunk.get("progress") or 100)
+        except (TypeError, ValueError):
+            progress = 0
+        if progress < 100 or _is_moderated_or_blocked(chunk):
+            continue
+        for key in ("imageUrl", "url", "mediaUrl", "generatedImageUrl", "assetUrl"):
+            image_url = _resolve_app_chat_image_url(chunk.get(key))
+            if image_url:
+                return image_url
+        image_url = resolve_grok_asset_reference(str(chunk.get("assetId") or chunk.get("fileId") or "").strip(), "", str(chunk.get("userId") or ""))
+        if image_url:
+            return image_url
+    return ""
 
 
 def _search_source_text(value: object) -> str:
@@ -939,49 +1100,53 @@ def _search_source_title(value: object, fallback: str) -> str:
     return title[:80].rstrip()
 
 
-def _event_response(event: dict[str, Any]) -> dict[str, Any]:
-    result = event.get("result") if isinstance(event.get("result"), dict) else {}
-    response = result.get("response")
-    return response if isinstance(response, dict) else {}
-
-
 def _app_chat_search_container(event: dict[str, Any], key: str) -> dict[str, Any]:
+    result = _event_result(event)
     response = _event_response(event)
-    for source in (response, event.get("result") if isinstance(event.get("result"), dict) else {}, event):
-        if isinstance(source, dict) and isinstance(source.get(key), dict):
-            return source[key]
+    metadata = _app_chat_metadata(event)
+    for source in (response, metadata, result, event):
+        if isinstance(source, dict):
+            value = source.get(key)
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, list):
+                return {"results": value}
     return {}
+
+
+def _app_chat_search_results(event: dict[str, Any], key: str, aliases: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for name in (key, *aliases):
+        raw = _app_chat_search_container(event, name).get("results")
+        if isinstance(raw, list):
+            results.extend(item for item in raw if isinstance(item, dict))
+    return results
 
 
 def extract_app_chat_search_sources(event: dict[str, Any]) -> list[dict[str, str]]:
     sources: list[dict[str, str]] = []
-    web_results = _app_chat_search_container(event, "webSearchResults").get("results")
-    if isinstance(web_results, list):
-        for item in web_results:
-            if not isinstance(item, dict):
-                continue
-            url = str(item.get("url") or "").strip()
-            if not url:
-                continue
-            sources.append({
-                "url": url,
-                "title": _search_source_title(item.get("title") or item.get("name"), url),
-                "type": "web",
-            })
-    x_results = _app_chat_search_container(event, "xSearchResults").get("results")
-    if isinstance(x_results, list):
-        for item in x_results:
-            if not isinstance(item, dict):
-                continue
-            username = str(item.get("username") or item.get("screenName") or "").strip().lstrip("@")
-            post_id = str(item.get("postId") or item.get("id") or "").strip()
-            if not username or not post_id:
-                continue
-            sources.append({
-                "url": f"https://x.com/{username}/status/{post_id}",
-                "title": _search_source_title(item.get("text") or item.get("fullText") or item.get("content"), f"@{username}"),
-                "type": "x_post",
-            })
+    for item in _app_chat_search_results(event, "webSearchResults", ("webResults", "sources", "citations")):
+        url = str(item.get("url") or item.get("link") or item.get("sourceUrl") or "").strip()
+        if not url:
+            continue
+        sources.append({
+            "url": url,
+            "title": _search_source_title(item.get("title") or item.get("name") or item.get("text"), url),
+            "type": "web",
+        })
+    for item in _app_chat_search_results(event, "xSearchResults", ("xResults", "xPostResults")):
+        username = str(item.get("username") or item.get("screenName") or item.get("userName") or "").strip().lstrip("@")
+        post_id = str(item.get("postId") or item.get("id") or item.get("restId") or "").strip()
+        url = str(item.get("url") or item.get("link") or "").strip()
+        if not url and username and post_id:
+            url = f"https://x.com/{username}/status/{post_id}"
+        if not url:
+            continue
+        sources.append({
+            "url": url,
+            "title": _search_source_title(item.get("text") or item.get("fullText") or item.get("content") or item.get("title"), f"@{username}" if username else url),
+            "type": "x_post",
+        })
     return sources
 
 
@@ -1082,7 +1247,7 @@ def collect_app_chat_response(events: Iterable[dict[str, Any]]) -> dict[str, Any
 def classify_app_chat_upstream_error(upstream_status: int, access_token: str | None = None) -> GrokConsoleError:
     status = int(upstream_status)
     feedback_status = _app_chat_feedback_status(status)
-    if access_token and feedback_status:
+    if access_token and feedback_status and status != 403:
         from services.account_service import account_service
 
         account_service.update_account(access_token, {"status": feedback_status})
@@ -1094,6 +1259,8 @@ def classify_app_chat_upstream_error(upstream_status: int, access_token: str | N
             403,
             status,
         )
+    if status == 402:
+        return GrokConsoleError("Grok app-chat rate limit exceeded (HTTP 402)", 429, status)
     if status == 429:
         return GrokConsoleError("Grok app-chat rate limited (HTTP 429)", 429, status)
     if status in {408, 504}:
@@ -1227,21 +1394,23 @@ def _extract_grok_model_response(event: dict[str, Any]) -> dict[str, Any]:
 
 def extract_grok_image_edit_final_urls(event: dict[str, Any], user_id: str = "") -> dict[int, str]:
     urls: dict[int, str] = {}
-    stream = _extract_grok_streaming_image_response(event)
-    if stream:
+    for stream in _app_chat_image_chunk_values(event):
         try:
             progress = int(stream.get("progress") or 0)
         except (TypeError, ValueError):
             progress = 0
-        moderated = stream.get("moderated") is True or stream.get("isModerated") is True
-        if progress >= 100 and not moderated:
-            raw_url = stream.get("imageUrl")
-            asset_id = stream.get("assetId")
-            resolved = resolve_grok_asset_reference(
-                str(asset_id or "").strip(),
-                "",
-                user_id,
-            ) or _resolve_grok_asset_url(str(raw_url or ""))
+        if progress >= 100 and not _is_moderated_or_blocked(stream):
+            resolved = ""
+            for key in ("imageUrl", "url", "mediaUrl", "generatedImageUrl", "assetUrl"):
+                resolved = _resolve_app_chat_image_url(stream.get(key))
+                if resolved:
+                    break
+            if not resolved:
+                resolved = resolve_grok_asset_reference(
+                    str(stream.get("assetId") or stream.get("fileId") or "").strip(),
+                    "",
+                    user_id or str(stream.get("userId") or ""),
+                )
             if resolved:
                 try:
                     index = int(stream.get("imageIndex") or 0)
@@ -1317,7 +1486,7 @@ class GrokAppChatClient:
         except requests.exceptions.RequestException as exc:
             raise GrokConsoleError("Grok app-chat rate-limit validation failed", 502) from exc
         if response.status_code >= 400:
-            raise classify_app_chat_upstream_error(int(response.status_code))
+            raise classify_app_chat_upstream_error(int(response.status_code), self.access_token)
         try:
             data = response.json()
         except Exception as exc:
@@ -1333,8 +1502,8 @@ class GrokAppChatClient:
             clearance = FlareSolverrClearanceProvider().solve()
             if clearance is None:
                 return False
-            current_profiles = config.network_profiles
-            app_profile = dict(current_profiles.get("grok_app_chat") or {})
+            current_profiles = cast(dict[str, Any], config.network_profiles)
+            app_profile = dict(cast(dict[str, Any], current_profiles.get("grok_app_chat") or {}))
             solved_impersonate = infer_chromium_impersonate(clearance.user_agent)
             app_profile.update({
                 "browser": solved_impersonate or app_profile.get("browser") or app_profile.get("impersonate"),
@@ -1349,13 +1518,18 @@ class GrokAppChatClient:
             self.network_profile = _grok_app_chat_profile()
             headers = app_chat_headers(self.access_token, self.account)
             session_headers = getattr(self.session, "headers", None)
-            if hasattr(session_headers, "update"):
+            if session_headers is not None and hasattr(session_headers, "update"):
                 session_headers.update(headers)
             return True
 
     def _try_browser_bridge(self, payload: dict[str, Any]) -> list[str] | None:
         configured_bridge = bool(config.browser_bridge_url)
-        bridge_url = _detect_bridge_url()
+        try:
+            bridge_url = _detect_bridge_url()
+        except GrokConsoleError:
+            if configured_bridge:
+                raise
+            return None
         if not bridge_url:
             return None
         sso = _extract_raw_sso(self.access_token)
@@ -1393,7 +1567,7 @@ class GrokAppChatClient:
             logger.warning({"event": "browser_bridge_unavailable"})
             if configured_bridge:
                 raise GrokConsoleError(
-                    f"Grok app-chat Browser Bridge unavailable: {exc}",
+                    "Grok app-chat Browser Bridge unavailable",
                     503,
                     None,
                     code="grok_browser_bridge_unavailable",
@@ -1596,6 +1770,9 @@ def app_chat_image_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n
                 image_url = extract_app_chat_image_url(event)
                 if image_url:
                     image_items.append({"url": image_url, "revised_prompt": prompt})
+                moderation_message = app_chat_moderation_message(event)
+                if moderation_message:
+                    raise ImageGenerationError(moderation_message, status_code=400, error_type="invalid_request_error", code="content_policy_violation")
                 if is_app_chat_final_event(event):
                     break
     except GrokConsoleError as exc:
@@ -1653,6 +1830,9 @@ def app_chat_image_edit_outputs(
                         upstream_event_type="app_chat.image_edit_progress",
                     )
                 final_urls.update(extract_grok_image_edit_final_urls(event, user_id))
+                moderation_message = app_chat_moderation_message(event)
+                if moderation_message:
+                    raise ImageGenerationError(moderation_message, status_code=400, error_type="invalid_request_error", code="content_policy_violation")
                 if is_app_chat_final_event(event):
                     break
     except GrokConsoleError as exc:

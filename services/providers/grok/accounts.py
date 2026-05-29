@@ -8,11 +8,44 @@ from services.providers.base import ModelSpec
 TIER_ALIASES = {
     "free": "basic",
     "basic": "basic",
+    "fast": "basic",
     "premium": "super",
     "super": "super",
+    "supergrok": "super",
+    "super-grok": "super",
+    "premium-plus": "super",
+    "premium+": "super",
     "heavy": "heavy",
+    "max": "heavy",
 }
-UNAVAILABLE_STATUSES = {"禁用", "异常", "限流", "disabled", "abnormal", "limited"}
+CAPABILITY_ALIASES = {
+    "": "",
+    "app-chat": "chat",
+    "app_chat": "chat",
+    "text": "chat",
+    "text-chat": "chat",
+    "image-generation": "image",
+    "image-gen": "image",
+    "imagine": "image",
+    "image-editing": "image_edit",
+    "image-edit": "image_edit",
+    "edit-image": "image_edit",
+}
+STATUS_ALIASES = {
+    "disabled": "禁用",
+    "disable": "禁用",
+    "abnormal": "异常",
+    "auth_failed": "异常",
+    "auth-failed": "异常",
+    "unauthorized": "异常",
+    "forbidden": "异常",
+    "limited": "限流",
+    "rate_limited": "限流",
+    "rate-limited": "限流",
+    "quota_exhausted": "限流",
+    "quota-exhausted": "限流",
+}
+UNAVAILABLE_STATUSES = {"禁用", "异常", "限流", "disabled", "abnormal", "limited", "rate_limited", "rate-limited"}
 CONSOLE_QUOTA_TOTAL = 30
 CONSOLE_QUOTA_WINDOW_SECONDS = 900
 EXPORT_FILENAME = "webchat2api_grok.txt"
@@ -28,6 +61,20 @@ def normalize_tier(value: Any) -> str:
     return TIER_ALIASES.get(str(value or "").strip().lower().replace("_", "-"), "")
 
 
+def normalize_capability(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace(" ", "-")
+    if not normalized:
+        return ""
+    return CAPABILITY_ALIASES.get(normalized, normalized.replace("-", "_"))
+
+
+def normalize_status(value: Any) -> Any:
+    text = clean_string(value)
+    if not text:
+        return value
+    return STATUS_ALIASES.get(text.lower().replace(" ", "-"), text)
+
+
 def normalize_string_list(value: Any) -> list[str]:
     if isinstance(value, str):
         raw_items = value.replace(";", ",").split(",")
@@ -35,15 +82,39 @@ def normalize_string_list(value: Any) -> list[str]:
         raw_items = list(value)
     else:
         return []
-    return [item for item in (clean_string(raw).lower() for raw in raw_items) if item]
+    return [item for item in (normalize_capability(raw) for raw in raw_items) if item]
 
 
 def normalize_access_token(item: dict[str, Any]) -> str:
-    token = clean_string(item.get("access_token") or item.get("accessToken") or "")
+    token = clean_string(item.get("access_token") or item.get("accessToken") or item.get("sso") or item.get("sso-rw") or "")
     simple_sso = re.fullmatch(r"sso\s*=\s*(.+)", token, flags=re.IGNORECASE)
     if simple_sso and ";" not in token:
         return simple_sso.group(1).strip()
     return token
+
+
+def _cookie_items(cookie_header: Any) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
+    for fragment in str(cookie_header or "").split(";"):
+        name, separator, value = fragment.strip().partition("=")
+        clean_name = " ".join(name.strip().split())
+        clean_value = " ".join(value.strip().split())
+        if separator and clean_name:
+            items.append((clean_name, clean_value))
+    return items
+
+
+def _normalize_cookie_header(value: Any) -> str:
+    cookies: list[tuple[str, str]] = []
+    seen: dict[str, int] = {}
+    for name, cookie_value in _cookie_items(value):
+        normalized_name = name.lower()
+        if normalized_name in seen:
+            cookies[seen[normalized_name]] = (normalized_name, cookie_value)
+            continue
+        seen[normalized_name] = len(cookies)
+        cookies.append((normalized_name, cookie_value))
+    return "; ".join(f"{name}={cookie_value}" for name, cookie_value in cookies)
 
 
 def normalize_console_quota(value: Any) -> dict[str, Any]:
@@ -89,12 +160,18 @@ def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
     account["tier"] = normalized_tier
     if "model_tier" in account:
         account["model_tier"] = normalized_tier
+    account["status"] = normalize_status(account.get("status")) or account.get("status")
     account["app_chat"] = bool(account.get("app_chat"))
     account["quota_console"] = normalize_console_quota(account.get("quota_console"))
     account["capabilities"] = normalize_string_list(account.get("capabilities"))
-    cf_cookies = account.get("cf_cookies")
-    account["cf_cookies"] = cf_cookies if isinstance(cf_cookies, dict) else clean_string(cf_cookies)
-    account["user_agent"] = clean_string(account.get("user_agent")) or None
+    cf_cookies = account.get("cf_cookies") or account.get("cfCookies") or account.get("cloudflare_cookies")
+    account["cf_cookies"] = cf_cookies if isinstance(cf_cookies, dict) else _normalize_cookie_header(cf_cookies)
+    account["cf_clearance"] = clean_string(account.get("cf_clearance") or account.get("cfClearance")) or None
+    account["user_agent"] = clean_string(account.get("user_agent") or account.get("userAgent") or account.get("user-agent")) or None
+    account["statsig_id"] = clean_string(account.get("statsig_id") or account.get("statsigId") or account.get("x-statsig-id")) or None
+    account["sec_ch_ua"] = clean_string(account.get("sec_ch_ua") or account.get("sec-ch-ua")) or None
+    account["sec_ch_ua_mobile"] = clean_string(account.get("sec_ch_ua_mobile") or account.get("sec-ch-ua-mobile")) or None
+    account["sec_ch_ua_platform"] = clean_string(account.get("sec_ch_ua_platform") or account.get("sec-ch-ua-platform")) or None
     return account
 
 
@@ -141,7 +218,7 @@ def account_has_capability(account: dict[str, Any], spec: ModelSpec) -> bool:
     capabilities = set(account.get("capabilities") or [])
     if not capabilities:
         return True
-    requested = {str(spec.capability or "chat").lower()}
+    requested = {normalize_capability(spec.capability or "chat")}
     if spec.mode_id:
         requested.add(str(spec.mode_id).lower())
     if spec.model_tier:
