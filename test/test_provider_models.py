@@ -3,21 +3,31 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from typing import cast
 from unittest import mock
 
 if "curl_cffi" not in sys.modules:
     curl_cffi = types.ModuleType("curl_cffi")
-    requests_module = types.SimpleNamespace(
-        Session=object,
-        Response=object,
-        exceptions=types.SimpleNamespace(RequestException=Exception),
-    )
-    curl_cffi.requests = requests_module
+    requests_module = types.ModuleType("curl_cffi.requests")
+    setattr(requests_module, "Session", object)
+    setattr(requests_module, "Response", object)
+    setattr(requests_module, "exceptions", types.SimpleNamespace(RequestException=Exception))
+    setattr(curl_cffi, "requests", requests_module)
     sys.modules["curl_cffi"] = curl_cffi
     sys.modules["curl_cffi.requests"] = requests_module
 
+from test.optional_stubs import install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_tiktoken_stub
+
+install_fastapi_stubs()
+install_pil_stub()
+install_pybase64_stub()
+install_tiktoken_stub()
+
 from services.models import resolve_model
+from services.protocol.conversation import ConversationRequest, ImageOutput, conversation_events
+from services.openai_backend_api import OpenAIBackendAPI
 from services.protocol import openai_v1_models
+from services.providers.gpt import images as gpt_images
 
 
 class FakeBackend:
@@ -77,6 +87,9 @@ class ProviderModelListTests(unittest.TestCase):
         self.assertEqual(models["gemini-2.5-pro"]["provider"], "gemini")
         self.assertEqual(models["gemini-pro"]["owned_by"], "google")
         self.assertEqual(models["grok-4.20-multi-agent"]["owned_by"], "xai")
+        for model_id in ["gpt-5-1", "gpt-5-2", "gpt-5-3", "gpt-5-3-mini", "gpt-5-mini"]:
+            self.assertEqual(models[model_id]["provider"], "gpt")
+            self.assertEqual(models[model_id]["owned_by"], "chatgpt")
 
     def test_list_models_tries_gpt_account_token_before_anonymous(self) -> None:
         account_service = FakeAccountService("stored-token")
@@ -133,10 +146,50 @@ class ProviderModelListTests(unittest.TestCase):
         self.assertEqual(models["gpt-image-2"]["capability"], "image")
         self.assertEqual(models["codex-gpt-image-2"]["provider"], "gpt")
         self.assertEqual(models["codex-gpt-image-2"]["capability"], "image")
+        for model_id, tier in [
+            ("plus-codex-gpt-image-2", "plus"),
+            ("team-codex-gpt-image-2", "team"),
+            ("pro-codex-gpt-image-2", "pro"),
+        ]:
+            self.assertEqual(models[model_id]["provider"], "gpt")
+            self.assertEqual(models[model_id]["capability"], "image")
+            spec = resolve_model(model_id)
+            self.assertEqual(spec.capability, "image")
+            self.assertEqual(spec.upstream_model, "codex-gpt-image-2")
+            self.assertEqual(spec.model_tier, tier)
         self.assertEqual(resolve_model("gpt-image-2").capability, "image")
         self.assertEqual(resolve_model("codex-gpt-image-2").capability, "image")
         self.assertEqual(models["grok-4.3"]["provider"], "grok")
         self.assertEqual(models["gemini-pro"]["provider"], "gemini")
+
+    def test_gpt_image_alias_routes_to_upstream_model_and_preserves_response_model(self) -> None:
+        seen_models: list[str] = []
+
+        def fake_stream(request: ConversationRequest):
+            seen_models.append(request.model)
+            yield ImageOutput(kind="result", model=request.model, index=1, total=1, data=[])
+
+        request = ConversationRequest(prompt="draw", model="team-codex-gpt-image-2")
+        spec = resolve_model("team-codex-gpt-image-2")
+        with mock.patch.object(gpt_images, "stream_image_outputs_with_pool", fake_stream):
+            outputs = list(gpt_images.generation_outputs(request, spec))
+
+        self.assertEqual(seen_models, ["codex-gpt-image-2"])
+        self.assertEqual(outputs[0].model, "team-codex-gpt-image-2")
+
+    def test_codex_upstream_model_remains_image_mode_for_conversation_events(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        class FakeBackend:
+            def stream_conversation(self, **kwargs):
+                calls.append(kwargs)
+                return iter(())
+
+        list(conversation_events(cast(OpenAIBackendAPI, FakeBackend()), prompt="draw", model="codex-gpt-image-2", images=["image-data"]))
+
+        self.assertEqual(calls[0]["model"], "codex-gpt-image-2")
+        self.assertEqual(calls[0]["images"], ["image-data"])
+        self.assertEqual(calls[0]["system_hints"], ["picture_v2"])
 
     def test_list_models_includes_new_grok_aliases_and_image_models(self) -> None:
         with mock.patch.dict(sys.modules, {"services.openai_backend_api": None}):

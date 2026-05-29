@@ -6,9 +6,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from services.models import GPT_PROVIDER, normalize_provider
+from services.providers.base import ModelSpec
 
 EXPORT_TIMEZONE = timezone(timedelta(hours=8))
-UNAVAILABLE_IMAGE_STATUSES = {"禁用", "限流", "异常"}
+UNAVAILABLE_STATUSES = {"禁用", "限流", "异常", "disabled", "limited", "abnormal"}
+UNAVAILABLE_IMAGE_STATUSES = UNAVAILABLE_STATUSES
 EXPORT_FILENAME = "webchat2api-gpt.txt"
 
 
@@ -22,6 +24,42 @@ def normalize_access_token(item: dict[str, Any]) -> str:
     return clean_string(item.get("access_token") or item.get("accessToken") or "")
 
 
+def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
+    return account
+
+
+def normalize_console_quota(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def reset_console_quota_if_ready(account: dict[str, Any], current_time: float) -> dict[str, Any]:
+    return account
+
+
+def is_console_account_available(account: dict[str, Any], current_time: float) -> bool:
+    return False
+
+
+def requested_tiers(spec: ModelSpec) -> list[str]:
+    return []
+
+
+def account_has_capability(account: dict[str, Any], spec: ModelSpec) -> bool:
+    return spec.provider == GPT_PROVIDER and spec.capability in {"chat", "image", "image_edit"}
+
+
+def tier_matches(account_tier: str, requested_tier: str) -> bool:
+    return False
+
+
+def normalize_tier(value: Any) -> str:
+    return ""
+
+
+def is_auth_failure_payload(payload: Any) -> bool:
+    return False
+
+
 def is_account(account: dict[str, Any]) -> bool:
     return normalize_provider(account.get("provider")) == GPT_PROVIDER
 
@@ -31,7 +69,7 @@ def is_image_account_available(account: dict[str, Any]) -> bool:
         return False
     if not is_account(account):
         return False
-    if account.get("status") in UNAVAILABLE_IMAGE_STATUSES:
+    if account.get("status") in UNAVAILABLE_STATUSES:
         return False
     if bool(account.get("image_quota_unknown")):
         return True
