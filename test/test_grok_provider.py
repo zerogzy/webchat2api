@@ -24,6 +24,7 @@ from services.network import flaresolverr
 from services.protocol import openai_v1_chat_complete, openai_v1_image_edit, openai_v1_response
 from services.protocol.conversation import ImageGenerationError, ImageOutput
 from services.providers import grok
+from services.providers.grok import images as grok_images
 
 
 def _chat_chunks(chunks: object) -> list[Mapping[str, Any]]:
@@ -821,7 +822,7 @@ class GrokProviderTests(unittest.TestCase):
         outputs = [ImageOutput(kind="result", model="grok-imagine-image-lite", index=1, total=1, data=[{"url": "https://assets.grok.com/cat.png"}])]
         result = {"created": 1, "data": [{"b64_json": "abc", "url": "https://assets.grok.com/cat.png"}]}
         with (
-            mock.patch.object(grok, "app_chat_image_outputs", return_value=iter(outputs)) as patched,
+            mock.patch.object(grok_images, "generation_outputs", return_value=iter(outputs)) as patched,
             mock.patch.object(openai_v1_chat_complete, "collect_image_outputs", return_value=result),
         ):
             response = openai_v1_chat_complete.handle(body)
@@ -839,7 +840,7 @@ class GrokProviderTests(unittest.TestCase):
             "response_format": "url",
         }
         outputs = [ImageOutput(kind="result", model="grok-imagine-image-edit", index=1, total=1, data=[{"url": "https://assets.grok.com/edit.png"}])]
-        with mock.patch.object(grok, "app_chat_image_edit_outputs", return_value=iter(outputs)) as patched:
+        with mock.patch.object(grok_images, "edit_outputs", return_value=iter(outputs)) as patched:
             response = openai_v1_image_edit.handle(body)
 
         patched.assert_called_once()

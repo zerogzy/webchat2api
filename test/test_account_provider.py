@@ -120,7 +120,7 @@ def patched_grok_validation(return_value: object = None, side_effect: Exception 
 
 from services.account_service import AccountService
 import services.account_service as account_service_module
-from services.models import GROK_PROVIDER, GPT_PROVIDER, resolve_model
+from services.models import GEMINI_PROVIDER, GROK_PROVIDER, GPT_PROVIDER, resolve_model
 
 account_service_module.log_service.add = lambda *args, **kwargs: None
 
@@ -166,6 +166,45 @@ class AccountProviderTests(unittest.TestCase):
 
         self.assertEqual(service.get_text_access_token(provider=GPT_PROVIDER), "gpt-token")
         self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
+
+    def test_selects_gemini_text_token_by_provider(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "gpt-token", "provider": "gpt"},
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": "gemini"},
+        ])
+
+        self.assertEqual(service.get_text_access_token(provider=GEMINI_PROVIDER), "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
+        [gemini_account] = [item for item in service.list_accounts() if item["provider"] == GEMINI_PROVIDER]
+        self.assertEqual(gemini_account["cookies"], {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts"})
+
+    def test_gemini_provider_alias_normalizes_to_gemini(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts", "provider": "google"},
+        ])
+
+        [account] = service.list_accounts()
+        self.assertEqual(account["provider"], GEMINI_PROVIDER)
+        self.assertEqual(service.get_text_access_token(provider="gemini"), "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
+
+    def test_unknown_account_provider_is_rejected(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"access_token": "mystery-token", "provider": "mystery"},
+        ])
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(service.list_accounts(), [])
+
+    def test_unknown_requested_text_provider_does_not_select_gpt_token(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "gpt-token", "provider": "gpt"},
+        ])
+
+        with self.assertRaises(ValueError):
+            service.get_text_access_token(provider="mystery")
 
     def test_grok_account_normalizes_simple_sso_cookie_token(self) -> None:
         service = AccountService(MemoryStorage())

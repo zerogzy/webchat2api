@@ -78,7 +78,7 @@ if "pydantic" not in sys.modules:
 
 from services.account_service import AccountService
 import services.account_service as account_service_module
-from services.models import GROK_PROVIDER, GPT_PROVIDER
+from services.models import GEMINI_PROVIDER, GROK_PROVIDER, GPT_PROVIDER
 
 account_service_module.log_service.add = lambda *args, **kwargs: None
 
@@ -179,16 +179,19 @@ class AccountExportTests(unittest.TestCase):
                 [
                     {"access_token": "gpt-token", "provider": GPT_PROVIDER, "id_token": "gpt-id", "refresh_token": "gpt-rt"},
                     {"access_token": "grok-token", "provider": GROK_PROVIDER, "id_token": "grok-id", "refresh_token": "grok-rt"},
+                    {"access_token": "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts", "provider": GEMINI_PROVIDER},
                 ]
             )
         )
 
         gpt_items = service.build_export_items(provider=GPT_PROVIDER)
         grok_items = service.build_export_items(provider=GROK_PROVIDER)
+        gemini_items = service.build_export_items(provider=GEMINI_PROVIDER)
         intersected_items = service.build_export_items(["gpt-token", "grok-token"], provider=GROK_PROVIDER)
 
         self.assertEqual([item["access_token"] for item in gpt_items], ["gpt-token"])
         self.assertEqual([item["access_token"] for item in grok_items], ["grok-token"])
+        self.assertEqual([item["access_token"] for item in gemini_items], ["__Secure-1PSID=psid; __Secure-1PSIDTS=psidts"])
         self.assertEqual([item["access_token"] for item in intersected_items], ["grok-token"])
         self.assertEqual(intersected_items[0]["id_token"], "grok-id")
         self.assertEqual(intersected_items[0]["refresh_token"], "grok-rt")
@@ -225,6 +228,7 @@ class AccountExportTests(unittest.TestCase):
         cpa_stub.cpa_import_service = object()
         cpa_stub.list_remote_files = lambda *args, **kwargs: []
         remote_account_stub = types.ModuleType("services.remote_account_service")
+        remote_account_stub.REMOTE_ACCOUNT_SYNC_FAILED = "failed"
         remote_account_stub.remote_account_config = object()
         remote_account_stub.remote_account_import_service = object()
         sub2api_stub = types.ModuleType("services.sub2api_service")
@@ -247,6 +251,9 @@ class AccountExportTests(unittest.TestCase):
 
         self.assertEqual(accounts_api._export_filename("gpt"), "webchat2api-gpt.txt")
         self.assertEqual(accounts_api._export_filename("grok"), "webchat2api_grok.txt")
+        self.assertEqual(accounts_api._export_filename("gemini"), "webchat2api_gemini.txt")
+        with self.assertRaises(ValueError):
+            accounts_api._account_strategy("mystery")
 
     def test_delete_limited_accounts_removes_exact_limited_status(self) -> None:
         service = AccountService(

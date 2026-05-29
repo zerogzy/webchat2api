@@ -5,19 +5,61 @@ import importlib.util
 import json
 import time
 import unittest
-from typing import Any
+from unittest import mock
+from typing import Any, cast
 
 requests: Any = None
 if importlib.util.find_spec("requests") is not None:
     requests = importlib.import_module("requests")
 
+from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_tiktoken_stub
 from test.utils import save_image
+
+install_curl_cffi_stub()
+install_fastapi_stubs()
+install_pil_stub()
+install_pybase64_stub()
+install_tiktoken_stub()
+
+from services.providers.base import ModelSpec
+from services.providers.gemini.client import GeminiCompletion
+from services.protocol import openai_v1_response
 
 AUTH_KEY = "webchat2api"
 BASE_URL = "http://localhost:83"
 TEXT_MODEL = "auto"
 IMAGE_MODEL = "gpt-image-2"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
+
+
+class ResponseRoutingUnitTests(unittest.TestCase):
+    def test_gemini_text_response_dispatches_to_gemini_adapter(self) -> None:
+        calls: list[tuple[dict[str, Any], ModelSpec, list[dict[str, Any]]]] = []
+
+        def fake_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> GeminiCompletion:
+            calls.append((body, spec, messages))
+            return GeminiCompletion("Gemini routed text")
+
+        with mock.patch.object(openai_v1_response.gemini_chat, "chat_completion", fake_chat_completion):
+            result = cast(dict[str, Any], openai_v1_response.handle({"model": "gemini-2.5-pro", "input": "hello"}))
+
+        self.assertEqual(result["object"], "response")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["model"], "gemini-2.5-pro")
+        self.assertEqual(result["output"][0]["content"][0]["text"], "Gemini routed text")
+        self.assertEqual(calls[0][1].provider, "gemini")
+        self.assertEqual(calls[0][2], [{"role": "user", "content": "hello"}])
+
+    def test_gemini_text_response_stream_preserves_response_events(self) -> None:
+        with mock.patch.object(openai_v1_response.gemini_chat, "chat_completion", return_value=GeminiCompletion("stream text")):
+            events = list(cast(Any, openai_v1_response.handle({"model": "gemini-2.5-flash", "input": "hello", "stream": True})))
+
+        event_types = [event.get("type") for event in events]
+        self.assertEqual(event_types[0], "response.created")
+        self.assertIn("response.output_item.added", event_types)
+        self.assertIn("response.output_text.delta", event_types)
+        self.assertEqual(event_types[-1], "response.completed")
+        self.assertEqual(events[-1]["response"]["output"][0]["content"][0]["text"], "stream text")
 
 
 @unittest.skipIf(requests is None, "requests is not installed")
