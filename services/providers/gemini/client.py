@@ -15,6 +15,9 @@ from services.network.client import create_session
 GEMINI_WEB_BASE_URL = "https://gemini.google.com"
 GEMINI_WEB_GENERATE_URL = f"{GEMINI_WEB_BASE_URL}/app/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
 GEMINI_REQUIRED_COOKIES = ("__Secure-1PSID", "__Secure-1PSIDTS")
+GEMINI_SENSITIVE_COOKIE_NAMES = ("__Secure-1PSID", "__Secure-1PSIDTS", "SNlM0e")
+GEMINI_NON_COOKIE_FIELDS = ("SNlM0e", "session_token", "at")
+GEMINI_WEB_RPC_ID = "assistant.lamda.BardFrontendService.StreamGenerate"
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,82 @@ def parse_cookie_header(cookie_header: str) -> dict[str, str]:
     return cookies
 
 
+def cookie_header_from_mapping(cookies: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for name, value in cookies.items():
+        name_text = str(name or "").strip()
+        value_text = str(value or "").strip()
+        if name_text and value_text:
+            parts.append(f"{name_text}={value_text}")
+    return "; ".join(parts)
+
+
+def sanitize_cookie_header(cookie_header: str) -> str:
+    cookies = parse_cookie_header(cookie_header)
+    for name in list(cookies):
+        if name in GEMINI_SENSITIVE_COOKIE_NAMES:
+            cookies[name] = "[redacted]"
+    return cookie_header_from_mapping(cookies)
+
+
+def session_token_from_response(raw_text: str) -> str:
+    for pattern in (r'"SNlM0e"\s*:\s*"([^"]+)"', r'\[\s*"SNlM0e"\s*,\s*"([^"]+)"\s*\]'):
+        match = re.search(pattern, raw_text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def classify_upstream_error(status_code: int, raw_text: str = "") -> GeminiWebError:
+    text = raw_text.lower()
+    if status_code in {401, 403}:
+        message = "Gemini upstream authentication failed"
+        if "snlm0e" in text or "secure-1psidts" in text:
+            message = "Gemini upstream authentication failed; refresh Gemini session cookies"
+        return GeminiWebError(message, status_code=401, upstream_status=status_code, code="gemini_auth_failed")
+    if status_code == 429:
+        return GeminiWebError("Gemini upstream rate limit exceeded", status_code=429, upstream_status=status_code, code="gemini_rate_limited")
+    if status_code >= 500:
+        return GeminiWebError("Gemini upstream service unavailable", status_code=502, upstream_status=status_code, code="gemini_upstream_unavailable")
+    return GeminiWebError("Gemini upstream request failed", status_code=502, upstream_status=status_code, code="gemini_upstream_error")
+
+
+def build_stream_generate_form_payload(prompt: str, model: str, session_token: str = "") -> dict[str, str]:
+    inner = [[prompt], None, None, model]
+    outer = [None, json.dumps(inner, ensure_ascii=False, separators=(",", ":"))]
+    data = {"f.req": json.dumps(outer, ensure_ascii=False, separators=(",", ":"))}
+    if session_token:
+        data["at"] = session_token
+    return data
+
+
+def stream_generate_url(session_token: str = "") -> str:
+    if not session_token:
+        return GEMINI_WEB_GENERATE_URL
+    from urllib.parse import quote
+
+    return f"{GEMINI_WEB_GENERATE_URL}?at={quote(session_token, safe='')}"
+
+
+def account_session_token(account: dict[str, Any]) -> str:
+    for key in ("session_token", "SNlM0e", "at"):
+        value = str(account.get(key) or "").strip()
+        if value:
+            return value
+    direct = parse_cookie_header(str(account.get("access_token") or ""))
+    for key in ("SNlM0e", "at"):
+        value = str(direct.get(key) or "").strip()
+        if value:
+            return value
+    stored_cookies = account.get("cookies")
+    if isinstance(stored_cookies, dict):
+        for key in ("SNlM0e", "at"):
+            value = str(stored_cookies.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
 def account_cookie_header(account: dict[str, Any]) -> str:
     direct = str(account.get("access_token") or "").strip()
     cookies = parse_cookie_header(direct)
@@ -65,6 +144,8 @@ def account_cookie_header(account: dict[str, Any]) -> str:
         value = str(account.get(name) or "").strip()
         if value:
             cookies[name] = value
+    for name in GEMINI_NON_COOKIE_FIELDS:
+        cookies.pop(name, None)
     missing = [name for name in GEMINI_REQUIRED_COOKIES if not cookies.get(name)]
     if missing:
         raise HTTPException(
@@ -143,7 +224,7 @@ def _parse_nested_json(value: object) -> object:
 def _wrb_payload_from_entry(entry: object) -> object | None:
     if not isinstance(entry, list) or len(entry) < 3:
         return None
-    if entry[0] != "wrb.fr" or entry[1] != "assistant.lamda.BardFrontendService.StreamGenerate":
+    if entry[0] != "wrb.fr" or entry[1] != GEMINI_WEB_RPC_ID:
         return None
     payload = entry[2]
     if isinstance(payload, str):
@@ -167,6 +248,8 @@ def _is_incidental_stream_string(value: str) -> bool:
     if not text:
         return True
     if lowered.startswith(("rc_", "wrb.fr", "assistant.lamda.")):
+        return True
+    if lowered in {"snlm0e", "at"}:
         return True
     if lowered.startswith("gemini-"):
         return True
@@ -294,17 +377,19 @@ class GeminiWebClient:
             "user-agent": self.user_agent,
             "origin": GEMINI_WEB_BASE_URL,
             "referer": f"{GEMINI_WEB_BASE_URL}/app",
+            "x-same-domain": "1",
         }
+        session_token = str(payload.get("session_token") or "").strip()
         response = self.session.post(
-            GEMINI_WEB_GENERATE_URL,
+            stream_generate_url(session_token),
             headers=headers,
-            data={"f.req": json.dumps([[payload["prompt"]], None, [payload["model"]]])},
+            data=build_stream_generate_form_payload(payload["prompt"], payload["model"], session_token),
             timeout=120,
         )
         status_code = int(getattr(response, "status_code", getattr(response, "status", 0)) or 0)
-        if status_code >= 400:
-            raise GeminiWebError("Gemini upstream request failed", upstream_status=status_code)
         raw_text = str(getattr(response, "text", "") or "")
+        if status_code >= 400:
+            raise classify_upstream_error(status_code, raw_text)
         return parse_web_response_text(raw_text)
 
 
@@ -325,6 +410,9 @@ def chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[s
     account = account_service.get_account(access_token) or {"access_token": access_token, "provider": "gemini"}
     cookie_header = account_cookie_header(account)
     payload = build_web_payload(spec, body, messages)
+    session_token = account_session_token(account)
+    if session_token:
+        payload["session_token"] = session_token
     try:
         with GeminiWebClient(cookie_header, account.get("user_agent")) as client:
             response_payload = client.generate(payload)
