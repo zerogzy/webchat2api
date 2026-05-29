@@ -9,6 +9,7 @@ export type AccountImportMethod = "token" | "session" | "cpa" | "remote-cpa" | "
 export type ImportProviderOption = {
   label: string;
   value: ProviderId;
+  description: string;
 };
 
 export type AccountImportCopy = {
@@ -30,6 +31,29 @@ export type AccountImportMethodConfig = {
   route?: string;
 };
 
+export type AccountImportFlowCopy = {
+  providerDescription: string;
+  methodIntro: string;
+  emptyMethodsLabel: string;
+  cpaHelp: string;
+  remoteCpaDescription: string;
+  sub2apiDescription: string;
+};
+
+export type ProviderTrialMetadata = {
+  enabled: boolean;
+  textFallbackModels: string[];
+  textFallbackMode: "always" | "without-metadata";
+  imageFallbackModels: string[];
+  imageUnsupportedCopy: string;
+  imageNoMetadataCopy?: string;
+  modelIdPrefixes: string[];
+  textModelPrefixes: string[];
+  imageModelKeywords: string[];
+  imageCapabilities: string[];
+  textCapabilities: string[];
+};
+
 export type AccountProviderDefinition = {
   id: ProviderId;
   label: string;
@@ -44,6 +68,7 @@ export type AccountProviderDefinition = {
     sessionUrl?: string;
   };
   importMethods: AccountImportMethod[];
+  importFlowCopy: AccountImportFlowCopy;
   metadataLabel: string;
   accountInfoHelp: string;
   tokenHiddenLabel: string;
@@ -61,6 +86,7 @@ export type AccountProviderDefinition = {
     selectedButtonLabel?: string;
     rowTitle: string;
   };
+  trial: ProviderTrialMetadata;
 };
 
 export type AnyAccountProvider = AccountProvider | ProviderId | string;

@@ -292,38 +292,47 @@ export async function login(authKey: string) {
   });
 }
 
-export async function fetchAccounts() {
-  return httpRequest<AccountListResponse>("/api/accounts");
+export async function fetchAccounts(provider?: AccountExportProvider) {
+  const query = provider ? `?provider=${encodeURIComponent(provider)}` : "";
+  return httpRequest<AccountListResponse>(`/api/accounts${query}`);
 }
 
-export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {
+export async function createAccounts(
+  tokens: string[],
+  accounts: AccountImportPayload[] = [],
+  provider?: AccountExportProvider,
+) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",
     body: {
       tokens,
+      ...(provider ? { provider } : {}),
       ...(accounts.length > 0 ? { accounts } : {}),
     },
   });
 }
 
-export async function deleteAccounts(tokens: string[]) {
+export async function deleteAccounts(tokens: string[], provider?: AccountExportProvider) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "DELETE",
-    body: { tokens },
+    body: { tokens, ...(provider ? { provider } : {}) },
   });
 }
 
-export async function deleteLimitedAccounts() {
+export async function deleteLimitedAccounts(provider?: AccountExportProvider) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "DELETE",
-    body: { mode: "limited" },
+    body: { mode: "limited", ...(provider ? { provider } : {}) },
   });
 }
 
-export async function refreshAccounts(accessTokens: string[]) {
+export async function refreshAccounts(accessTokens: string[], provider?: AccountExportProvider) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
-    body: { access_tokens: accessTokens },
+    body: {
+      access_tokens: accessTokens,
+      ...(provider ? { provider } : {}),
+    },
   });
 }
 
@@ -365,11 +374,13 @@ export async function updateAccount(
     status?: AccountStatus;
     quota?: number;
   },
+  provider?: AccountExportProvider,
 ) {
   return httpRequest<AccountUpdateResponse>("/api/accounts/update", {
     method: "POST",
     body: {
       access_token: accessToken,
+      ...(provider ? { provider } : {}),
       ...updates,
     },
   });

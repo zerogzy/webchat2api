@@ -7,6 +7,10 @@ import type { AccountProviderDefinition, ImportProviderOption, ProviderId } from
 
 export const accountProviderDefinitions = [gptProvider, grokProvider, geminiProvider] as const satisfies readonly AccountProviderDefinition[];
 
+export const knownProviderIds = accountProviderDefinitions.map((provider) => provider.id) as ProviderId[];
+
+export type KnownProviderId = (typeof knownProviderIds)[number];
+
 export const accountProviderRegistry: Record<ProviderId, AccountProviderDefinition> = {
   gpt: gptProvider,
   grok: grokProvider,
@@ -16,6 +20,7 @@ export const accountProviderRegistry: Record<ProviderId, AccountProviderDefiniti
 export const accountImportProviderOptions: ImportProviderOption[] = accountProviderDefinitions.map((provider) => ({
   label: provider.label,
   value: provider.id,
+  description: provider.importFlowCopy.providerDescription,
 }));
 
 export const accountProviderFilterOptions: { label: string; value: AccountProvider | "all" }[] = [
@@ -30,7 +35,14 @@ export function normalizeAccountProvider(provider: AccountProvider | null | unde
 
 export function getAccountProviderDefinition(provider: AccountProvider | null | undefined): AccountProviderDefinition {
   const normalized = normalizeAccountProvider(provider);
-  return accountProviderRegistry[normalized as ProviderId] ?? {
+  const definition = accountProviderRegistry[normalized as ProviderId];
+  if (definition) {
+    return definition;
+  }
+
+  // Unknown providers remain available for account display/export compatibility.
+  // Trial metadata stays disabled so GPT defaults do not mask missing provider definitions.
+  return {
     ...gptProvider,
     id: normalized as ProviderId,
     label: normalized,
@@ -45,6 +57,18 @@ export function getAccountProviderDefinition(provider: AccountProvider | null | 
       applicable: false,
       unavailableLabel: gptProvider.quota.unavailableLabel,
       unlimitedTypes: [],
+    },
+    trial: {
+      ...gptProvider.trial,
+      enabled: false,
+      textFallbackModels: [],
+      textFallbackMode: "always",
+      imageFallbackModels: [],
+      imageUnsupportedCopy: `${normalized} 暂未配置图像试验能力。`,
+      imageNoMetadataCopy: `${normalized} 暂未配置图像试验能力。`,
+      modelIdPrefixes: [normalized],
+      textModelPrefixes: [],
+      imageModelKeywords: [],
     },
   };
 }

@@ -48,32 +48,29 @@ import {
   updateAccount,
   type Account,
   type AccountExportProvider,
-  type AccountProvider,
   type AccountStatus,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
+import { cn } from "@/lib/utils";
 import {
   accountProviderDefinitions,
-  accountProviderFilterOptions as baseAccountProviderFilterOptions,
   accountProviderSupportsTokenExport,
   getAccountProviderDefinition,
   getAccountProviderLabel,
   isProviderAccount,
   normalizeAccountProvider,
 } from "@/providers/registry";
-
-import { cn } from "@/lib/utils";
+import type { AccountProviderDefinition, ProviderId } from "@/providers/types";
 
 import { AccountImportDialog } from "./components/account-import-dialog";
 
-const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] =
-  [
-    { label: "全部状态", value: "all" },
-    { label: "正常", value: "正常" },
-    { label: "限流", value: "限流" },
-    { label: "异常", value: "异常" },
-    { label: "禁用", value: "禁用" },
-  ];
+const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = [
+  { label: "全部状态", value: "all" },
+  { label: "正常", value: "正常" },
+  { label: "限流", value: "限流" },
+  { label: "异常", value: "异常" },
+  { label: "禁用", value: "禁用" },
+];
 
 const statusMeta: Record<
   AccountStatus,
@@ -90,33 +87,36 @@ const statusMeta: Record<
 
 const metricCards = [
   { key: "total", label: "账户总数", color: "text-stone-900", icon: UserRound },
-  {
-    key: "active",
-    label: "正常账户",
-    color: "text-emerald-600",
-    icon: CheckCircle2,
-  },
-  {
-    key: "limited",
-    label: "限流账户",
-    color: "text-orange-500",
-    icon: CircleAlert,
-  },
-  {
-    key: "abnormal",
-    label: "异常账户",
-    color: "text-rose-500",
-    icon: CircleOff,
-  },
+  { key: "active", label: "正常账户", color: "text-emerald-600", icon: CheckCircle2 },
+  { key: "limited", label: "限流账户", color: "text-orange-500", icon: CircleAlert },
+  { key: "abnormal", label: "异常账户", color: "text-rose-500", icon: CircleOff },
   { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
   {
     key: "quota",
-    label:
-      getAccountProviderDefinition("gpt").quota.metricLabel ?? "GPT 图像额度",
+    label: getAccountProviderDefinition("gpt").quota.metricLabel ?? "GPT 图像额度",
     color: "text-amber-600",
     icon: RefreshCw,
   },
 ] as const;
+
+type ProviderFilters = Record<ProviderId, { query: string; type: string; status: AccountStatus | "all" }>;
+type ProviderPages = Record<ProviderId, number>;
+type ProviderSelection = Record<ProviderId, string[]>;
+
+const defaultProviderFilters = accountProviderDefinitions.reduce((acc, provider) => {
+  acc[provider.id] = { query: "", type: "all", status: "all" };
+  return acc;
+}, {} as ProviderFilters);
+
+const defaultProviderPages = accountProviderDefinitions.reduce((acc, provider) => {
+  acc[provider.id] = 1;
+  return acc;
+}, {} as ProviderPages);
+
+const defaultProviderSelection = accountProviderDefinitions.reduce((acc, provider) => {
+  acc[provider.id] = [];
+  return acc;
+}, {} as ProviderSelection);
 
 function isGeminiAccount(account: Account) {
   return isProviderAccount(account, "gemini");
@@ -124,10 +124,7 @@ function isGeminiAccount(account: Account) {
 
 function isUnlimitedImageQuotaAccount(account: Account) {
   const providerDefinition = getAccountProviderDefinition(account.provider);
-  return (
-    providerDefinition.quota.applicable &&
-    providerDefinition.quota.unlimitedTypes.includes(account.type)
-  );
+  return providerDefinition.quota.applicable && providerDefinition.quota.unlimitedTypes.includes(account.type);
 }
 
 function imageQuotaUnknown(account: Account) {
@@ -172,19 +169,14 @@ function formatRestoreAt(value?: string | null) {
   const relative = diffMs > 0 ? `剩余 ${days}d ${hours}h` : "已到恢复时间";
 
   const pad = (num: number) => String(num).padStart(2, "0");
-  const absolute = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  const absolute = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 
   return { absolute, relative };
 }
 
 function formatQuotaSummary(accounts: Account[]) {
-  const quotaProvider = getAccountProviderDefinition("gpt");
   const availableQuotaAccounts = accounts.filter(
-    (account) =>
-      normalizeAccountProvider(account.provider) === quotaProvider.id &&
-      account.status === "正常",
+    (account) => normalizeAccountProvider(account.provider) === "gpt" && account.status === "正常",
   );
   if (availableQuotaAccounts.length === 0) {
     return "—";
@@ -195,12 +187,7 @@ function formatQuotaSummary(accounts: Account[]) {
   if (availableQuotaAccounts.some(imageQuotaUnknown)) {
     return "未知";
   }
-  return formatCompact(
-    availableQuotaAccounts.reduce(
-      (sum, account) => sum + Math.max(0, account.quota),
-      0,
-    ),
-  );
+  return formatCompact(availableQuotaAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
 }
 
 function renderPrivacyEmail(email?: string | null) {
@@ -210,20 +197,14 @@ function renderPrivacyEmail(email?: string | null) {
   }
   const atIndex = value.indexOf("@");
   if (atIndex < 0) {
-    return (
-      <span className="transition duration-150 blur-sm hover:blur-none">
-        {value}
-      </span>
-    );
+    return <span className="transition duration-150 blur-sm hover:blur-none">{value}</span>;
   }
   const localPart = value.slice(0, atIndex + 1);
   const domain = value.slice(atIndex + 1);
   return (
     <span className="group inline-flex max-w-full items-center">
       <span className="truncate">{localPart}</span>
-      <span className="truncate transition duration-150 blur-sm group-hover:blur-none">
-        {domain}
-      </span>
+      <span className="truncate transition duration-150 blur-sm group-hover:blur-none">{domain}</span>
     </span>
   );
 }
@@ -246,15 +227,19 @@ function displayAccountProvider(account: Account) {
 }
 
 function accountToken(account: Account) {
-  return typeof account.access_token === "string"
-    ? account.access_token.trim()
-    : "";
+  return typeof account.access_token === "string" ? account.access_token.trim() : "";
+}
+
+function accountProviderId(account: Account): ProviderId {
+  const provider = normalizeAccountProvider(account.provider);
+  return accountProviderDefinitions.some((item) => item.id === provider) ? (provider as ProviderId) : "gpt";
 }
 
 function accountRowKey(account: Account, index: number) {
+  const provider = accountProviderId(account);
   const token = accountToken(account);
-  if (token) return token;
-  return `sanitized-${normalizeAccountProvider(account.provider)}-${account.email ?? ""}-${account.type ?? ""}-${index}`;
+  if (token) return `${provider}:${token}`;
+  return `${provider}:sanitized-${account.email ?? ""}-${account.type ?? ""}-${index}`;
 }
 
 function maskAccountToken(token: string) {
@@ -268,40 +253,413 @@ function accountTokenDisplay(account: Account) {
   const token = accountToken(account);
   if (token) return maskAccountToken(token);
   const providerDefinition = getAccountProviderDefinition(account.provider);
-  return !token && isGeminiAccount(account) && account.has_gemini_session
-    ? providerDefinition.tokenHiddenLabel
-    : "凭据已隐藏";
+  return !token && isGeminiAccount(account) && account.has_gemini_session ? providerDefinition.tokenHiddenLabel : "凭据已隐藏";
 }
 
 function accountTokens(accounts: Account[]) {
   return accounts.map(accountToken).filter(Boolean);
 }
 
-function keepExistingSelection(ids: string[], items: Account[]) {
-  const keys = new Set(items.map((item, index) => accountRowKey(item, index)));
-  return ids.filter((id) => keys.has(id));
+function keepProviderSelection(selection: ProviderSelection, items: Account[]) {
+  const keysByProvider = accountProviderDefinitions.reduce((acc, provider) => {
+    acc[provider.id] = new Set<string>();
+    return acc;
+  }, {} as Record<ProviderId, Set<string>>);
+
+  items.forEach((item, index) => {
+    keysByProvider[accountProviderId(item)].add(accountRowKey(item, index));
+  });
+
+  return accountProviderDefinitions.reduce((acc, provider) => {
+    acc[provider.id] = selection[provider.id].filter((id) => keysByProvider[provider.id].has(id));
+    return acc;
+  }, {} as ProviderSelection);
+}
+
+function mergeProviderAccounts(current: Account[], provider: ProviderId, nextItems: Account[]) {
+  return [
+    ...current.filter((account) => !isProviderAccount(account, provider)),
+    ...nextItems.map((item) => ({ ...item, provider: normalizeAccountProvider(item.provider) || provider })),
+  ];
 }
 
 function accountExportProviderLabel(provider: AccountExportProvider) {
   return getAccountProviderDefinition(provider).label;
 }
 
+function ProviderAccountSection({
+  provider,
+  accounts,
+  filteredAccounts,
+  currentRows,
+  selectedIds,
+  filters,
+  page,
+  pageSize,
+  pageCount,
+  safePage,
+  startIndex,
+  isLoading,
+  isRefreshing,
+  isDeleting,
+  isExporting,
+  isUpdating,
+  onFilterChange,
+  onPageChange,
+  onSelectChange,
+  onRefresh,
+  onDelete,
+  onDeleteLimited,
+  onExport,
+  onEdit,
+}: {
+  provider: AccountProviderDefinition;
+  accounts: Account[];
+  filteredAccounts: Account[];
+  currentRows: Account[];
+  selectedIds: string[];
+  filters: ProviderFilters[ProviderId];
+  page: number;
+  pageSize: string;
+  pageCount: number;
+  safePage: number;
+  startIndex: number;
+  isLoading: boolean;
+  isRefreshing: boolean;
+  isDeleting: boolean;
+  isExporting: boolean;
+  isUpdating: boolean;
+  onFilterChange: (next: Partial<ProviderFilters[ProviderId]>) => void;
+  onPageChange: (page: number) => void;
+  onSelectChange: (ids: string[]) => void;
+  onRefresh: (tokens: string[]) => void;
+  onDelete: (tokens: string[]) => void;
+  onDeleteLimited: () => void;
+  onExport: (tokens: string[]) => void;
+  onEdit: (account: Account) => void;
+}) {
+  const selectedSet = new Set(selectedIds);
+  const selectedTokens = accounts
+    .filter((account, index) => selectedSet.has(accountRowKey(account, index)))
+    .map(accountToken)
+    .filter(Boolean);
+  const selectedRefreshTokens = provider.refresh.enabled ? selectedTokens : [];
+  const limitedTokens = accountTokens(accounts.filter((item) => item.status === "限流"));
+  const typeOptions = [
+    { label: "全部计划/池", value: "all" },
+    ...Array.from(new Set(accounts.map(displayAccountType))).map((type) => ({ label: type, value: type })),
+  ];
+  const allCurrentSelected =
+    currentRows.length > 0 && currentRows.every((row, index) => selectedIds.includes(accountRowKey(row, startIndex + index)));
+  const paginationItems = (() => {
+    const items: (number | "...")[] = [];
+    const start = Math.max(1, safePage - 1);
+    const end = Math.min(pageCount, safePage + 1);
+
+    if (start > 1) items.push(1);
+    if (start > 2) items.push("...");
+    for (let current = start; current <= end; current += 1) items.push(current);
+    if (end < pageCount - 1) items.push("...");
+    if (end < pageCount) items.push(pageCount);
+    return items;
+  })();
+
+  const toggleSelectAll = (checked: boolean) => {
+    if (checked) {
+      onSelectChange(
+        Array.from(
+          new Set([...selectedIds, ...currentRows.map((item, index) => accountRowKey(item, startIndex + index))]),
+        ),
+      );
+      return;
+    }
+    onSelectChange(
+      selectedIds.filter((id) => !currentRows.some((row, index) => accountRowKey(row, startIndex + index) === id)),
+    );
+  };
+
+  return (
+    <section className="overflow-hidden rounded-[24px] border border-white/75 bg-white/82 shadow-sm backdrop-blur-sm">
+      <div className="flex flex-col gap-4 border-b border-stone-100 px-4 py-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold tracking-tight text-stone-950">{provider.label} 账号</h2>
+            <Badge variant={provider.badgeVariant} className="rounded-md px-2.5 py-1">
+              {accounts.length} 个
+            </Badge>
+          </div>
+          <p className="max-w-2xl text-sm leading-6 text-stone-500">{provider.accountInfoHelp}</p>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-3 lg:flex lg:items-center">
+          <div className="relative min-w-0 sm:col-span-3 lg:min-w-[240px]">
+            <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
+            <Input
+              value={filters.query}
+              onChange={(event) => onFilterChange({ query: event.target.value })}
+              placeholder="搜索邮箱"
+              className="h-10 rounded-xl border-stone-200 bg-white/90 pl-10 shadow-sm"
+            />
+          </div>
+          <Select value={filters.type} onValueChange={(value) => onFilterChange({ type: value })}>
+            <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/90 shadow-sm lg:w-[150px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {typeOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={filters.status} onValueChange={(value) => onFilterChange({ status: value as AccountStatus | "all" })}>
+            <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/90 shadow-sm lg:w-[150px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {accountStatusOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-b border-stone-100 bg-stone-50/35 px-4 py-3 text-sm text-stone-500">
+        <Button
+          variant="ghost"
+          className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
+          onClick={() => onRefresh(selectedRefreshTokens)}
+          disabled={!provider.refresh.enabled || selectedRefreshTokens.length === 0 || isRefreshing}
+          title={provider.refresh.rowTitle}
+        >
+          {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+          {provider.refresh.selectedButtonLabel ?? provider.refresh.rowTitle}
+        </Button>
+        <Button
+          variant="ghost"
+          className="h-8 rounded-lg px-3 text-amber-700 hover:bg-amber-50 hover:text-amber-800"
+          onClick={onDeleteLimited}
+          disabled={limitedTokens.length === 0 || isDeleting}
+        >
+          {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+          移除本组限流账号
+        </Button>
+        <Button
+          variant="ghost"
+          className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+          onClick={() => onDelete(selectedTokens)}
+          disabled={selectedTokens.length === 0 || isDeleting}
+        >
+          {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+          删除本组所选
+        </Button>
+        <Button
+          variant="ghost"
+          className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
+          onClick={() => onExport(provider.canExportWithoutTokens ? [] : selectedTokens)}
+          disabled={!accountProviderSupportsTokenExport(provider.id, selectedTokens.length) || isExporting || isDeleting}
+        >
+          {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+          {selectedTokens.length > 0 ? provider.selectedExportButtonLabel : provider.exportButtonLabel}
+        </Button>
+        {selectedIds.length > 0 ? (
+          <span className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-semibold text-stone-600 shadow-sm">
+            本组已选择 {selectedIds.length} 项
+          </span>
+        ) : null}
+      </div>
+
+      <div className="overflow-x-auto overscroll-x-contain">
+        <table className="w-full min-w-[840px] text-left text-sm">
+          <thead className="border-b border-stone-100 bg-stone-50/60 text-[11px] tracking-[0.18em] text-stone-500 uppercase">
+            <tr>
+              <th className="w-12 px-4 py-3">
+                <Checkbox checked={allCurrentSelected} onCheckedChange={(checked) => toggleSelectAll(Boolean(checked))} />
+              </th>
+              <th className="w-56 px-4 py-3">token</th>
+              <th className="w-28 px-4 py-3">计划/池</th>
+              <th className="w-24 px-4 py-3">状态</th>
+              <th className="w-56 px-4 py-3">账号信息</th>
+              <th className="w-24 px-4 py-3">额度</th>
+              <th className="w-40 px-4 py-3">恢复时间</th>
+              <th className="w-18 px-4 py-3">成功</th>
+              <th className="w-18 px-4 py-3">失败</th>
+              <th className="w-24 px-4 py-3">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {currentRows.map((account, index) => {
+              const status = statusMeta[account.status];
+              const StatusIcon = status.icon;
+              const rowKey = accountRowKey(account, startIndex + index);
+              const token = accountToken(account);
+              const tokenDisplay = accountTokenDisplay(account);
+
+              return (
+                <tr key={rowKey} className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/80">
+                  <td className="px-4 py-3">
+                    <Checkbox
+                      checked={selectedIds.includes(rowKey)}
+                      onCheckedChange={(checked) => {
+                        onSelectChange(
+                          checked ? Array.from(new Set([...selectedIds, rowKey])) : selectedIds.filter((item) => item !== rowKey),
+                        );
+                      }}
+                    />
+                  </td>
+                  <td className="px-4 py-3">
+                    <span
+                      className="max-w-[240px] truncate rounded-lg bg-stone-100/70 px-2 py-1 font-medium tracking-tight text-stone-700"
+                      title={token ? "完整 token 已隐藏，请使用导出功能获取凭据" : tokenDisplay}
+                    >
+                      {tokenDisplay}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="space-y-1">
+                      <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-700">
+                        {displayAccountType(account)}
+                      </Badge>
+                      <div className="text-[11px] leading-4 text-stone-400">{provider.metadataLabel}</div>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <Badge variant={status.badge} className="inline-flex items-center gap-1 rounded-md px-2 py-1 shadow-sm">
+                      <StatusIcon className="size-3.5" />
+                      {account.status}
+                    </Badge>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="space-y-1 text-xs leading-5 text-stone-500">
+                      <div>{renderPrivacyEmail(account.email)}</div>
+                      <div className="text-stone-400">{displayAccountProvider(account)} scoped account</div>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <Badge variant={provider.quota.applicable ? "info" : "secondary"} className="rounded-md px-2.5 py-1 shadow-sm">
+                      {formatQuota(account)}
+                    </Badge>
+                  </td>
+                  <td className="px-4 py-3 text-xs leading-5 text-stone-500">
+                    {(() => {
+                      const restore = formatRestoreAt(account.restore_at);
+                      return (
+                        <div className="space-y-0.5">
+                          {restore.relative ? <div className="font-medium text-stone-700">{restore.relative}</div> : null}
+                          <div>{restore.absolute}</div>
+                        </div>
+                      );
+                    })()}
+                  </td>
+                  <td className="px-4 py-3 text-stone-500">{account.success}</td>
+                  <td className="px-4 py-3 text-stone-500">{account.fail}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-1 text-stone-400">
+                      <button
+                        type="button"
+                        className="rounded-lg p-2 transition hover:bg-white hover:text-stone-700"
+                        onClick={() => onEdit(account)}
+                        disabled={isUpdating}
+                      >
+                        <Pencil className="size-4" />
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-lg p-2 transition hover:bg-white hover:text-stone-700"
+                        onClick={() => onRefresh([token])}
+                        disabled={isRefreshing || !provider.refresh.enabled || !token}
+                        title={provider.refresh.rowTitle}
+                      >
+                        <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-600"
+                        onClick={() => onDelete([token])}
+                        disabled={isDeleting || !token}
+                      >
+                        <Trash2 className="size-4" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+
+        {!isLoading && currentRows.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+            <div className="rounded-2xl bg-stone-100/80 p-3 text-stone-500 shadow-inner">
+              <Search className="size-5" />
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-stone-700">没有匹配的 {provider.label} 账户</p>
+              <p className="text-sm text-stone-500">调整本组筛选条件或导入新的账号。</p>
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="border-t border-stone-100 bg-stone-50/30 px-4 py-4">
+        <div className="flex items-center justify-start gap-3 overflow-x-auto whitespace-nowrap md:justify-center">
+          <div className="shrink-0 text-sm text-stone-500">
+            显示第 {filteredAccounts.length === 0 ? 0 : startIndex + 1} - {Math.min(startIndex + Number(pageSize), filteredAccounts.length)} 条，共 {filteredAccounts.length} 条
+          </div>
+          <span className="shrink-0 text-sm leading-none text-stone-500">{page} / {pageCount} 页</span>
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
+            disabled={safePage <= 1}
+            onClick={() => onPageChange(Math.max(1, safePage - 1))}
+          >
+            <ChevronLeft className="size-4" />
+          </Button>
+          {paginationItems.map((item, index) =>
+            item === "..." ? (
+              <span key={`ellipsis-${index}`} className="px-1 text-sm text-stone-400">...</span>
+            ) : (
+              <Button
+                key={item}
+                variant={item === safePage ? "default" : "outline"}
+                className={cn(
+                  "h-10 min-w-10 shrink-0 rounded-lg px-3",
+                  item === safePage ? "bg-stone-950 text-white hover:bg-stone-800" : "border-stone-200 bg-white text-stone-700",
+                )}
+                onClick={() => onPageChange(item)}
+              >
+                {item}
+              </Button>
+            ),
+          )}
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
+            disabled={safePage >= pageCount}
+            onClick={() => onPageChange(Math.min(pageCount, safePage + 1))}
+          >
+            <ChevronRight className="size-4" />
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [query, setQuery] = useState("");
-  const [typeFilter, setTypeFilter] = useState("all");
-  const [providerFilter, setProviderFilter] = useState<AccountProvider | "all">(
-    "all",
-  );
-  const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">(
-    "all",
-  );
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState("10");
+  const [activeProvider, setActiveProvider] = useState<ProviderId>("gpt");
+  const [selectedIds, setSelectedIds] = useState<ProviderSelection>(defaultProviderSelection);
+  const [filters, setFilters] = useState<ProviderFilters>(defaultProviderFilters);
+  const [pages, setPages] = useState<ProviderPages>(defaultProviderPages);
+  const [pageSize] = useState("10");
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
-  const [editProvider, setEditProvider] = useState<AccountProvider>("gpt");
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -314,9 +672,12 @@ function AccountsPageContent() {
       setIsLoading(true);
     }
     try {
-      const data = await fetchAccounts();
-      setAccounts(data.items);
-      setSelectedIds((prev) => keepExistingSelection(prev, data.items));
+      const results = await Promise.all(accountProviderDefinitions.map((provider) => fetchAccounts(provider.id)));
+      const items = results.flatMap((result, index) =>
+        result.items.map((item) => ({ ...item, provider: normalizeAccountProvider(item.provider) || accountProviderDefinitions[index].id })),
+      );
+      setAccounts(items);
+      setSelectedIds((prev) => keepProviderSelection(prev, items));
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载账户失败";
       toast.error(message);
@@ -335,38 +696,31 @@ function AccountsPageContent() {
     void loadAccounts();
   }, []);
 
-  const filteredAccounts = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    return accounts.filter((account) => {
-      const searchMatched =
-        normalizedQuery.length === 0 ||
-        (account.email ?? "").toLowerCase().includes(normalizedQuery);
-      const typeMatched =
-        typeFilter === "all" || displayAccountType(account) === typeFilter;
-      const providerMatched =
-        providerFilter === "all" ||
-        normalizeAccountProvider(account.provider) === providerFilter;
-      const statusMatched =
-        statusFilter === "all" || account.status === statusFilter;
-      return searchMatched && typeMatched && providerMatched && statusMatched;
-    });
-  }, [accounts, providerFilter, query, statusFilter, typeFilter]);
-
-  const pageCount = Math.max(
-    1,
-    Math.ceil(filteredAccounts.length / Number(pageSize)),
-  );
-  const safePage = Math.min(page, pageCount);
-  const startIndex = (safePage - 1) * Number(pageSize);
-  const currentRows = filteredAccounts.slice(
-    startIndex,
-    startIndex + Number(pageSize),
-  );
-  const allCurrentSelected =
-    currentRows.length > 0 &&
-    currentRows.every((row, index) =>
-      selectedIds.includes(accountRowKey(row, startIndex + index)),
-    );
+  const providerRows = useMemo(() => {
+    return accountProviderDefinitions.reduce((acc, provider) => {
+      const providerAccounts = accounts.filter((account) => isProviderAccount(account, provider.id));
+      const providerFilters = filters[provider.id];
+      const normalizedQuery = providerFilters.query.trim().toLowerCase();
+      const filteredAccounts = providerAccounts.filter((account) => {
+        const searchMatched = normalizedQuery.length === 0 || (account.email ?? "").toLowerCase().includes(normalizedQuery);
+        const typeMatched = providerFilters.type === "all" || displayAccountType(account) === providerFilters.type;
+        const statusMatched = providerFilters.status === "all" || account.status === providerFilters.status;
+        return searchMatched && typeMatched && statusMatched;
+      });
+      const pageCount = Math.max(1, Math.ceil(filteredAccounts.length / Number(pageSize)));
+      const safePage = Math.min(pages[provider.id], pageCount);
+      const startIndex = (safePage - 1) * Number(pageSize);
+      acc[provider.id] = {
+        accounts: providerAccounts,
+        filteredAccounts,
+        currentRows: filteredAccounts.slice(startIndex, startIndex + Number(pageSize)),
+        pageCount,
+        safePage,
+        startIndex,
+      };
+      return acc;
+    }, {} as Record<ProviderId, { accounts: Account[]; filteredAccounts: Account[]; currentRows: Account[]; pageCount: number; safePage: number; startIndex: number }>);
+  }, [accounts, filters, pageSize, pages]);
 
   const summary = useMemo(() => {
     const total = accounts.length;
@@ -379,118 +733,40 @@ function AccountsPageContent() {
     return { total, active, limited, abnormal, disabled, quota };
   }, [accounts]);
 
-  const accountTypeOptions = useMemo(
-    () => [
-      { label: "全部计划/池", value: "all" },
-      ...Array.from(new Set(accounts.map(displayAccountType))).map((type) => ({
-        label: type,
-        value: type,
-      })),
-    ],
-    [accounts],
-  );
+  const activeDefinition = getAccountProviderDefinition(activeProvider);
+  const activeRows = providerRows[activeProvider];
 
-  const accountProviderFilterOptions = useMemo(() => {
-    const knownValues = new Set(
-      baseAccountProviderFilterOptions.map((option) => option.value),
-    );
-    const extraProviders = Array.from(
-      new Set(
-        accounts.map((account) => normalizeAccountProvider(account.provider)),
-      ),
-    )
-      .filter((provider) => !knownValues.has(provider))
-      .map((provider) => ({ label: provider, value: provider }));
-    return [...baseAccountProviderFilterOptions, ...extraProviders];
-  }, [accounts]);
+  const setProviderFilters = (provider: ProviderId, next: Partial<ProviderFilters[ProviderId]>) => {
+    setFilters((prev) => ({ ...prev, [provider]: { ...prev[provider], ...next } }));
+    setPages((prev) => ({ ...prev, [provider]: 1 }));
+  };
 
-  const providerTokenGroups = useMemo(
-    () =>
-      accountProviderDefinitions.map((provider) => ({
-        provider,
-        tokens: accountTokens(
-          accounts.filter((account) => isProviderAccount(account, provider.id)),
-        ),
-      })),
-    [accounts],
-  );
+  const setProviderPage = (provider: ProviderId, page: number) => {
+    setPages((prev) => ({ ...prev, [provider]: page }));
+  };
 
-  const selectedProviderTokenGroups = useMemo(() => {
-    const selectedSet = new Set(selectedIds);
-    return accountProviderDefinitions.map((provider) => ({
-      provider,
-      tokens: accounts
-        .filter(
-          (item) =>
-            selectedSet.has(accountRowKey(item, accounts.indexOf(item))) &&
-            isProviderAccount(item, provider.id),
-        )
-        .map(accountToken)
-        .filter(Boolean),
-    }));
-  }, [accounts, selectedIds]);
+  const setProviderSelection = (provider: ProviderId, ids: string[]) => {
+    setSelectedIds((prev) => ({ ...prev, [provider]: ids }));
+  };
 
-  const refreshableProvider =
-    accountProviderDefinitions.find((provider) => provider.refresh.enabled) ??
-    getAccountProviderDefinition("gpt");
-  const refreshableTokens =
-    providerTokenGroups.find(
-      (item) => item.provider.id === refreshableProvider.id,
-    )?.tokens ?? [];
-  const selectedRefreshableTokens =
-    selectedProviderTokenGroups.find(
-      (item) => item.provider.id === refreshableProvider.id,
-    )?.tokens ?? [];
+  const handleProviderMutationResult = (provider: ProviderId, items: Account[]) => {
+    const scopedItems = items.filter((item) => isProviderAccount(item, provider));
+    const nextAccounts = scopedItems.length === items.length ? mergeProviderAccounts(accounts, provider, scopedItems) : items;
+    setAccounts(nextAccounts);
+    setSelectedIds((prev) => keepProviderSelection(prev, nextAccounts));
+  };
 
-  const selectedTokens = useMemo(() => {
-    const selectedSet = new Set(selectedIds);
-    return accounts
-      .filter((item) =>
-        selectedSet.has(accountRowKey(item, accounts.indexOf(item))),
-      )
-      .map(accountToken)
-      .filter(Boolean);
-  }, [accounts, selectedIds]);
-
-  const hasGeminiAccounts = useMemo(
-    () => accounts.some(isGeminiAccount),
-    [accounts],
-  );
-
-  const abnormalTokens = useMemo(() => {
-    return accountTokens(accounts.filter((item) => item.status === "异常"));
-  }, [accounts]);
-
-  const limitedTokens = useMemo(() => {
-    return accountTokens(accounts.filter((item) => item.status === "限流"));
-  }, [accounts]);
-
-  const paginationItems = useMemo(() => {
-    const items: (number | "...")[] = [];
-    const start = Math.max(1, safePage - 1);
-    const end = Math.min(pageCount, safePage + 1);
-
-    if (start > 1) items.push(1);
-    if (start > 2) items.push("...");
-    for (let current = start; current <= end; current += 1) items.push(current);
-    if (end < pageCount - 1) items.push("...");
-    if (end < pageCount) items.push(pageCount);
-
-    return items;
-  }, [pageCount, safePage]);
-
-  const handleDeleteTokens = async (tokens: string[]) => {
+  const handleDeleteTokens = async (provider: ProviderId, tokens: string[]) => {
     if (tokens.length === 0) {
-      toast.error("请先选择要删除的账户");
+      toast.error(`请先选择要删除的 ${getAccountProviderLabel(provider)} 账户`);
       return;
     }
 
     setIsDeleting(true);
     try {
-      const data = await deleteAccounts(tokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => keepExistingSelection(prev, data.items));
-      toast.success(`删除 ${data.removed ?? 0} 个账户`);
+      const data = await deleteAccounts(tokens, provider);
+      handleProviderMutationResult(provider, data.items);
+      toast.success(`删除 ${data.removed ?? 0} 个 ${getAccountProviderLabel(provider)} 账户`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除账户失败";
       toast.error(message);
@@ -499,49 +775,51 @@ function AccountsPageContent() {
     }
   };
 
-  const handleDeleteLimitedAccounts = async () => {
+  const handleDeleteLimitedAccounts = async (provider: ProviderId) => {
+    const limitedTokens = accountTokens(providerRows[provider].accounts.filter((item) => item.status === "限流"));
     if (limitedTokens.length === 0) {
-      toast.error("没有限流账户可移除");
+      toast.error(`没有限流 ${getAccountProviderLabel(provider)} 账户可移除`);
       return;
     }
 
     setIsDeleting(true);
     try {
-      const data = await deleteLimitedAccounts();
-      setAccounts(data.items);
-      setSelectedIds((prev) => keepExistingSelection(prev, data.items));
-      toast.success(`移除 ${data.removed ?? 0} 个限流账户`);
+      const data = await deleteLimitedAccounts(provider);
+      handleProviderMutationResult(provider, data.items);
+      toast.success(`移除 ${data.removed ?? 0} 个限流 ${getAccountProviderLabel(provider)} 账户`);
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "移除限流账户失败";
+      const message = error instanceof Error ? error.message : "移除限流账户失败";
       toast.error(message);
     } finally {
       setIsDeleting(false);
     }
   };
 
-  const handleRefreshAccounts = async (accessTokens: string[]) => {
+  const handleRefreshAccounts = async (provider: ProviderId, accessTokens: string[]) => {
+    const providerDefinition = getAccountProviderDefinition(provider);
+    if (!providerDefinition.refresh.enabled) {
+      toast.error(providerDefinition.refresh.rowTitle);
+      return;
+    }
     if (accessTokens.length === 0) {
-      toast.error("没有可刷新的 GPT 账户");
+      toast.error(`没有可刷新的 ${providerDefinition.label} 账户`);
       return;
     }
 
     setIsRefreshing(true);
     try {
-      const data = await refreshAccounts(accessTokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => keepExistingSelection(prev, data.items));
+      const data = await refreshAccounts(accessTokens, provider);
+      handleProviderMutationResult(provider, data.items);
       if (data.errors.length > 0) {
         const firstError = data.errors[0]?.error;
         toast.error(
-          `刷新成功 ${data.refreshed} 个 GPT 账户，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
+          `刷新成功 ${data.refreshed} 个 ${providerDefinition.label} 账户，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
         );
       } else {
-        toast.success(`刷新成功 ${data.refreshed} 个 GPT 账户`);
+        toast.success(`刷新成功 ${data.refreshed} 个 ${providerDefinition.label} 账户`);
       }
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "刷新 GPT 账户失败";
+      const message = error instanceof Error ? error.message : `刷新 ${providerDefinition.label} 账户失败`;
       toast.error(message);
     } finally {
       setIsRefreshing(false);
@@ -550,7 +828,6 @@ function AccountsPageContent() {
 
   const openEditDialog = (account: Account) => {
     setEditingAccount(account);
-    setEditProvider(normalizeAccountProvider(account.provider));
     setEditStatus(account.status);
   };
 
@@ -559,24 +836,19 @@ function AccountsPageContent() {
       return;
     }
 
+    const provider = accountProviderId(editingAccount);
     const token = accountToken(editingAccount);
     if (!token) {
-      toast.error(
-        "脱敏账号不能在列表中直接编辑，请重新导入或通过后端管理接口处理",
-      );
+      toast.error("脱敏账号不能在列表中直接编辑，请重新导入或通过后端管理接口处理");
       return;
     }
 
     setIsUpdating(true);
     try {
-      const data = await updateAccount(token, {
-        provider: editProvider,
-        status: editStatus,
-      });
-      setAccounts(data.items);
-      setSelectedIds((prev) => keepExistingSelection(prev, data.items));
+      const data = await updateAccount(token, { status: editStatus }, provider);
+      handleProviderMutationResult(provider, data.items);
       setEditingAccount(null);
-      toast.success("账号信息已更新");
+      toast.success("账号状态已更新");
     } catch (error) {
       const message = error instanceof Error ? error.message : "更新账号失败";
       toast.error(message);
@@ -585,10 +857,7 @@ function AccountsPageContent() {
     }
   };
 
-  const handleExportAccounts = async (
-    provider: AccountExportProvider,
-    tokens: string[],
-  ) => {
+  const handleExportAccounts = async (provider: AccountExportProvider, tokens: string[]) => {
     if (!accountProviderSupportsTokenExport(provider, tokens.length)) {
       const label = accountExportProviderLabel(provider);
       toast.error(`没有可导出的 ${label} 账户`);
@@ -609,41 +878,14 @@ function AccountsPageContent() {
     }
   };
 
-  const toggleSelectAll = (checked: boolean) => {
-    if (checked) {
-      setSelectedIds((prev) =>
-        Array.from(
-          new Set([
-            ...prev,
-            ...currentRows.map((item, index) =>
-              accountRowKey(item, startIndex + index),
-            ),
-          ]),
-        ),
-      );
-      return;
-    }
-    setSelectedIds((prev) =>
-      prev.filter(
-        (id) =>
-          !currentRows.some(
-            (row, index) => accountRowKey(row, startIndex + index) === id,
-          ),
-      ),
-    );
-  };
-
   return (
     <>
       <section className="relative overflow-hidden rounded-[28px] border border-white/70 bg-white/55 p-5 shadow-[var(--shadow-soft)] backdrop-blur-sm before:pointer-events-none before:absolute before:inset-x-6 before:top-0 before:h-px before:bg-white/90 lg:p-6">
         <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-2">
-            <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
-              Account Pool
-            </div>
-            <h1 className="text-2xl font-semibold tracking-tight text-stone-950">
-              号池管理
-            </h1>
+            <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Account Pool</div>
+            <h1 className="text-2xl font-semibold tracking-tight text-stone-950">号池管理</h1>
+            <p className="max-w-2xl text-sm leading-6 text-stone-500">GPT、Grok、Gemini 分组管理，批量操作只作用于当前服务商。</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/70 bg-white/45 p-2 shadow-sm">
@@ -653,129 +895,55 @@ function AccountsPageContent() {
               onClick={() => void loadAccounts()}
               disabled={isLoading || isRefreshing || isDeleting}
             >
-              <RefreshCw
-                className={cn("size-4", isLoading ? "animate-spin" : "")}
-              />
-              刷新
+              <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
+              刷新全部
             </Button>
             <Button
               variant="outline"
               className="h-10 rounded-xl border-stone-200 bg-white/85 px-4 text-stone-700 shadow-sm hover:bg-white"
-              onClick={() => void handleRefreshAccounts(refreshableTokens)}
-              disabled={
-                isLoading ||
-                isRefreshing ||
-                isDeleting ||
-                refreshableTokens.length === 0
-              }
+              onClick={() => void handleRefreshAccounts(activeProvider, accountTokens(activeRows.accounts))}
+              disabled={!activeDefinition.refresh.enabled || isLoading || isRefreshing || isDeleting || accountTokens(activeRows.accounts).length === 0}
             >
-              <RefreshCw
-                className={cn("size-4", isRefreshing ? "animate-spin" : "")}
-              />
-              {refreshableProvider.refresh.buttonLabel}
+              <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
+              {activeDefinition.refresh.buttonLabel ?? activeDefinition.refresh.rowTitle}
             </Button>
             <AccountImportDialog
               disabled={isLoading || isRefreshing || isDeleting}
-              onImported={(items) => {
-                setAccounts(items);
-                setSelectedIds([]);
-                setPage(1);
+              onImported={(items, provider) => {
+                handleProviderMutationResult(provider, items);
+                setProviderSelection(provider, []);
+                setProviderPage(provider, 1);
+                setActiveProvider(provider);
               }}
             />
-            {providerTokenGroups.map(({ provider, tokens }) => {
-              const exportTokens = provider.canExportWithoutTokens
-                ? []
-                : tokens;
-              const canExport = accountProviderSupportsTokenExport(
-                provider.id,
-                tokens.length,
-              );
-              const showGeminiPresence =
-                provider.id === "gemini" ? hasGeminiAccounts : true;
-              return (
-                <Button
-                  key={provider.id}
-                  variant="outline"
-                  className="h-10 rounded-xl border-stone-200 bg-white/85 px-4 text-stone-700 shadow-sm hover:bg-white"
-                  onClick={() =>
-                    void handleExportAccounts(provider.id, exportTokens)
-                  }
-                  disabled={
-                    !showGeminiPresence ||
-                    !canExport ||
-                    isExporting ||
-                    isDeleting
-                  }
-                >
-                  {isExporting ? (
-                    <LoaderCircle className="size-4 animate-spin" />
-                  ) : (
-                    <Download className="size-4" />
-                  )}
-                  {provider.exportButtonLabel}
-                </Button>
-              );
-            })}
           </div>
         </div>
       </section>
 
-      <Dialog
-        open={Boolean(editingAccount)}
-        onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}
-      >
+      <Dialog open={Boolean(editingAccount)} onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}>
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
           <DialogHeader className="gap-2">
-            <DialogTitle>编辑账户</DialogTitle>
+            <DialogTitle>编辑账户状态</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              手动修改账号服务商和状态。GPT
-              套餐与图像额度由刷新结果维护；Grok/Gemini
-              可手动归类为对应计划、池或订阅。
+              当前账号归属 {editingAccount ? getAccountProviderLabel(editingAccount.provider) : ""}；更新请求会按该服务商定位账号。
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">
-                服务商
-              </label>
-              <Select
-                value={editProvider}
-                onValueChange={(value) => setEditProvider(value)}
-              >
-                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {baseAccountProviderFilterOptions
-                    .filter((option) => option.value !== "all")
-                    .map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">状态</label>
-              <Select
-                value={editStatus}
-                onValueChange={(value) => setEditStatus(value as AccountStatus)}
-              >
-                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {accountStatusOptions
-                    .filter((option) => option.value !== "all")
-                    .map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-            </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-stone-700">状态</label>
+            <Select value={editStatus} onValueChange={(value) => setEditStatus(value as AccountStatus)}>
+              <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {accountStatusOptions
+                  .filter((option) => option.value !== "all")
+                  .map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
           </div>
           <DialogFooter className="pt-2">
             <Button
@@ -786,14 +954,8 @@ function AccountsPageContent() {
             >
               取消
             </Button>
-            <Button
-              className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
-              onClick={() => void handleUpdateAccount()}
-              disabled={isUpdating}
-            >
-              {isUpdating ? (
-                <LoaderCircle className="size-4 animate-spin" />
-              ) : null}
+            <Button className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800" onClick={() => void handleUpdateAccount()} disabled={isUpdating}>
+              {isUpdating ? <LoaderCircle className="size-4 animate-spin" /> : null}
               保存修改
             </Button>
           </DialogFooter>
@@ -806,32 +968,16 @@ function AccountsPageContent() {
             const Icon = item.icon;
             const value = summary[item.key];
             return (
-              <Card
-                key={item.key}
-                className="group overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm transition hover:-translate-y-0.5 hover:shadow-[var(--shadow-soft)]"
-              >
+              <Card key={item.key} className="group overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm transition hover:-translate-y-0.5 hover:shadow-[var(--shadow-soft)]">
                 <CardContent className="p-4">
                   <div className="mb-4 flex items-start justify-between">
-                    <span className="text-xs font-semibold tracking-[0.12em] text-stone-400 uppercase">
-                      {item.label}
-                    </span>
+                    <span className="text-xs font-semibold tracking-[0.12em] text-stone-400 uppercase">{item.label}</span>
                     <span className="rounded-xl bg-stone-100/80 p-2 text-stone-400 transition group-hover:bg-stone-200/70 group-hover:text-stone-600">
                       <Icon className="size-4" />
                     </span>
                   </div>
-                  <div
-                    className={cn(
-                      "text-[1.75rem] font-semibold tracking-tight",
-                      item.color,
-                    )}
-                  >
-                    <span
-                      className={
-                        typeof value === "number" ? "" : "text-[1.1rem]"
-                      }
-                    >
-                      {typeof value === "number" ? formatCompact(value) : value}
-                    </span>
+                  <div className={cn("text-[1.75rem] font-semibold tracking-tight", item.color)}>
+                    <span className={typeof value === "number" ? "" : "text-[1.1rem]"}>{typeof value === "number" ? formatCompact(value) : value}</span>
                   </div>
                 </CardContent>
               </Card>
@@ -839,91 +985,28 @@ function AccountsPageContent() {
           })}
         </div>
         <p className="rounded-2xl border border-white/60 bg-white/45 px-4 py-2 text-xs leading-5 text-stone-500 shadow-sm">
-          GPT 图像额度仅统计正常 GPT 账号；Grok 账号用于 Grok
-          文本模型，不参与图像额度统计。
+          Token 仅以遮蔽形式展示；导出操作按当前服务商执行。GPT 图像额度仅统计正常 GPT 账号。
         </p>
       </section>
 
       <section className="space-y-4">
-        <div className="flex flex-col gap-3 rounded-[24px] border border-white/70 bg-white/45 p-3 shadow-sm lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3 px-1">
-            <h2 className="text-lg font-semibold tracking-tight">账户列表</h2>
-            <Badge
-              variant="secondary"
-              className="rounded-lg bg-stone-200/80 px-2.5 py-1 text-stone-700 shadow-sm"
+        <div className="flex gap-2 overflow-x-auto rounded-[22px] border border-white/70 bg-white/45 p-2 shadow-sm">
+          {accountProviderDefinitions.map((provider) => (
+            <button
+              key={provider.id}
+              type="button"
+              onClick={() => setActiveProvider(provider.id)}
+              className={cn(
+                "flex min-w-[150px] items-center justify-between rounded-2xl px-4 py-3 text-left transition",
+                activeProvider === provider.id ? "bg-stone-950 text-white shadow-sm" : "bg-white/70 text-stone-600 hover:bg-white",
+              )}
             >
-              {filteredAccounts.length}
-            </Badge>
-          </div>
-
-          <div className="grid gap-2 sm:grid-cols-2 lg:flex lg:items-center">
-            <div className="relative min-w-0 sm:col-span-2 lg:min-w-[260px]">
-              <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
-              <Input
-                value={query}
-                onChange={(event) => {
-                  setQuery(event.target.value);
-                  setPage(1);
-                }}
-                placeholder="搜索邮箱"
-                className="h-10 rounded-xl border-stone-200 bg-white/90 pl-10 shadow-sm"
-              />
-            </div>
-            <Select
-              value={providerFilter}
-              onValueChange={(value) => {
-                setProviderFilter(value);
-                setPage(1);
-              }}
-            >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/90 shadow-sm lg:w-[150px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {accountProviderFilterOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={typeFilter}
-              onValueChange={(value) => {
-                setTypeFilter(value);
-                setPage(1);
-              }}
-            >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/90 shadow-sm lg:w-[150px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {accountTypeOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={statusFilter}
-              onValueChange={(value) => {
-                setStatusFilter(value as AccountStatus | "all");
-                setPage(1);
-              }}
-            >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/90 shadow-sm lg:w-[150px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {accountStatusOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+              <span className="font-semibold">{provider.label}</span>
+              <span className={cn("text-xs", activeProvider === provider.id ? "text-stone-300" : "text-stone-400")}>
+                {providerRows[provider.id].accounts.length}
+              </span>
+            </button>
+          ))}
         </div>
 
         {isLoading && accounts.length === 0 ? (
@@ -933,403 +1016,39 @@ function AccountsPageContent() {
                 <LoaderCircle className="size-5 animate-spin" />
               </div>
               <div className="space-y-1">
-                <p className="text-sm font-medium text-stone-700">
-                  正在加载账户
-                </p>
-                <p className="text-sm text-stone-500">
-                  从后端同步账号列表和状态。
-                </p>
+                <p className="text-sm font-medium text-stone-700">正在加载账户</p>
+                <p className="text-sm text-stone-500">按服务商同步账号列表和状态。</p>
               </div>
             </CardContent>
           </Card>
-        ) : null}
-
-        <Card
-          className={cn(
-            "overflow-hidden rounded-[24px] border-white/80 bg-white/90 shadow-[var(--shadow-soft)]",
-            isLoading && accounts.length === 0 ? "hidden" : "",
-          )}
-        >
-          <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b border-stone-100 bg-stone-50/35 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
-                  onClick={() =>
-                    void handleRefreshAccounts(selectedRefreshableTokens)
-                  }
-                  disabled={
-                    selectedRefreshableTokens.length === 0 || isRefreshing
-                  }
-                >
-                  {isRefreshing ? (
-                    <LoaderCircle className="size-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="size-4" />
-                  )}
-                  {refreshableProvider.refresh.selectedButtonLabel}
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                  onClick={() => void handleDeleteTokens(abnormalTokens)}
-                  disabled={abnormalTokens.length === 0 || isDeleting}
-                >
-                  {isDeleting ? (
-                    <LoaderCircle className="size-4 animate-spin" />
-                  ) : (
-                    <Trash2 className="size-4" />
-                  )}
-                  移除异常账号
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-amber-700 hover:bg-amber-50 hover:text-amber-800"
-                  onClick={() => void handleDeleteLimitedAccounts()}
-                  disabled={limitedTokens.length === 0 || isDeleting}
-                >
-                  {isDeleting ? (
-                    <LoaderCircle className="size-4 animate-spin" />
-                  ) : (
-                    <Trash2 className="size-4" />
-                  )}
-                  移除限流账号
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                  onClick={() => void handleDeleteTokens(selectedTokens)}
-                  disabled={selectedTokens.length === 0 || isDeleting}
-                >
-                  {isDeleting ? (
-                    <LoaderCircle className="size-4 animate-spin" />
-                  ) : (
-                    <Trash2 className="size-4" />
-                  )}
-                  删除所选
-                </Button>
-                {selectedProviderTokenGroups
-                  .filter(({ provider }) => !provider.canExportWithoutTokens)
-                  .map(({ provider, tokens }) => (
-                    <Button
-                      key={provider.id}
-                      variant="ghost"
-                      className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
-                      onClick={() =>
-                        void handleExportAccounts(provider.id, tokens)
-                      }
-                      disabled={
-                        tokens.length === 0 || isExporting || isDeleting
-                      }
-                    >
-                      {isExporting ? (
-                        <LoaderCircle className="size-4 animate-spin" />
-                      ) : (
-                        <Download className="size-4" />
-                      )}
-                      {provider.selectedExportButtonLabel}
-                    </Button>
-                  ))}
-                {selectedIds.length > 0 ? (
-                  <span className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-semibold text-stone-600 shadow-sm">
-                    已选择 {selectedIds.length} 项
-                  </span>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="overflow-x-auto overscroll-x-contain">
-              <table className="w-full min-w-[920px] text-left text-sm">
-                <thead className="border-b border-stone-100 bg-stone-50/60 text-[11px] tracking-[0.18em] text-stone-500 uppercase">
-                  <tr>
-                    <th className="w-12 px-4 py-3">
-                      <Checkbox
-                        checked={allCurrentSelected}
-                        onCheckedChange={(checked) =>
-                          toggleSelectAll(Boolean(checked))
-                        }
-                      />
-                    </th>
-                    <th className="w-56 px-4 py-3">token</th>
-                    <th className="w-24 px-4 py-3">服务商</th>
-                    <th className="w-28 px-4 py-3">计划/池</th>
-                    <th className="w-24 px-4 py-3">状态</th>
-                    <th className="w-56 px-4 py-3">账号信息</th>
-                    <th className="w-24 px-4 py-3">GPT 图像额度</th>
-                    <th className="w-40 px-4 py-3">恢复时间</th>
-                    <th className="w-18 px-4 py-3">成功</th>
-                    <th className="w-18 px-4 py-3">失败</th>
-                    <th className="w-24 px-4 py-3">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {currentRows.map((account, index) => {
-                    const status = statusMeta[account.status];
-                    const StatusIcon = status.icon;
-
-                    const rowKey = accountRowKey(account, startIndex + index);
-                    const token = accountToken(account);
-                    const tokenDisplay = accountTokenDisplay(account);
-
-                    return (
-                      <tr
-                        key={rowKey}
-                        className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/80"
-                      >
-                        <td className="px-4 py-3">
-                          <Checkbox
-                            checked={selectedIds.includes(rowKey)}
-                            onCheckedChange={(checked) => {
-                              setSelectedIds((prev) =>
-                                checked
-                                  ? Array.from(new Set([...prev, rowKey]))
-                                  : prev.filter((item) => item !== rowKey),
-                              );
-                            }}
-                          />
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <span
-                              className="max-w-[240px] truncate rounded-lg bg-stone-100/70 px-2 py-1 font-medium tracking-tight text-stone-700"
-                              title={
-                                token
-                                  ? "完整 token 已隐藏，请使用导出功能获取凭据"
-                                  : tokenDisplay
-                              }
-                            >
-                              {tokenDisplay}
-                            </span>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <Badge
-                            variant={
-                              getAccountProviderDefinition(account.provider)
-                                .badgeVariant
-                            }
-                            className="rounded-md px-2.5 py-1 font-semibold shadow-sm"
-                          >
-                            {displayAccountProvider(account)}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="space-y-1">
-                            <Badge
-                              variant="secondary"
-                              className="rounded-md bg-stone-100 text-stone-700"
-                            >
-                              {displayAccountType(account)}
-                            </Badge>
-                            <div className="text-[11px] leading-4 text-stone-400">
-                              {
-                                getAccountProviderDefinition(account.provider)
-                                  .metadataLabel
-                              }
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <Badge
-                            variant={status.badge}
-                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 shadow-sm"
-                          >
-                            <StatusIcon className="size-3.5" />
-                            {account.status}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="space-y-1 text-xs leading-5 text-stone-500">
-                            <div>{renderPrivacyEmail(account.email)}</div>
-                            <div className="text-stone-400">
-                              {
-                                getAccountProviderDefinition(account.provider)
-                                  .accountInfoHelp
-                              }
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <Badge
-                            variant={
-                              getAccountProviderDefinition(account.provider)
-                                .quota.applicable
-                                ? "info"
-                                : "secondary"
-                            }
-                            className="rounded-md px-2.5 py-1 shadow-sm"
-                          >
-                            {formatQuota(account)}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-3 text-xs leading-5 text-stone-500">
-                          {(() => {
-                            const restore = formatRestoreAt(account.restore_at);
-                            return (
-                              <div className="space-y-0.5">
-                                {restore.relative ? (
-                                  <div className="font-medium text-stone-700">
-                                    {restore.relative}
-                                  </div>
-                                ) : null}
-                                <div>{restore.absolute}</div>
-                              </div>
-                            );
-                          })()}
-                        </td>
-                        <td className="px-4 py-3 text-stone-500">
-                          {account.success}
-                        </td>
-                        <td className="px-4 py-3 text-stone-500">
-                          {account.fail}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-1 text-stone-400">
-                            <button
-                              type="button"
-                              className="rounded-lg p-2 transition hover:bg-white hover:text-stone-700"
-                              onClick={() => openEditDialog(account)}
-                              disabled={isUpdating}
-                            >
-                              <Pencil className="size-4" />
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-lg p-2 transition hover:bg-white hover:text-stone-700"
-                              onClick={() =>
-                                void handleRefreshAccounts([token])
-                              }
-                              disabled={
-                                isRefreshing ||
-                                !getAccountProviderDefinition(account.provider)
-                                  .refresh.enabled ||
-                                !token
-                              }
-                              title={
-                                getAccountProviderDefinition(account.provider)
-                                  .refresh.rowTitle
-                              }
-                            >
-                              <RefreshCw
-                                className={cn(
-                                  "size-4",
-                                  isRefreshing ? "animate-spin" : "",
-                                )}
-                              />
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-600"
-                              onClick={() => void handleDeleteTokens([token])}
-                              disabled={isDeleting || !token}
-                            >
-                              <Trash2 className="size-4" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-
-              {!isLoading && currentRows.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-                  <div className="rounded-2xl bg-stone-100/80 p-3 text-stone-500 shadow-inner">
-                    <Search className="size-5" />
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-stone-700">
-                      没有匹配的账户
-                    </p>
-                    <p className="text-sm text-stone-500">
-                      调整筛选条件或搜索关键字后重试。
-                    </p>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="border-t border-stone-100 bg-stone-50/30 px-4 py-4">
-              <div className="flex items-center justify-start gap-3 overflow-x-auto whitespace-nowrap md:justify-center">
-                <div className="shrink-0 text-sm text-stone-500">
-                  显示第 {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
-                  {Math.min(
-                    startIndex + Number(pageSize),
-                    filteredAccounts.length,
-                  )}{" "}
-                  条，共 {filteredAccounts.length} 条
-                </div>
-
-                <span className="shrink-0 text-sm leading-none text-stone-500">
-                  {safePage} / {pageCount} 页
-                </span>
-                <Select
-                  value={pageSize}
-                  onValueChange={(value) => {
-                    setPageSize(value);
-                    setPage(1);
-                  }}
-                >
-                  <SelectTrigger className="h-10 w-[108px] shrink-0 rounded-lg border-stone-200 bg-white text-sm leading-none">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="10">10 / 页</SelectItem>
-                    <SelectItem value="20">20 / 页</SelectItem>
-                    <SelectItem value="50">50 / 页</SelectItem>
-                    <SelectItem value="100">100 / 页</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
-                  disabled={safePage <= 1}
-                  onClick={() => setPage((prev) => Math.max(1, prev - 1))}
-                >
-                  <ChevronLeft className="size-4" />
-                </Button>
-                {paginationItems.map((item, index) =>
-                  item === "..." ? (
-                    <span
-                      key={`ellipsis-${index}`}
-                      className="px-1 text-sm text-stone-400"
-                    >
-                      ...
-                    </span>
-                  ) : (
-                    <Button
-                      key={item}
-                      variant={item === safePage ? "default" : "outline"}
-                      className={cn(
-                        "h-10 min-w-10 shrink-0 rounded-lg px-3",
-                        item === safePage
-                          ? "bg-stone-950 text-white hover:bg-stone-800"
-                          : "border-stone-200 bg-white text-stone-700",
-                      )}
-                      onClick={() => setPage(item)}
-                    >
-                      {item}
-                    </Button>
-                  ),
-                )}
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
-                  disabled={safePage >= pageCount}
-                  onClick={() =>
-                    setPage((prev) => Math.min(pageCount, prev + 1))
-                  }
-                >
-                  <ChevronRight className="size-4" />
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        ) : (
+          <ProviderAccountSection
+            provider={activeDefinition}
+            accounts={activeRows.accounts}
+            filteredAccounts={activeRows.filteredAccounts}
+            currentRows={activeRows.currentRows}
+            selectedIds={selectedIds[activeProvider]}
+            filters={filters[activeProvider]}
+            page={activeRows.safePage}
+            pageSize={pageSize}
+            pageCount={activeRows.pageCount}
+            safePage={activeRows.safePage}
+            startIndex={activeRows.startIndex}
+            isLoading={isLoading}
+            isRefreshing={isRefreshing}
+            isDeleting={isDeleting}
+            isExporting={isExporting}
+            isUpdating={isUpdating}
+            onFilterChange={(next) => setProviderFilters(activeProvider, next)}
+            onPageChange={(nextPage) => setProviderPage(activeProvider, nextPage)}
+            onSelectChange={(ids) => setProviderSelection(activeProvider, ids)}
+            onRefresh={(tokens) => void handleRefreshAccounts(activeProvider, tokens)}
+            onDelete={(tokens) => void handleDeleteTokens(activeProvider, tokens)}
+            onDeleteLimited={() => void handleDeleteLimitedAccounts(activeProvider)}
+            onExport={(tokens) => void handleExportAccounts(activeProvider, tokens)}
+            onEdit={openEditDialog}
+          />
+        )}
       </section>
     </>
   );

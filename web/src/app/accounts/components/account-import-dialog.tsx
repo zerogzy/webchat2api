@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useRef, useState, type ChangeEvent } from "react";
+import { useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
   ArrowLeft,
   ExternalLink,
@@ -16,7 +16,6 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -25,13 +24,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { createAccounts, type Account, type AccountImportPayload } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -39,14 +31,14 @@ import {
   accountImportProviderOptions,
   getAccountProviderDefinition,
 } from "@/providers/registry";
-import type { ProviderId } from "@/providers/types";
+import type { AccountImportMethod, ProviderId } from "@/providers/types";
 
-type ImportMethod = "menu" | "token" | "session" | "cpa";
+type ImportMethod = "provider" | "methods" | AccountImportMethod;
 type ImportProvider = ProviderId;
 
 type AccountImportDialogProps = {
   disabled?: boolean;
-  onImported: (items: Account[]) => void;
+  onImported: (items: Account[], provider: ImportProvider) => void;
 };
 
 type PendingCpaImport = {
@@ -56,10 +48,13 @@ type PendingCpaImport = {
   errorCount: number;
 };
 
-function normalizeProvider(value: unknown): ImportProvider | string {
-  const provider = typeof value === "string" ? value.trim().toLowerCase() : "";
-  return provider || "gpt";
-}
+const methodIcons: Record<AccountImportMethod, typeof KeyRound> = {
+  token: KeyRound,
+  session: FileJson,
+  cpa: Files,
+  "remote-cpa": Files,
+  sub2api: ServerCog,
+};
 
 function splitTokens(value: string) {
   return value
@@ -73,7 +68,7 @@ function getSessionAccessToken(value: unknown) {
   return typeof token === "string" ? token.trim() : "";
 }
 
-function getCpaAccount(value: unknown): AccountImportPayload | null {
+function getCpaAccount(value: unknown, provider: ImportProvider): AccountImportPayload | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
@@ -87,7 +82,7 @@ function getCpaAccount(value: unknown): AccountImportPayload | null {
   const payload: AccountImportPayload = {
     ...raw,
     access_token: token,
-    provider: normalizeProvider(raw.provider),
+    provider,
   };
   delete payload.accessToken;
   if (payload.type === "codex") {
@@ -106,35 +101,49 @@ function readFileAsText(file: File) {
   });
 }
 
+function methodTitle(method: AccountImportMethod, provider: ImportProvider) {
+  const definition = getAccountProviderDefinition(provider);
+  if (method === "token") return definition.importTokenCopy.label;
+  if (method === "session") return definition.importSessionCopy.label;
+  if (method === "cpa") return "本地 JSON 文件";
+  if (method === "remote-cpa") return "远程 CPA 服务器";
+  return "Sub2API 服务器";
+}
+
+function methodDescription(method: AccountImportMethod, provider: ImportProvider) {
+  const definition = getAccountProviderDefinition(provider);
+  if (method === "token") return definition.importTokenCopy.fileHelp ?? definition.importTokenCopy.placeholder;
+  if (method === "session") return definition.importSessionCopy.help || definition.importSessionCopy.placeholder;
+  if (method === "cpa") return definition.importFlowCopy.cpaHelp;
+  if (method === "remote-cpa") return definition.importFlowCopy.remoteCpaDescription;
+  return definition.importFlowCopy.sub2apiDescription;
+}
 
 function MethodCard({
-  title,
-  description,
-  icon: Icon,
+  method,
+  provider,
   onClick,
 }: {
-  title: string;
-  description: string;
-  icon: typeof KeyRound;
+  method: AccountImportMethod;
+  provider: ImportProvider;
   onClick: () => void;
 }) {
+  const Icon = methodIcons[method];
   return (
     <button
       type="button"
       onClick={onClick}
-      className="w-full rounded-2xl border border-stone-200 bg-white p-0 text-left transition hover:border-stone-300 hover:bg-stone-50"
+      className="w-full rounded-2xl border border-stone-200 bg-white p-4 text-left transition hover:border-stone-300 hover:bg-stone-50"
     >
-      <Card className="rounded-2xl border-0 bg-transparent shadow-none">
-        <CardContent className="flex items-start gap-4 p-4">
-          <div className="rounded-xl bg-stone-100 p-3 text-stone-700">
-            <Icon className="size-5" />
-          </div>
-          <div className="space-y-1">
-            <div className="text-sm font-semibold text-stone-900">{title}</div>
-            <div className="text-sm leading-6 text-stone-500">{description}</div>
-          </div>
-        </CardContent>
-      </Card>
+      <div className="flex items-start gap-4">
+        <div className="rounded-xl bg-stone-100 p-3 text-stone-700">
+          <Icon className="size-5" />
+        </div>
+        <div className="space-y-1">
+          <div className="text-sm font-semibold text-stone-900">{methodTitle(method, provider)}</div>
+          <div className="text-sm leading-6 text-stone-500">{methodDescription(method, provider)}</div>
+        </div>
+      </div>
     </button>
   );
 }
@@ -142,7 +151,7 @@ function MethodCard({
 export function AccountImportDialog({ disabled, onImported }: AccountImportDialogProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [method, setMethod] = useState<ImportMethod>("menu");
+  const [method, setMethod] = useState<ImportMethod>("provider");
   const [tokenInput, setTokenInput] = useState("");
   const [importProvider, setImportProvider] = useState<ImportProvider>("gpt");
   const [sessionInput, setSessionInput] = useState("");
@@ -153,8 +162,11 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   const txtInputRef = useRef<HTMLInputElement | null>(null);
   const cpaInputRef = useRef<HTMLInputElement | null>(null);
 
+  const providerDefinition = getAccountProviderDefinition(importProvider);
+  const availableMethods = providerDefinition.importMethods;
+
   const resetState = () => {
-    setMethod("menu");
+    setMethod("provider");
     setTokenInput("");
     setImportProvider("gpt");
     setSessionInput("");
@@ -173,18 +185,15 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     const normalizedTokens = tokens.map((item) => item.trim()).filter(Boolean);
 
     if (normalizedTokens.length === 0) {
-      toast.error("请先提供至少一个可用 Token");
+      toast.error("请先提供至少一个可用凭据");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const data = await createAccounts(normalizedTokens, accountPayloads);
-      const hasNonRefreshableImport = accountPayloads.some(
-        (item) => item.provider && !getAccountProviderDefinition(item.provider).refresh.enabled,
-      );
-      const refreshText = hasNonRefreshableImport ? "按提交内容加入号池；仅 GPT 账号会自动刷新信息" : "已自动刷新 GPT 账号信息";
-      onImported(data.items);
+      const data = await createAccounts(normalizedTokens, accountPayloads, importProvider);
+      const refreshText = providerDefinition.refresh.enabled ? `已自动刷新 ${providerDefinition.label} 账号信息` : "按提交内容加入号池";
+      onImported(data.items, importProvider);
       setOpen(false);
       resetState();
 
@@ -194,9 +203,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           `${successText ?? "导入完成"}，新增 ${data.added ?? 0} 个，已刷新 ${data.refreshed ?? 0} 个，失败 ${data.errors?.length ?? 0} 个${firstError ? `，首个错误：${firstError}` : ""}`,
         );
       } else {
-        toast.success(
-          `${successText ?? "导入完成"}，新增 ${data.added ?? 0} 个，跳过 ${data.skipped ?? 0} 个重复项，${refreshText}`,
-        );
+        toast.success(`${successText ?? "导入完成"}，新增 ${data.added ?? 0} 个，跳过 ${data.skipped ?? 0} 个重复项，${refreshText}`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "导入账户失败";
@@ -206,13 +213,11 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     }
   };
 
-  const buildTokenPayloads = (tokens: string[], provider: ImportProvider): AccountImportPayload[] =>
-    tokens.map((token) => ({ access_token: token, provider }));
+  const buildTokenPayloads = (tokens: string[]): AccountImportPayload[] => tokens.map((token) => ({ access_token: token, provider: importProvider }));
 
   const handleImportTokenText = async () => {
     const tokens = splitTokens(tokenInput);
-    const providerDefinition = getAccountProviderDefinition(importProvider);
-    await submitTokens(tokens, providerDefinition.importTokenCopy.successLabel, buildTokenPayloads(tokens, importProvider));
+    await submitTokens(tokens, providerDefinition.importTokenCopy.successLabel, buildTokenPayloads(tokens));
   };
 
   const handleTxtSelected = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -228,7 +233,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
       const tokens = splitTokens(content);
 
       if (tokens.length === 0) {
-        toast.error("TXT 文件里没有读取到有效 Token");
+        toast.error("TXT 文件里没有读取到有效凭据");
         return;
       }
 
@@ -236,7 +241,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
         const next = [...splitTokens(prev), ...tokens];
         return next.join("\n");
       });
-      toast.success(`已从 ${file.name} 读取 ${tokens.length} 个 Token`);
+      toast.success(`已从 ${file.name} 读取 ${tokens.length} 个凭据`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "读取 TXT 文件失败";
       toast.error(message);
@@ -244,12 +249,11 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   };
 
   const handleImportSessionJson = async () => {
-    const providerDefinition = getAccountProviderDefinition(importProvider);
     const sessionCopy = providerDefinition.importSessionCopy;
 
     if (!sessionCopy.parseJsonAccessToken) {
       const tokens = splitTokens(sessionInput);
-      await submitTokens(tokens, sessionCopy.successLabel, buildTokenPayloads(tokens, importProvider));
+      await submitTokens(tokens, sessionCopy.successLabel, buildTokenPayloads(tokens));
       return;
     }
 
@@ -267,7 +271,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
         return;
       }
 
-      await submitTokens([token], sessionCopy.successLabel, buildTokenPayloads([token], importProvider));
+      await submitTokens([token], sessionCopy.successLabel, buildTokenPayloads([token]));
     } catch (error) {
       const message = error instanceof Error ? error.message : (sessionCopy.parseErrorMessage ?? "Session JSON 解析失败");
       toast.error(message);
@@ -287,10 +291,8 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
         files.map(async (file) => {
           const raw = await readFileAsText(file);
           const parsed = JSON.parse(raw) as unknown;
-          const account = getCpaAccount(parsed);
-          return {
-            account,
-          };
+          const account = getCpaAccount(parsed, importProvider);
+          return { account };
         }),
       );
 
@@ -300,27 +302,96 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
       const errorCount = results.length - parsedFileCount;
 
       if (parsedFileCount === 0) {
-        toast.error("这些 CPA JSON 文件里没有读取到可用 access_token");
+        toast.error("这些 JSON 文件里没有读取到可用凭据");
         return;
       }
 
-      setPendingCpaImport({
-        tokens,
-        accounts,
-        parsedFileCount,
-        errorCount,
-      });
+      setPendingCpaImport({ tokens, accounts, parsedFileCount, errorCount });
       setConfirmOpen(true);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "读取 CPA JSON 文件失败";
+      const message = error instanceof Error ? error.message : "读取 JSON 文件失败";
       toast.error(message);
     }
   };
 
+  const renderProviderStep = () => (
+    <div className="space-y-3">
+      {accountImportProviderOptions.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => {
+            setImportProvider(option.value);
+            setMethod("methods");
+          }}
+          className={cn(
+            "w-full rounded-2xl border bg-white p-4 text-left transition hover:border-stone-300 hover:bg-stone-50",
+            importProvider === option.value ? "border-stone-300" : "border-stone-200",
+          )}
+        >
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="text-sm font-semibold text-stone-900">{option.label}</div>
+              <div className="text-sm leading-6 text-stone-500">{option.description}</div>
+            </div>
+            <div className="text-xs font-semibold tracking-[0.16em] text-stone-400 uppercase">Select</div>
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+
+  const renderMethodMenu = () => {
+    if (availableMethods.length === 0) {
+      return <div className="rounded-2xl border border-stone-200 bg-stone-50 p-5 text-sm text-stone-500">{providerDefinition.importFlowCopy.emptyMethodsLabel}</div>;
+    }
+
+    return (
+      <div className="space-y-4">
+        <button
+          type="button"
+          onClick={() => setMethod("provider")}
+          className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800"
+        >
+          <ArrowLeft className="size-4" />
+          返回选择服务商
+        </button>
+        <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-600">
+          {providerDefinition.importFlowCopy.methodIntro}
+        </div>
+        <div className="space-y-3">
+          {availableMethods.map((item) => (
+            <MethodCard
+              key={item}
+              method={item}
+              provider={importProvider}
+              onClick={() => {
+                if (item === "remote-cpa" || item === "sub2api") {
+                  setOpen(false);
+                  resetState();
+                  router.push("/settings");
+                  return;
+                }
+                setMethod(item);
+              }}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   const renderMethodBody = () => {
+    if (method === "provider") {
+      return renderProviderStep();
+    }
+
+    if (method === "methods" || !availableMethods.includes(method)) {
+      return renderMethodMenu();
+    }
+
     if (method === "token") {
       const tokenCount = splitTokens(tokenInput).length;
-      const providerDefinition = getAccountProviderDefinition(importProvider);
       const tokenCopy = providerDefinition.importTokenCopy;
 
       return (
@@ -328,28 +399,13 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           <div className="flex items-center justify-between">
             <button
               type="button"
-              onClick={() => setMethod("menu")}
+              onClick={() => setMethod("methods")}
               className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800"
             >
               <ArrowLeft className="size-4" />
               返回导入方式
             </button>
-            <span className="text-xs text-stone-400">当前识别 {tokenCount} 个 Token</span>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-stone-700">服务商</label>
-            <Select value={importProvider} onValueChange={(value) => setImportProvider(value as ImportProvider)}>
-              <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {accountImportProviderOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <span className="text-xs text-stone-400">当前识别 {tokenCount} 个凭据</span>
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium text-stone-700">{tokenCopy.label}</label>
@@ -357,7 +413,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
               placeholder={tokenCopy.placeholder}
               value={tokenInput}
               onChange={(event) => setTokenInput(event.target.value)}
-              className="min-h-56 resize-none rounded-xl border-stone-200"
+              className="min-h-48 resize-none rounded-xl border-stone-200"
             />
           </div>
           <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50 p-4">
@@ -366,72 +422,39 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                 <div className="text-sm font-medium text-stone-800">从 TXT 文件导入</div>
                 <div className="text-sm leading-6 text-stone-500">{tokenCopy.fileHelp}</div>
               </div>
-              <Button
-                type="button"
-                variant="outline"
-                className="rounded-xl border-stone-200 bg-white"
-                onClick={() => txtInputRef.current?.click()}
-                disabled={isSubmitting}
-              >
+              <Button type="button" variant="outline" className="rounded-xl border-stone-200 bg-white" onClick={() => txtInputRef.current?.click()} disabled={isSubmitting}>
                 <FileText className="size-4" />
                 选择 TXT
               </Button>
             </div>
           </div>
-          <input
-            ref={txtInputRef}
-            type="file"
-            accept=".txt,text/plain"
-            className="hidden"
-            onChange={(event) => void handleTxtSelected(event)}
-          />
+          <input ref={txtInputRef} type="file" accept=".txt,text/plain" className="hidden" onChange={(event) => void handleTxtSelected(event)} />
         </div>
       );
     }
 
     if (method === "session") {
-      const providerDefinition = getAccountProviderDefinition(importProvider);
       const sessionCopy = providerDefinition.importSessionCopy;
 
       return (
         <div className="space-y-4">
           <button
             type="button"
-            onClick={() => setMethod("menu")}
+            onClick={() => setMethod("methods")}
             className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800"
           >
             <ArrowLeft className="size-4" />
             返回导入方式
           </button>
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-stone-700">服务商</label>
-            <Select value={importProvider} onValueChange={(value) => setImportProvider(value as ImportProvider)}>
-              <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {accountImportProviderOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
           <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-600">
             {sessionCopy.parseJsonAccessToken && sessionCopy.sessionUrl ? (
               <>
                 打开{" "}
-                <a
-                  href={sessionCopy.sessionUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 font-medium text-stone-900 underline underline-offset-4"
-                >
+                <a href={sessionCopy.sessionUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-stone-900 underline underline-offset-4">
                   {sessionCopy.sessionUrl}
                   <ExternalLink className="size-3.5" />
                 </a>
-                ，复制页面返回的完整 JSON，系统会自动提取其中的 `accessToken` 导入。
+                ，复制页面返回的完整 JSON，系统会自动提取其中的 accessToken 导入。
               </>
             ) : (
               sessionCopy.help
@@ -439,9 +462,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           </div>
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
             <div className="font-medium">风险提示</div>
-            <div>
-              不要使用自己的大号，尽量使用不常用的小号进行导入，避免出现封号风险。本项目不承担任何封号风险责任。
-            </div>
+            <div>不要使用自己的大号，尽量使用不常用的小号进行导入，避免出现封号风险。本项目不承担任何封号风险责任。</div>
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium text-stone-700">{sessionCopy.label}</label>
@@ -449,7 +470,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
               placeholder={sessionCopy.placeholder}
               value={sessionInput}
               onChange={(event) => setSessionInput(event.target.value)}
-              className="min-h-56 resize-none rounded-xl border-stone-200 font-mono text-xs"
+              className="min-h-48 resize-none rounded-xl border-stone-200 font-mono text-xs"
             />
           </div>
         </div>
@@ -461,7 +482,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
         <div className="space-y-4">
           <button
             type="button"
-            onClick={() => setMethod("menu")}
+            onClick={() => setMethod("methods")}
             className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800"
           >
             <ArrowLeft className="size-4" />
@@ -469,158 +490,77 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           </button>
           <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50 p-5">
             <div className="space-y-2">
-              <div className="text-sm font-medium text-stone-800">多选本地 CPA JSON 文件</div>
-              <div className="text-sm leading-6 text-stone-500">
-                每个文件应为一个 JSON 对象。系统会从对象中自动提取 `access_token` 或 `accessToken`，并保留 `provider`；缺省按 GPT 导入。Grok/Gemini 请确认 token/cookie 字段已按后端支持格式提供。
-              </div>
+              <div className="text-sm font-medium text-stone-800">多选本地 JSON 文件</div>
+              <div className="text-sm leading-6 text-stone-500">{providerDefinition.importFlowCopy.cpaHelp}</div>
             </div>
-            <Button
-              type="button"
-              className="mt-4 rounded-xl bg-stone-950 text-white hover:bg-stone-800"
-              onClick={() => cpaInputRef.current?.click()}
-              disabled={isSubmitting}
-            >
+            <Button type="button" className="mt-4 rounded-xl bg-stone-950 text-white hover:bg-stone-800" onClick={() => cpaInputRef.current?.click()} disabled={isSubmitting}>
               <Files className="size-4" />
               选择多个 JSON 文件
             </Button>
           </div>
-          <input
-            ref={cpaInputRef}
-            type="file"
-            accept=".json,application/json"
-            multiple
-            className="hidden"
-            onChange={(event) => void handleCpaSelected(event)}
-          />
+          <input ref={cpaInputRef} type="file" accept=".json,application/json" multiple className="hidden" onChange={(event) => void handleCpaSelected(event)} />
           {pendingCpaImport ? (
             <div className="rounded-2xl border border-stone-200 bg-white p-4 text-sm leading-6 text-stone-600">
-              最近一次读取到 {pendingCpaImport.parsedFileCount} 个 Token
-              {pendingCpaImport.errorCount > 0 ? `，另有 ${pendingCpaImport.errorCount} 个文件未提取成功` : ""}。
+              最近一次读取到 {pendingCpaImport.parsedFileCount} 个凭据{pendingCpaImport.errorCount > 0 ? `，另有 ${pendingCpaImport.errorCount} 个文件未提取成功` : ""}。
             </div>
           ) : null}
         </div>
       );
     }
 
-    return (
-      <div className="space-y-3">
-        <MethodCard
-          title="导入 Access Token / Cookie"
-          description="GPT 使用 access token；Grok/Gemini 可粘贴当前后端支持的 token 或 cookie，一行一个。"
-          icon={KeyRound}
-          onClick={() => setMethod("token")}
-        />
-        <MethodCard
-          title="导入 Session JSON / Cookie"
-          description="GPT 可粘贴 chatgpt.com session JSON；Grok/Gemini 请按提示粘贴 cookie/session。"
-          icon={FileJson}
-          onClick={() => setMethod("session")}
-        />
-        <MethodCard
-          title="导入 CPA JSON 文件"
-          description="支持一次多选多个本地 JSON 文件，逐个读取对象里的 access_token 后导入。"
-          icon={Files}
-          onClick={() => setMethod("cpa")}
-        />
-        <MethodCard
-          title="从远程 CPA 服务器导入"
-          description="前往设置页面配置远程 CPA 服务器后再执行导入。"
-          icon={Files}
-          onClick={() => {
-            setOpen(false);
-            resetState();
-            router.push("/settings");
-          }}
-        />
-        <MethodCard
-          title="从 Sub2API 服务器导入"
-          description="前往设置页面配置 Sub2API 服务器，再选择其中的 OpenAI 账号导入。"
-          icon={ServerCog}
-          onClick={() => {
-            setOpen(false);
-            resetState();
-            router.push("/settings");
-          }}
-        />
-      </div>
-    );
+    return renderMethodMenu();
   };
 
   const footerDisabled = disabled || isSubmitting;
-  const selectedProviderDefinition = getAccountProviderDefinition(importProvider);
-  const selectedTokenCopy = selectedProviderDefinition.importTokenCopy;
-  const selectedSessionCopy = selectedProviderDefinition.importSessionCopy;
+  const selectedTokenCopy = providerDefinition.importTokenCopy;
+  const selectedSessionCopy = providerDefinition.importSessionCopy;
+  const title = useMemo(() => {
+    if (method === "provider") return "选择导入服务商";
+    if (method === "methods" || !availableMethods.includes(method)) return `${providerDefinition.label} 导入方式`;
+    return `${providerDefinition.label} ${methodTitle(method, importProvider)}`;
+  }, [availableMethods, importProvider, method, providerDefinition.label]);
 
   return (
     <>
       <Dialog open={open} onOpenChange={handleOpenChange}>
-        <Button
-          className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
-          onClick={() => setOpen(true)}
-          disabled={disabled}
-        >
+        <Button className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={() => setOpen(true)} disabled={disabled}>
           <Upload className="size-4" />
           导入
         </Button>
-        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+        <DialogContent showCloseButton={false} className="max-h-[88vh] overflow-y-auto rounded-2xl p-6 sm:max-w-2xl">
           <DialogHeader className="gap-2">
-            <DialogTitle>
-              {method === "menu"
-                ? "导入账户"
-                : method === "token"
-                  ? "导入 Access Token / Cookie"
-                  : method === "session"
-                    ? "导入 Session JSON"
-                    : "导入 CPA JSON"}
-            </DialogTitle>
+            <DialogTitle>{title}</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              {method === "menu"
-                ? "选择一种导入方式。GPT 导入会自动拉取邮箱、套餐类型和图像额度；Grok/Gemini 会按提交内容加入号池。"
-                : method === "token"
-                  ? "支持手动粘贴或从 TXT 文件导入，一行一个；Grok 支持 token 或 cookie，sso= 前缀可选；Gemini 需包含 __Secure-1PSID。"
-                  : method === "session"
-                    ? "GPT Session JSON 会自动提取 accessToken；Grok/Gemini 请按提示粘贴 cookie/session。"
-                    : "支持一次读取多个本地 JSON 文件，并在提交前做数量确认。"}
+              {method === "provider" ? "先选择服务商，再展示该服务商支持的导入方式和字段说明。" : providerDefinition.importFlowCopy.methodIntro}
             </DialogDescription>
           </DialogHeader>
 
           {renderMethodBody()}
 
           <DialogFooter className="pt-2">
-            <Button
-              variant="secondary"
-              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
-              onClick={() => setOpen(false)}
-              disabled={footerDisabled}
-            >
+            <Button variant="secondary" className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200" onClick={() => setOpen(false)} disabled={footerDisabled}>
               取消
             </Button>
+            {method !== "provider" && (
+              <Button variant="outline" className="h-10 rounded-xl border-stone-200 bg-white px-5 text-stone-700" onClick={() => setMethod("provider")} disabled={footerDisabled}>
+                切换服务商
+              </Button>
+            )}
             {method === "token" ? (
-              <Button
-                className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
-                onClick={() => void handleImportTokenText()}
-                disabled={footerDisabled}
-              >
+              <Button className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800" onClick={() => void handleImportTokenText()} disabled={footerDisabled}>
                 {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
                 {selectedTokenCopy.submitLabel}
               </Button>
             ) : null}
             {method === "session" ? (
-              <Button
-                className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
-                onClick={() => void handleImportSessionJson()}
-                disabled={footerDisabled}
-              >
+              <Button className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800" onClick={() => void handleImportSessionJson()} disabled={footerDisabled}>
                 {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
                 {selectedSessionCopy.submitLabel}
               </Button>
             ) : null}
             {method === "cpa" ? (
               <Button
-                className={cn(
-                  "h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800",
-                  !pendingCpaImport ? "hidden" : "",
-                )}
+                className={cn("h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800", !pendingCpaImport ? "hidden" : "")}
                 onClick={() => setConfirmOpen(true)}
                 disabled={footerDisabled || !pendingCpaImport}
               >
@@ -634,34 +574,19 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent className="rounded-2xl p-6">
           <DialogHeader className="gap-2">
-            <DialogTitle>确认导入 CPA Token</DialogTitle>
+            <DialogTitle>确认导入 {providerDefinition.label} JSON</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              {pendingCpaImport
-                ? `确认识别到 ${pendingCpaImport.parsedFileCount} 个 Token，是否确认导入？`
-                : "尚未读取到可导入的 Token。"}
-              {pendingCpaImport?.errorCount
-                ? `，另有 ${pendingCpaImport.errorCount} 个文件未提取成功。`
-                : "。"}
+              {pendingCpaImport ? `确认识别到 ${pendingCpaImport.parsedFileCount} 个凭据，是否确认导入到 ${providerDefinition.label}？` : "尚未读取到可导入凭据。"}
+              {pendingCpaImport?.errorCount ? `，另有 ${pendingCpaImport.errorCount} 个文件未提取成功。` : "。"}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="pt-2">
-            <Button
-              variant="secondary"
-              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
-              onClick={() => setConfirmOpen(false)}
-              disabled={isSubmitting}
-            >
+            <Button variant="secondary" className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200" onClick={() => setConfirmOpen(false)} disabled={isSubmitting}>
               返回
             </Button>
             <Button
               className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
-              onClick={() =>
-                void submitTokens(
-                  pendingCpaImport?.tokens ?? [],
-                  "CPA JSON 导入完成",
-                  pendingCpaImport?.accounts ?? [],
-                )
-              }
+              onClick={() => void submitTokens(pendingCpaImport?.tokens ?? [], `${providerDefinition.label} JSON 导入完成`, pendingCpaImport?.accounts ?? [])}
               disabled={isSubmitting || !pendingCpaImport}
             >
               {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
