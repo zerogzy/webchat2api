@@ -429,20 +429,20 @@ class AccountService:
             provider_accounts = self._provider_accounts_locked(target_provider)
             for access_token in tokens:
                 current = provider_accounts.get(access_token)
-                if current is None:
-                    added += 1
-                    current = {}
-                else:
-                    skipped += 1
+                current_payload = current or {}
                 account = self._normalize_account(
                     {
-                        **current,
+                        **current_payload,
                         "access_token": access_token,
-                        "type": str(current.get("type") or "free"),
+                        "type": str(current_payload.get("type") or "free"),
                         "provider": target_provider,
                     }
                 )
                 if account is not None:
+                    if current is None:
+                        added += 1
+                    else:
+                        skipped += 1
                     self._set_account_locked(account)
             self._save_accounts()
             items = [dict(item) for item in self._all_accounts_locked()]

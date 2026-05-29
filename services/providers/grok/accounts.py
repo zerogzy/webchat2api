@@ -85,12 +85,30 @@ def normalize_string_list(value: Any) -> list[str]:
     return [item for item in (normalize_capability(raw) for raw in raw_items) if item]
 
 
+def _looks_like_existing_normalized_account(item: dict[str, Any], token: str) -> bool:
+    if not token or "=" in token:
+        return False
+    return any(key in item for key in ("quota_console", "success", "fail", "last_used_at", "app_chat"))
+
+
 def normalize_access_token(item: dict[str, Any]) -> str:
-    token = clean_string(item.get("access_token") or item.get("accessToken") or item.get("sso") or item.get("sso-rw") or "")
+    token = clean_string(item.get("access_token") or item.get("accessToken") or "")
+    if item.get("_grok_sso_import") and token:
+        return token
+    if _looks_like_existing_normalized_account(item, token):
+        return token
+    explicit_sso = clean_string(item.get("sso"))
+    if explicit_sso:
+        item["_grok_sso_import"] = True
+        return explicit_sso
     simple_sso = re.fullmatch(r"sso\s*=\s*(.+)", token, flags=re.IGNORECASE)
     if simple_sso and ";" not in token:
+        item["_grok_sso_import"] = True
         return simple_sso.group(1).strip()
-    return token
+    if any(name.lower() == "sso" for name, _ in _cookie_items(token)):
+        item["_grok_sso_import"] = True
+        return token
+    return ""
 
 
 def _cookie_items(cookie_header: Any) -> list[tuple[str, str]]:
@@ -155,6 +173,7 @@ def normalize_console_quota(value: Any) -> dict[str, Any]:
 
 
 def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
+    account.pop("_grok_sso_import", None)
     raw_tier = account.get("tier") or account.get("model_tier")
     normalized_tier = normalize_tier(raw_tier) or clean_string(raw_tier) or None
     account["tier"] = normalized_tier

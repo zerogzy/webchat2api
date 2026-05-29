@@ -178,7 +178,7 @@ class AccountExportTests(unittest.TestCase):
             MemoryStorage(
                 [
                     {"access_token": "gpt-token", "provider": GPT_PROVIDER, "id_token": "gpt-id", "refresh_token": "gpt-rt"},
-                    {"access_token": "grok-token", "provider": GROK_PROVIDER, "id_token": "grok-id", "refresh_token": "grok-rt"},
+                    {"access_token": "sso=grok-token", "provider": GROK_PROVIDER, "id_token": "grok-id", "refresh_token": "grok-rt"},
                     {"access_token": "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts", "provider": GEMINI_PROVIDER},
                 ]
             )
@@ -201,7 +201,7 @@ class AccountExportTests(unittest.TestCase):
             MemoryStorage(
                 [
                     {"access_token": "shared-token", "provider": GPT_PROVIDER, "id_token": "gpt-id", "refresh_token": "gpt-rt"},
-                    {"access_token": "shared-token", "provider": GROK_PROVIDER, "id_token": "grok-id", "refresh_token": "grok-rt"},
+                    {"access_token": "sso=shared-token", "provider": GROK_PROVIDER, "id_token": "grok-id", "refresh_token": "grok-rt"},
                 ]
             )
         )
@@ -278,9 +278,9 @@ class AccountExportTests(unittest.TestCase):
             MemoryStorage(
                 [
                     {"access_token": "limited_gpt", "provider": "gpt", "status": "限流"},
-                    {"access_token": "limited_grok", "provider": "grok", "status": "限流"},
+                    {"access_token": "sso=limited_grok", "provider": "grok", "status": "限流"},
                     {"access_token": "normal", "provider": "gpt", "status": "正常"},
-                    {"access_token": "disabled", "provider": "grok", "status": "禁用"},
+                    {"access_token": "sso=disabled", "provider": "grok", "status": "禁用"},
                 ]
             )
         )

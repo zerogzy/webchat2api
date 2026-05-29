@@ -197,7 +197,8 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(grok_accounts.normalize_access_token({"access_token": " SSO = cookie-token "}), "cookie-token")
         self.assertEqual(grok_accounts.normalize_access_token({"access_token": " SSO = cookie-token ; other=value "}), "SSO = cookie-token ; other=value")
         self.assertEqual(grok_accounts.normalize_access_token({"sso": " field-token "}), "field-token")
-        self.assertEqual(grok_accounts.normalize_access_token({"sso-rw": " rw-token "}), "rw-token")
+        self.assertEqual(grok_accounts.normalize_access_token({"access_token": "plain-token"}), "")
+        self.assertEqual(grok_accounts.normalize_access_token({"sso-rw": " rw-token "}), "")
 
     def test_app_chat_headers_use_grok_app_shape_with_plain_token(self) -> None:
         with (
