@@ -97,7 +97,8 @@ def stream_generate_content(model: str, body: dict[str, Any], completion_func: C
         return
     text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict))
     for chunk in gemini.synthetic_stream_content(text):
-        yield gemini_response(_model_id(model), [{"text": chunk}], None, text)
+        if chunk:
+            yield gemini_response(_model_id(model), [{"text": chunk}], None, text)
     yield gemini_response(_model_id(model), [], "STOP", text)
 
 
