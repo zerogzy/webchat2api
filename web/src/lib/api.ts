@@ -1,13 +1,15 @@
 import { httpRequest, request } from "@/lib/request";
+import { getAccountProviderDefinition } from "@/providers/registry";
 
 export type AccountType = string;
-export type AccountProvider = "gpt" | "grok" | string;
+export type AccountProvider = "gpt" | "grok" | "gemini" | string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = string;
 export type AuthRole = "admin" | "user";
 
 export type Account = {
-  access_token: string;
+  access_token?: string;
+  has_gemini_session?: boolean;
   type: AccountType;
   provider?: AccountProvider;
   export_type?: string | null;
@@ -72,7 +74,7 @@ export type AccountImportPayload = {
   [key: string]: unknown;
 };
 
-export type AccountExportProvider = "gpt" | "grok";
+export type AccountExportProvider = "gpt" | "grok" | "gemini";
 
 export type SettingsConfig = {
   proxy: string;
@@ -245,6 +247,8 @@ export type ModelInfo = {
   object?: string;
   created?: number;
   owned_by?: string;
+  provider?: AccountProvider;
+  capability?: "chat" | "image" | "image_edit" | "video" | string;
 };
 
 export type ModelListResponse = {
@@ -334,7 +338,7 @@ function getFilenameFromDisposition(value: unknown, fallback: string) {
 }
 
 function accountExportFallbackFilename(provider: AccountExportProvider) {
-  return provider === "gpt" ? "webchat2api-gpt.txt" : "webchat2api_grok.txt";
+  return getAccountProviderDefinition(provider).exportFilename;
 }
 
 export async function exportAccounts(provider: AccountExportProvider, accessTokens: string[] = []) {

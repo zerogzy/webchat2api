@@ -66,6 +66,7 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
 def create_router() -> APIRouter:
     router = APIRouter()
 
+    @router.get("/openai/v1/models", include_in_schema=False)
     @router.get("/v1/models")
     async def list_models(
             authorization: str | None = Header(default=None),
@@ -105,6 +106,7 @@ def create_router() -> APIRouter:
         payload["base_url"] = resolve_image_base_url(request)
         return await call.run(openai_v1_image_edit.handle, payload)
 
+    @router.post("/openai/v1/chat/completions", include_in_schema=False)
     @router.post("/v1/chat/completions")
     async def create_chat_completion(
             body: ChatCompletionRequest,
@@ -133,6 +135,7 @@ def create_router() -> APIRouter:
         await filter_or_log(call, request_preview)
         return await call.run(openai_v1_response.handle, payload)
 
+    @router.post("/claude/v1/messages", include_in_schema=False)
     @router.post("/v1/messages")
     async def create_message(
             body: AnthropicMessageRequest,

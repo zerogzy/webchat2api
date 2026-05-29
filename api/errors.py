@@ -10,11 +10,17 @@ from services.protocol.error_response import anthropic_error_response, openai_er
 
 
 def _is_openai_compatible_path(path: str) -> bool:
-    return path == "/v1" or path.startswith("/v1/")
+    return (
+        path == "/v1"
+        or path.startswith("/v1/")
+        or path == "/openai/v1"
+        or path.startswith("/openai/v1/")
+        or path.startswith("/claude/v1/")
+    )
 
 
 def _is_anthropic_messages_path(path: str) -> bool:
-    return path == "/v1/messages"
+    return path == "/v1/messages" or path == "/claude/v1/messages"
 
 
 def _compatible_error_response(

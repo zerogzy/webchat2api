@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException
@@ -19,6 +20,7 @@ from api.support import (
     sanitize_sub2api_servers,
 )
 from services.account_service import account_service
+from services.models import normalize_account_provider
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.remote_account_service import REMOTE_ACCOUNT_SYNC_FAILED, remote_account_config, remote_account_import_service
 from services.sub2api_service import (
@@ -56,7 +58,7 @@ class AccountRefreshRequest(BaseModel):
 
 class AccountExportRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
-    provider: Literal["gpt", "grok"]
+    provider: Literal["gpt", "grok", "gemini"]
 
 
 class AccountUpdateRequest(BaseModel):
@@ -113,7 +115,7 @@ class RemoteAccountSourceCreateRequest(BaseModel):
     auth_header: str = ""
     auth_token: str = ""
     bearer_token: str = ""
-    provider: Literal["", "gpt", "grok"] = ""
+    provider: Literal["", "gpt", "grok", "gemini"] = ""
     sync_strategy: Literal["merge", "replace"] = "merge"
     interval_seconds: int | None = None
 
@@ -126,7 +128,7 @@ class RemoteAccountSourceUpdateRequest(BaseModel):
     auth_header: str | None = None
     auth_token: str | None = None
     bearer_token: str | None = None
-    provider: Literal["", "gpt", "grok"] | None = None
+    provider: Literal["", "gpt", "grok", "gemini"] | None = None
     sync_strategy: Literal["merge", "replace"] | None = None
     interval_seconds: int | None = None
 
@@ -138,7 +140,7 @@ class RemoteAccountInjectRequest(BaseModel):
     strategy: Literal["merge", "replace"] = "merge"
     source_id: str = ""
     source_name: str = ""
-    provider: Literal["gpt", "grok"] = "gpt"
+    provider: Literal["gpt", "grok", "gemini"] = "gpt"
 
 
 def _account_payload_token(item: dict[str, Any]) -> str:
@@ -149,8 +151,41 @@ def _unique_tokens(tokens: list[str]) -> list[str]:
     return list(dict.fromkeys(str(token or "").strip() for token in tokens if str(token or "").strip()))
 
 
-def _export_filename(provider: Literal["gpt", "grok"]) -> str:
-    return "webchat2api-gpt.txt" if provider == "gpt" else "webchat2api_grok.txt"
+gemini_accounts = importlib.import_module("services.providers.gemini.accounts")
+gpt_accounts = importlib.import_module("services.providers.gpt.accounts")
+grok_accounts = importlib.import_module("services.providers.grok.accounts")
+
+
+PROVIDER_ACCOUNT_STRATEGIES = {
+    "gpt": gpt_accounts,
+    "grok": grok_accounts,
+    "gemini": gemini_accounts,
+}
+
+
+def _account_strategy(provider: Any):
+    return PROVIDER_ACCOUNT_STRATEGIES[normalize_account_provider(provider)]
+
+
+def _export_filename(provider: Literal["gpt", "grok", "gemini"]) -> str:
+    return _account_strategy(provider).export_filename()
+
+
+def sanitize_account(item: dict[str, Any]) -> dict[str, Any]:
+    return _account_strategy(item.get("provider")).sanitize_account(item)
+
+
+def sanitize_accounts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [sanitize_account(item) for item in items]
+
+
+def sanitize_account_result(result: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(result)
+    if isinstance(sanitized.get("items"), list):
+        sanitized["items"] = sanitize_accounts([item for item in sanitized["items"] if isinstance(item, dict)])
+    if isinstance(sanitized.get("item"), dict):
+        sanitized["item"] = sanitize_account(sanitized["item"])
+    return sanitized
 
 
 def create_router() -> APIRouter:
@@ -206,7 +241,7 @@ def create_router() -> APIRouter:
     @router.get("/api/accounts")
     async def get_accounts(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"items": account_service.list_accounts()}
+        return {"items": sanitize_accounts(account_service.list_accounts())}
 
     @router.post("/api/accounts")
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):
@@ -227,22 +262,22 @@ def create_router() -> APIRouter:
         else:
             result = account_service.add_accounts(tokens)
         refresh_result = account_service.refresh_accounts(tokens)
-        return {
+        return sanitize_account_result({
             **result,
             "refreshed": refresh_result.get("refreshed", 0),
             "errors": refresh_result.get("errors", []),
             "items": refresh_result.get("items", result.get("items", [])),
-        }
+        })
 
     @router.delete("/api/accounts")
     async def delete_accounts(body: AccountDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         if body.mode == "limited":
-            return account_service.delete_limited_accounts()
+            return sanitize_account_result(account_service.delete_limited_accounts())
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        return account_service.delete_accounts(tokens)
+        return sanitize_account_result(account_service.delete_accounts(tokens))
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
@@ -252,7 +287,7 @@ def create_router() -> APIRouter:
             access_tokens = account_service.list_tokens()
         if not access_tokens:
             raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
-        return account_service.refresh_accounts(access_tokens)
+        return sanitize_account_result(account_service.refresh_accounts(access_tokens))
 
     @router.post("/api/accounts/export")
     async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):
@@ -293,7 +328,7 @@ def create_router() -> APIRouter:
         account = account_service.update_account(access_token, updates)
         if account is None:
             raise HTTPException(status_code=404, detail={"error": "account not found"})
-        return {"item": account, "items": account_service.list_accounts()}
+        return {"item": sanitize_account(account), "items": sanitize_accounts(account_service.list_accounts())}
 
     @router.get("/api/cpa/pools")
     async def list_cpa_pools(authorization: str | None = Header(default=None)):

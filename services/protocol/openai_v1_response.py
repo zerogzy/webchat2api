@@ -7,14 +7,18 @@ from typing import Any, Iterable, Iterator
 
 from fastapi import HTTPException
 
-from services.models import GROK_PROVIDER, is_grok_app_chat_model, resolve_model
-from services.providers import grok
+from services.models import GEMINI_PROVIDER, GROK_PROVIDER, resolve_model
+from services.providers.gemini import chat as gemini_chat
+from services.providers.gemini import images as gemini_images
+from services.providers.gpt import chat as gpt_chat
+from services.providers.gpt import images as gpt_images
+from services.providers.grok import chat as grok_chat
+from services.providers.grok import images as grok_images
 import services.protocol.tool_calls as tool_calls
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
     encode_images,
-    stream_image_outputs_with_pool,
     stream_text_deltas,
     text_backend,
 )
@@ -203,14 +207,17 @@ def stream_text_response(backend, body: dict[str, Any]) -> Iterator[dict[str, An
     created = int(time.time())
     yield response_created(response_id, model, created)
     request = ConversationRequest(model=model, messages=messages)
-    full_text = "".join(stream_text_deltas(backend, request))
+    if stream_text_deltas is not gpt_chat.stream_text_deltas:
+        full_text = "".join(stream_text_deltas(backend, request))
+    else:
+        full_text = gpt_chat.chat_completion(body, messages, model, backend=backend)
     yield from stream_response_output_items(response_output_from_text(body, full_text), response_id, model, created)
 
 
 def stream_grok_console_response(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     model = str(body.get("model") or "auto").strip() or "auto"
     spec = resolve_model(model)
-    if is_grok_app_chat_model(spec):
+    if grok_chat.is_app_chat_model(spec):
         raise HTTPException(status_code=501, detail={"error": "Grok app-chat is not supported on /v1/responses"})
     messages, _ = prepare_response_messages(body)
     if not messages:
@@ -218,8 +225,22 @@ def stream_grok_console_response(body: dict[str, Any]) -> Iterator[dict[str, Any
     response_id = f"resp_{uuid.uuid4().hex}"
     created = int(time.time())
     yield response_created(response_id, model, created)
-    completion = grok.console_chat_completion(body, spec, messages)
-    yield from stream_response_output_items(response_output_from_text(body, completion.content), response_id, model, created)
+    completion = grok_chat.chat_completion(body, spec, messages)
+    yield from stream_response_output_items(response_output_from_text(body, completion["content"]), response_id, model, created)
+
+
+def stream_gemini_response(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    model = str(body.get("model") or "auto").strip() or "auto"
+    spec = resolve_model(model)
+    messages, _ = prepare_response_messages(body)
+    if not messages:
+        raise HTTPException(status_code=400, detail={"error": "input text is required"})
+    response_id = f"resp_{uuid.uuid4().hex}"
+    created = int(time.time())
+    yield response_created(response_id, model, created)
+    completion = gemini_chat.chat_completion(body, spec, messages)
+    content = str(getattr(completion, "content", ""))
+    yield from stream_response_output_items(response_output_from_text(body, content), response_id, model, created)
 
 
 def stream_image_response(image_outputs: Iterable[ImageOutput], prompt: str, model: str) -> Iterator[dict[str, Any]]:
@@ -263,6 +284,9 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         if spec.provider == GROK_PROVIDER:
             yield from stream_grok_console_response(body)
             return
+        if spec.provider == GEMINI_PROVIDER:
+            yield from stream_gemini_response(body)
+            return
         yield from stream_text_response(text_backend(), body)
         return
 
@@ -276,13 +300,23 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         images = encode_images([(image_data, "image.png", mime_type)])
     else:
         images = None
-    image_outputs = stream_image_outputs_with_pool(ConversationRequest(
+    request = ConversationRequest(
         prompt=prompt,
         model=model,
         size=None if images else "1:1",
         response_format="b64_json",
         images=images,
-    ))
+    )
+    spec = resolve_model(model)
+    if spec.provider == GROK_PROVIDER:
+        if images:
+            from services.protocol.conversation import ImageGenerationError
+            raise ImageGenerationError("Grok response image generation does not support image input", status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model")
+        image_outputs = grok_images.generation_outputs(body, spec, prompt, 1)
+    elif spec.provider == GEMINI_PROVIDER:
+        image_outputs = gemini_images.response_image_outputs(request, spec)
+    else:
+        image_outputs = gpt_images.response_image_outputs(request, spec)
     yield from stream_image_response(image_outputs, prompt, model)
 
 
