@@ -23,7 +23,6 @@ import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -319,7 +318,7 @@ function ImageManagerContent() {
   }, [startDate, endDate]);
 
   return (
-    <section className="relative overflow-hidden rounded-[28px] border border-white/70 bg-white/55 p-5 shadow-[var(--shadow-soft)] backdrop-blur-sm before:pointer-events-none before:absolute before:inset-x-6 before:top-0 before:h-px before:bg-white/90 lg:p-6">
+    <section className="flex flex-col gap-5">
       <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div className="space-y-2">
           <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
@@ -329,7 +328,7 @@ function ImageManagerContent() {
             图片管理
           </h1>
         </div>
-        <div className="grid gap-2 rounded-2xl border border-white/70 bg-white/45 p-2 shadow-sm sm:grid-cols-2 lg:flex lg:items-center">
+        <div className="grid gap-2 sm:grid-cols-2 lg:flex lg:items-center">
           <DateRangeFilter
             startDate={startDate}
             endDate={endDate}
@@ -372,7 +371,7 @@ function ImageManagerContent() {
       </div>
 
       {allTags.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/70 bg-white/45 p-3 shadow-sm">
+        <div className="flex flex-wrap items-center gap-2 border-y border-stone-200/70 py-3">
           <span className="text-xs font-medium text-stone-500">
             <Tag className="mr-1 inline size-3.5" />
             标签筛选：
@@ -419,319 +418,316 @@ function ImageManagerContent() {
         </div>
       ) : null}
 
-      <Card className="overflow-hidden rounded-[26px] border-white/80 bg-white/90 shadow-[var(--shadow-soft)]">
-        <CardContent className="p-0">
-          <div className="flex flex-col gap-3 border-b border-stone-100 bg-stone-50/35 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
-              <ImageIcon className="size-4" />共 {filteredItems.length} 张
-              {selectedTags.length > 0 ? (
-                <span className="text-stone-400">
-                  （筛选自 {items.length} 张）
-                </span>
-              ) : null}
-              <label className="flex items-center gap-2">
-                <Checkbox
-                  checked={currentPageSelected}
-                  onCheckedChange={(checked) =>
-                    togglePaths(currentRows.map(imageKey), Boolean(checked))
-                  }
-                />
-                本页全选
-              </label>
-              <label className="flex items-center gap-2">
-                <Checkbox
-                  checked={allSelected}
-                  onCheckedChange={(checked) =>
-                    togglePaths(filteredItems.map(imageKey), Boolean(checked))
-                  }
-                />
-                全选结果
-              </label>
-              {selectedPaths.length > 0 ? (
-                <span className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-semibold text-stone-600 shadow-sm">
-                  已选 {selectedPaths.length} 张
-                </span>
-              ) : null}
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                variant="ghost"
-                className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
-                onClick={() => void loadImages()}
-                disabled={isLoading}
-              >
-                <RefreshCw
-                  className={`size-4 ${isLoading ? "animate-spin" : ""}`}
-                />
-                刷新
-              </Button>
-              <button
-                type="button"
-                className="rounded-lg px-3 py-1.5 text-sm text-stone-500 transition hover:bg-white hover:text-stone-900 disabled:text-stone-300"
-                onClick={() => setSelectedPaths([])}
-                disabled={selectedPaths.length === 0 || isDeleting}
-              >
-                取消选择
-              </button>
-              <Button
-                variant="outline"
-                className="h-8 rounded-lg border-stone-200 bg-white px-3 text-stone-600 shadow-sm hover:bg-stone-50 hover:text-stone-900"
-                onClick={() => void handleBatchDownload()}
-                disabled={
-                  selectedPaths.length === 0 || isDownloading || isDeleting
+      <div className="overflow-hidden rounded-2xl border border-stone-200/80 bg-white/72">
+        <div className="flex flex-col gap-3 border-b border-stone-200/70 bg-stone-50/45 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
+            <ImageIcon className="size-4" />共 {filteredItems.length} 张
+            {selectedTags.length > 0 ? (
+              <span className="text-stone-400">
+                （筛选自 {items.length} 张）
+              </span>
+            ) : null}
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={currentPageSelected}
+                onCheckedChange={(checked) =>
+                  togglePaths(currentRows.map(imageKey), Boolean(checked))
                 }
-              >
-                {isDownloading ? (
-                  <LoaderCircle className="size-4 animate-spin" />
-                ) : (
-                  <Download className="size-4" />
-                )}
-                下载所选
-              </Button>
-              <Button
-                variant="outline"
-                className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 shadow-sm hover:bg-rose-50 hover:text-rose-700"
-                onClick={() => setDeleteMode("selected")}
-                disabled={selectedPaths.length === 0 || isDeleting}
-              >
-                <Trash2 className="size-4" />
-                删除所选
-              </Button>
-            </div>
+              />
+              本页全选
+            </label>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={allSelected}
+                onCheckedChange={(checked) =>
+                  togglePaths(filteredItems.map(imageKey), Boolean(checked))
+                }
+              />
+              全选结果
+            </label>
+            {selectedPaths.length > 0 ? (
+              <span className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-semibold text-stone-600 shadow-sm">
+                已选 {selectedPaths.length} 张
+              </span>
+            ) : null}
           </div>
-          <div className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {currentRows.map((item) => {
-              const imageIndex = filteredItems.findIndex(
-                (row) => row.url === item.url,
-              );
-              const storage = storageBadge(item);
-              return (
-                <div
-                  key={item.rel}
-                  className="group border-r border-b border-stone-100 p-3 transition hover:bg-stone-50/80 sm:p-4"
-                >
-                  <div className="relative">
-                    <button
-                      type="button"
-                      className="relative block aspect-square w-full cursor-zoom-in overflow-hidden rounded-xl bg-stone-100 text-left shadow-inner"
-                      onClick={() => {
-                        setLightboxIndex(imageIndex);
-                        setLightboxOpen(true);
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="ghost"
+              className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
+              onClick={() => void loadImages()}
+              disabled={isLoading}
+            >
+              <RefreshCw
+                className={`size-4 ${isLoading ? "animate-spin" : ""}`}
+              />
+              刷新
+            </Button>
+            <button
+              type="button"
+              className="rounded-lg px-3 py-1.5 text-sm text-stone-500 transition hover:bg-white hover:text-stone-900 disabled:text-stone-300"
+              onClick={() => setSelectedPaths([])}
+              disabled={selectedPaths.length === 0 || isDeleting}
+            >
+              取消选择
+            </button>
+            <Button
+              variant="outline"
+              className="h-8 rounded-lg border-stone-200 bg-white px-3 text-stone-600 shadow-sm hover:bg-stone-50 hover:text-stone-900"
+              onClick={() => void handleBatchDownload()}
+              disabled={
+                selectedPaths.length === 0 || isDownloading || isDeleting
+              }
+            >
+              {isDownloading ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : (
+                <Download className="size-4" />
+              )}
+              下载所选
+            </Button>
+            <Button
+              variant="outline"
+              className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 shadow-sm hover:bg-rose-50 hover:text-rose-700"
+              onClick={() => setDeleteMode("selected")}
+              disabled={selectedPaths.length === 0 || isDeleting}
+            >
+              <Trash2 className="size-4" />
+              删除所选
+            </Button>
+          </div>
+        </div>
+        <div className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {currentRows.map((item) => {
+            const imageIndex = filteredItems.findIndex(
+              (row) => row.url === item.url,
+            );
+            const storage = storageBadge(item);
+            return (
+              <div
+                key={item.rel}
+                className="group border-r border-b border-stone-200/70 p-3 transition hover:bg-stone-50/75 sm:p-4"
+              >
+                <div className="relative">
+                  <button
+                    type="button"
+                    className="relative block aspect-square w-full cursor-zoom-in overflow-hidden rounded-xl bg-stone-100 text-left shadow-inner"
+                    onClick={() => {
+                      setLightboxIndex(imageIndex);
+                      setLightboxOpen(true);
+                    }}
+                  >
+                    <img
+                      src={item.thumbnail_url || item.url}
+                      alt={item.name}
+                      className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.03]"
+                      onError={(event) => {
+                        if (event.currentTarget.src !== item.url) {
+                          event.currentTarget.src = item.url;
+                        }
                       }}
+                    />
+                    <span className="absolute right-2 bottom-2 rounded-full bg-black/55 p-2 text-white opacity-100 shadow-lg transition sm:opacity-0 sm:group-hover:opacity-100">
+                      <Maximize2 className="size-4" />
+                    </span>
+                    <span
+                      className={`absolute top-2 left-2 rounded-md border px-2.5 py-1 text-[10px] font-semibold shadow-sm ${storage.className}`}
                     >
-                      <img
-                        src={item.thumbnail_url || item.url}
-                        alt={item.name}
-                        className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.03]"
-                        onError={(event) => {
-                          if (event.currentTarget.src !== item.url) {
-                            event.currentTarget.src = item.url;
-                          }
+                      {storage.label}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="absolute top-2 right-2 z-10 inline-flex size-8 items-center justify-center rounded-full bg-black/55 text-white opacity-100 shadow-lg transition hover:bg-rose-600 sm:opacity-0 sm:group-hover:opacity-100"
+                    title="删除图片"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openDeleteDialog(item);
+                    }}
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                </div>
+                <div className="mt-3 space-y-2 text-xs text-stone-500">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0 truncate font-medium text-stone-700">
+                      <CalendarDays className="mr-1 inline size-3.5" />
+                      {item.created_at}
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-8 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+                        onClick={() => void handleSingleDownload(item)}
+                        title="下载图片"
+                      >
+                        <Download className="size-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-8 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(item.url);
+                          toast.success("图片地址已复制");
                         }}
+                      >
+                        <Copy className="size-4" />
+                      </Button>
+                      <Checkbox
+                        checked={selectedSet.has(imageKey(item))}
+                        onCheckedChange={(checked) =>
+                          togglePaths([imageKey(item)], Boolean(checked))
+                        }
                       />
-                      <span className="absolute right-2 bottom-2 rounded-full bg-black/55 p-2 text-white opacity-100 shadow-lg transition sm:opacity-0 sm:group-hover:opacity-100">
-                        <Maximize2 className="size-4" />
-                      </span>
-                      <span
-                        className={`absolute top-2 left-2 rounded-md border px-2.5 py-1 text-[10px] font-semibold shadow-sm ${storage.className}`}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span>{formatSize(item.size)}</span>
+                    <span className="inline-flex items-center gap-2">
+                      <Badge
+                        variant="outline"
+                        className={`rounded-md px-2.5 py-1 text-[10px] shadow-sm ${storage.className}`}
                       >
                         {storage.label}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      className="absolute top-2 right-2 z-10 inline-flex size-8 items-center justify-center rounded-full bg-black/55 text-white opacity-100 shadow-lg transition hover:bg-rose-600 sm:opacity-0 sm:group-hover:opacity-100"
-                      title="删除图片"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openDeleteDialog(item);
+                      </Badge>
+                      {item.width && item.height
+                        ? `${item.width} x ${item.height}`
+                        : "-"}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1">
+                    {(item.tags ?? []).map((tag) => (
+                      <Badge
+                        key={tag}
+                        variant="secondary"
+                        className="gap-0.5 rounded-md py-0 pr-0.5 text-[10px] shadow-sm"
+                      >
+                        {tag}
+                        <button
+                          type="button"
+                          className="inline-flex size-3.5 items-center justify-center rounded-full hover:bg-stone-300"
+                          onClick={() => handleRemoveTag(item, tag)}
+                        >
+                          <X className="size-2.5" />
+                        </button>
+                      </Badge>
+                    ))}
+                    <Popover
+                      open={tagEditTarget?.rel === item.rel}
+                      onOpenChange={(open) => {
+                        setTagEditTarget(open ? item : null);
+                        setTagInput("");
                       }}
                     >
-                      <Trash2 className="size-3.5" />
-                    </button>
-                  </div>
-                  <div className="mt-3 space-y-2 text-xs text-stone-500">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="min-w-0 truncate font-medium text-stone-700">
-                        <CalendarDays className="mr-1 inline size-3.5" />
-                        {item.created_at}
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-8 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-700"
-                          onClick={() => void handleSingleDownload(item)}
-                          title="下载图片"
+                      <PopoverTrigger asChild>
+                        <button
+                          type="button"
+                          className="inline-flex size-5 items-center justify-center rounded-full border border-dashed border-stone-300 text-stone-400 hover:border-stone-500 hover:text-stone-600"
+                          title="添加标签"
                         >
-                          <Download className="size-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-8 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-700"
-                          onClick={() => {
-                            void navigator.clipboard.writeText(item.url);
-                            toast.success("图片地址已复制");
-                          }}
-                        >
-                          <Copy className="size-4" />
-                        </Button>
-                        <Checkbox
-                          checked={selectedSet.has(imageKey(item))}
-                          onCheckedChange={(checked) =>
-                            togglePaths([imageKey(item)], Boolean(checked))
-                          }
-                        />
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span>{formatSize(item.size)}</span>
-                      <span className="inline-flex items-center gap-2">
-                        <Badge
-                          variant="outline"
-                          className={`rounded-md px-2.5 py-1 text-[10px] shadow-sm ${storage.className}`}
-                        >
-                          {storage.label}
-                        </Badge>
-                        {item.width && item.height
-                          ? `${item.width} x ${item.height}`
-                          : "-"}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-1">
-                      {(item.tags ?? []).map((tag) => (
-                        <Badge
-                          key={tag}
-                          variant="secondary"
-                          className="gap-0.5 rounded-md py-0 pr-0.5 text-[10px] shadow-sm"
-                        >
-                          {tag}
-                          <button
-                            type="button"
-                            className="inline-flex size-3.5 items-center justify-center rounded-full hover:bg-stone-300"
-                            onClick={() => handleRemoveTag(item, tag)}
-                          >
-                            <X className="size-2.5" />
-                          </button>
-                        </Badge>
-                      ))}
-                      <Popover
-                        open={tagEditTarget?.rel === item.rel}
-                        onOpenChange={(open) => {
-                          setTagEditTarget(open ? item : null);
-                          setTagInput("");
-                        }}
-                      >
-                        <PopoverTrigger asChild>
-                          <button
-                            type="button"
-                            className="inline-flex size-5 items-center justify-center rounded-full border border-dashed border-stone-300 text-stone-400 hover:border-stone-500 hover:text-stone-600"
-                            title="添加标签"
-                          >
-                            <Plus className="size-3" />
-                          </button>
-                        </PopoverTrigger>
-                        <PopoverContent align="start" className="w-56 p-2">
-                          <div className="space-y-2">
-                            <div className="text-xs font-medium text-stone-500">
-                              添加标签
-                            </div>
-                            <div className="flex gap-1">
-                              <Input
-                                value={tagInput}
-                                onChange={(e) => setTagInput(e.target.value)}
-                                placeholder="输入标签名"
-                                className="h-8 text-xs"
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    handleAddTag(item);
-                                  }
-                                }}
-                              />
-                              <Button
-                                size="icon"
-                                variant="outline"
-                                className="size-8 shrink-0"
-                                onClick={() => handleAddTag(item)}
-                              >
-                                <Plus className="size-3.5" />
-                              </Button>
-                            </div>
-                            {allTags.filter(
-                              (t) => !(item.tags ?? []).includes(t),
-                            ).length > 0 ? (
-                              <div className="flex flex-wrap gap-1 border-t border-stone-100 pt-2">
-                                {allTags
-                                  .filter((t) => !(item.tags ?? []).includes(t))
-                                  .map((tag) => (
-                                    <button
-                                      key={tag}
-                                      type="button"
-                                      onClick={() => {
-                                        void handleSetTags(item, [
-                                          ...(item.tags ?? []),
-                                          tag,
-                                        ]);
-                                        setTagEditTarget(null);
-                                      }}
-                                    >
-                                      <Badge
-                                        variant="outline"
-                                        className="cursor-pointer rounded-md text-[10px] hover:bg-stone-100"
-                                      >
-                                        {tag}
-                                      </Badge>
-                                    </button>
-                                  ))}
-                              </div>
-                            ) : null}
+                          <Plus className="size-3" />
+                        </button>
+                      </PopoverTrigger>
+                      <PopoverContent align="start" className="w-56 p-2">
+                        <div className="space-y-2">
+                          <div className="text-xs font-medium text-stone-500">
+                            添加标签
                           </div>
-                        </PopoverContent>
-                      </Popover>
-                    </div>
+                          <div className="flex gap-1">
+                            <Input
+                              value={tagInput}
+                              onChange={(e) => setTagInput(e.target.value)}
+                              placeholder="输入标签名"
+                              className="h-8 text-xs"
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  handleAddTag(item);
+                                }
+                              }}
+                            />
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              className="size-8 shrink-0"
+                              onClick={() => handleAddTag(item)}
+                            >
+                              <Plus className="size-3.5" />
+                            </Button>
+                          </div>
+                          {allTags.filter((t) => !(item.tags ?? []).includes(t))
+                            .length > 0 ? (
+                            <div className="flex flex-wrap gap-1 border-t border-stone-100 pt-2">
+                              {allTags
+                                .filter((t) => !(item.tags ?? []).includes(t))
+                                .map((tag) => (
+                                  <button
+                                    key={tag}
+                                    type="button"
+                                    onClick={() => {
+                                      void handleSetTags(item, [
+                                        ...(item.tags ?? []),
+                                        tag,
+                                      ]);
+                                      setTagEditTarget(null);
+                                    }}
+                                  >
+                                    <Badge
+                                      variant="outline"
+                                      className="cursor-pointer rounded-md text-[10px] hover:bg-stone-100"
+                                    >
+                                      {tag}
+                                    </Badge>
+                                  </button>
+                                ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      </PopoverContent>
+                    </Popover>
                   </div>
                 </div>
-              );
-            })}
-          </div>
-          <div className="flex flex-col gap-3 border-t border-stone-100 bg-stone-50/30 px-4 py-3 text-sm text-stone-500 sm:flex-row sm:items-center sm:justify-end">
-            <span>
-              第 {safePage} / {pageCount} 页，共 {filteredItems.length} 张
-            </span>
-            <Button
-              variant="outline"
-              size="icon"
-              className="size-9 rounded-lg border-stone-200 bg-white"
-              disabled={safePage <= 1}
-              onClick={() => setPage((value) => Math.max(1, value - 1))}
-            >
-              <ChevronLeft className="size-4" />
-            </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              className="size-9 rounded-lg border-stone-200 bg-white"
-              disabled={safePage >= pageCount}
-              onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
-            >
-              <ChevronRight className="size-4" />
-            </Button>
-          </div>
-          {!isLoading && filteredItems.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center text-sm text-stone-500">
-              <div className="rounded-2xl bg-stone-100/80 p-3 text-stone-500 shadow-inner">
-                <ImageIcon className="size-5" />
               </div>
-              <div className="space-y-1">
-                <p className="font-medium text-stone-700">没有找到图片</p>
-                <p>调整日期或标签筛选后重试。</p>
-              </div>
+            );
+          })}
+        </div>
+        <div className="flex flex-col gap-3 border-t border-stone-100 bg-stone-50/30 px-4 py-3 text-sm text-stone-500 sm:flex-row sm:items-center sm:justify-end">
+          <span>
+            第 {safePage} / {pageCount} 页，共 {filteredItems.length} 张
+          </span>
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-9 rounded-lg border-stone-200 bg-white"
+            disabled={safePage <= 1}
+            onClick={() => setPage((value) => Math.max(1, value - 1))}
+          >
+            <ChevronLeft className="size-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-9 rounded-lg border-stone-200 bg-white"
+            disabled={safePage >= pageCount}
+            onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
+          >
+            <ChevronRight className="size-4" />
+          </Button>
+        </div>
+        {!isLoading && filteredItems.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center text-sm text-stone-500">
+            <div className="rounded-2xl bg-stone-100/80 p-3 text-stone-500 shadow-inner">
+              <ImageIcon className="size-5" />
             </div>
-          ) : null}
-        </CardContent>
-      </Card>
+            <div className="space-y-1">
+              <p className="font-medium text-stone-700">没有找到图片</p>
+              <p>调整日期或标签筛选后重试。</p>
+            </div>
+          </div>
+        ) : null}
+      </div>
 
       <Dialog
         open={dialogVisible}

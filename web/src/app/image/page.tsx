@@ -1,11 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { History, LoaderCircle, Plus, SendHorizonal, Trash2 } from "lucide-react";
+import {
+  History,
+  LoaderCircle,
+  Plus,
+  SendHorizonal,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { ImageComposer } from "@/app/image/components/image-composer";
-import { ImageResults, type ImageLightboxItem } from "@/app/image/components/image-results";
+import {
+  ImageResults,
+  type ImageLightboxItem,
+} from "@/app/image/components/image-results";
 import { ImageSidebar } from "@/app/image/components/image-sidebar";
 import { ImageLightbox } from "@/components/image-lightbox";
 import {
@@ -17,7 +26,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   createChatCompletion,
@@ -31,7 +46,12 @@ import {
   type ImageTask,
   type ModelInfo,
 } from "@/lib/api";
-import { getAccountProviderDefinition } from "@/providers/registry";
+import {
+  accountProviderDefinitions,
+  getAccountProviderDefinition,
+  knownProviderIds,
+  type KnownProviderId,
+} from "@/providers/registry";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 import {
@@ -56,33 +76,29 @@ import {
   type TextChatMessage,
 } from "@/store/text-conversations";
 
-const ACTIVE_CONVERSATION_STORAGE_KEY = "webchat2api:image_active_conversation_id";
+const ACTIVE_CONVERSATION_STORAGE_KEY =
+  "webchat2api:image_active_conversation_id";
 const IMAGE_SIZE_STORAGE_KEY = "webchat2api:image_last_size";
 const IMAGE_COUNT_STORAGE_KEY = "webchat2api:image_last_count";
 const IMAGE_MODEL_STORAGE_KEY = "webchat2api:image_last_model";
 const TEXT_MODEL_STORAGE_KEY = "webchat2api:text_last_model";
 const IMAGE_PROVIDER_STORAGE_KEY = "webchat2api:image_last_provider";
 const TEXT_PROVIDER_STORAGE_KEY = "webchat2api:text_last_provider";
-const FALLBACK_IMAGE_MODELS = ["gpt-image-2", "codex-gpt-image-2"];
-const FALLBACK_TEXT_MODELS = ["gpt-4.1-mini", "gpt-4o-mini", "gpt-3.5-turbo"];
-const FALLBACK_GROK_TEXT_MODELS = ["grok-4.3"];
-const SUPPORTED_TEST_PROVIDERS = ["gpt", "grok", "gemini"] as const;
-const IMAGE_MODEL_KEYWORDS = ["image", "dall-e", "gpt-image", "codex-gpt-image"];
-const KNOWN_TEXT_MODEL_PREFIXES = ["gpt-", "grok-", "gemini-"];
-const IMAGE_CAPABILITIES = ["image", "image_edit"];
-const IMAGE_PROVIDER_UNSUPPORTED_COPY: Record<TestProviderId, string> = {
-  gpt: "当前 GPT 模型列表未返回图像能力。",
-  grok: "当前 Grok 模型列表未返回图像能力。",
-  gemini: "Gemini 暂未提供图像生成/编辑接口，请切换到文本试验或选择其他服务。",
-};
-const IMAGE_PROVIDER_NO_METADATA_COPY: Record<TestProviderId, string | undefined> = {
-  gpt: undefined,
-  grok: "当前无法确认 Grok 图像能力，已禁用服务选择。",
-  gemini: "Gemini 暂未提供图像生成/编辑接口，请切换到文本试验或选择其他服务。",
-};
+const TEST_PROVIDER_DEFINITIONS = accountProviderDefinitions.filter(
+  (provider) => provider.trial.enabled,
+);
+const SUPPORTED_TEST_PROVIDERS = knownProviderIds.filter(
+  (provider) => getAccountProviderDefinition(provider).trial.enabled,
+) as KnownProviderId[];
+const DEFAULT_TEST_PROVIDER = SUPPORTED_TEST_PROVIDERS[0] ?? "gpt";
+const DEFAULT_IMAGE_MODEL =
+  getAccountProviderDefinition(DEFAULT_TEST_PROVIDER).trial.imageFallbackModels[0] ??
+  "";
+const DEFAULT_TEXT_MODEL =
+  getAccountProviderDefinition(DEFAULT_TEST_PROVIDER).trial.textFallbackModels[0] ??
+  "";
 
-type TestProviderId = (typeof SUPPORTED_TEST_PROVIDERS)[number];
-
+type TestProviderId = KnownProviderId;
 type ExperimentMode = "text" | "image";
 type TextModelTestStatus = "pending" | "testing" | "success" | "error";
 
@@ -91,7 +107,6 @@ type TextModelTestResult = {
   status: TextModelTestStatus;
   message: string;
 };
-
 
 function clampImageCount(value: string) {
   return String(Math.min(100, Math.max(1, Math.floor(Number(value) || 1))));
@@ -120,8 +135,15 @@ function formatConversationTime(value: string) {
 }
 
 function formatAvailableQuota(accounts: Account[]) {
-  const availableAccounts = accounts.filter((account) => account.status !== "禁用");
-  return String(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
+  const availableAccounts = accounts.filter(
+    (account) => account.status !== "禁用",
+  );
+  return String(
+    availableAccounts.reduce(
+      (sum, account) => sum + Math.max(0, account.quota),
+      0,
+    ),
+  );
 }
 
 function createId() {
@@ -148,10 +170,15 @@ function dataUrlToFile(dataUrl: string, fileName: string, mimeType?: string) {
   for (let index = 0; index < binary.length; index += 1) {
     bytes[index] = binary.charCodeAt(index);
   }
-  return new File([bytes], fileName, { type: mimeType || matchedMimeType || "image/png" });
+  return new File([bytes], fileName, {
+    type: mimeType || matchedMimeType || "image/png",
+  });
 }
 
-function buildReferenceImageFromResult(image: StoredImage, fileName: string): StoredReferenceImage | null {
+function buildReferenceImageFromResult(
+  image: StoredImage,
+  fileName: string,
+): StoredReferenceImage | null {
   if (!image.b64_json) {
     return null;
   }
@@ -172,7 +199,10 @@ async function fetchImageAsFile(url: string, fileName: string) {
   return new File([blob], fileName, { type: blob.type || "image/png" });
 }
 
-async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: string) {
+async function buildReferenceImageFromStoredImage(
+  image: StoredImage,
+  fileName: string,
+) {
   const direct = buildReferenceImageFromResult(image, fileName);
   if (direct) {
     return {
@@ -195,7 +225,10 @@ async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: 
   };
 }
 
-function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage {
+function taskDataToStoredImage(
+  image: StoredImage,
+  task: ImageTask,
+): StoredImage {
   if (task.status === "success") {
     const first = task.data?.[0];
     if (!first?.b64_json && !first?.url) {
@@ -240,7 +273,9 @@ function sleep(ms: number) {
 
 function pickFallbackConversationId(conversations: ImageConversation[]) {
   const activeConversation = conversations.find((conversation) =>
-    conversation.turns.some((turn) => turn.status === "queued" || turn.status === "generating"),
+    conversation.turns.some(
+      (turn) => turn.status === "queued" || turn.status === "generating",
+    ),
   );
   return activeConversation?.id ?? conversations[0]?.id ?? null;
 }
@@ -259,58 +294,108 @@ function uniqueModelIds(items: string[]) {
   return models;
 }
 
+function providerTrialMetadataIncludes(
+  provider: AccountProvider | null | undefined,
+  field: "imageCapabilities" | "textCapabilities",
+  value: string,
+) {
+  if (provider) {
+    return getAccountProviderDefinition(provider).trial[field].includes(value);
+  }
+
+  return TEST_PROVIDER_DEFINITIONS.some((definition) =>
+    definition.trial[field].includes(value),
+  );
+}
+
 function isImageModel(model: string, metadata?: ModelInfo) {
-  if (metadata?.capability && IMAGE_CAPABILITIES.includes(metadata.capability)) {
+  if (
+    metadata?.capability &&
+    providerTrialMetadataIncludes(
+      metadata.provider,
+      "imageCapabilities",
+      metadata.capability,
+    )
+  ) {
     return true;
   }
+
   const normalized = model.toLowerCase();
-  return IMAGE_MODEL_KEYWORDS.some((keyword) => normalized.includes(keyword));
+  return TEST_PROVIDER_DEFINITIONS.some((provider) =>
+    provider.trial.imageModelKeywords.some((keyword) =>
+      normalized.includes(keyword),
+    ),
+  );
 }
 
 function isTextModel(model: string, metadata?: ModelInfo) {
   if (metadata?.capability) {
-    return metadata.capability === "chat";
+    return providerTrialMetadataIncludes(
+      metadata.provider,
+      "textCapabilities",
+      metadata.capability,
+    );
   }
+
   const normalized = model.toLowerCase();
-  return !isImageModel(normalized) || KNOWN_TEXT_MODEL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+  return (
+    !isImageModel(normalized) ||
+    TEST_PROVIDER_DEFINITIONS.some((provider) =>
+      provider.trial.textModelPrefixes.some((prefix) =>
+        normalized.startsWith(prefix),
+      ),
+    )
+  );
 }
 
-function normalizeTestProvider(provider: AccountProvider | null | undefined): TestProviderId {
-  const normalized = String(provider || "gpt").trim().toLowerCase();
-  return SUPPORTED_TEST_PROVIDERS.includes(normalized as TestProviderId) ? (normalized as TestProviderId) : "gpt";
+function normalizeTestProvider(
+  provider: AccountProvider | null | undefined,
+): TestProviderId {
+  const normalized = String(provider || DEFAULT_TEST_PROVIDER)
+    .trim()
+    .toLowerCase();
+  return SUPPORTED_TEST_PROVIDERS.includes(normalized as TestProviderId)
+    ? (normalized as TestProviderId)
+    : DEFAULT_TEST_PROVIDER;
 }
 
 function providerFromModelId(model: string): TestProviderId {
   const normalized = model.toLowerCase();
-  if (normalized.startsWith("grok-")) {
-    return "grok";
-  }
-  if (normalized.startsWith("gemini-")) {
-    return "gemini";
-  }
-  return "gpt";
+  return (
+    TEST_PROVIDER_DEFINITIONS.find((provider) =>
+      provider.trial.modelIdPrefixes.some((prefix) =>
+        normalized.startsWith(prefix),
+      ),
+    )?.id ?? DEFAULT_TEST_PROVIDER
+  );
 }
 
 function modelProvider(model: string, metadata?: ModelInfo) {
-  return normalizeTestProvider(metadata?.provider || providerFromModelId(model));
+  return normalizeTestProvider(
+    metadata?.provider || providerFromModelId(model),
+  );
 }
 
-function providerMatches(model: string, provider: TestProviderId, metadata?: ModelInfo) {
+function providerMatches(
+  model: string,
+  provider: TestProviderId,
+  metadata?: ModelInfo,
+) {
   return modelProvider(model, metadata) === provider;
 }
 
-function fallbackTextModelsForProvider(provider: TestProviderId, hasMetadata: boolean) {
-  if (provider === "gpt") {
-    return FALLBACK_TEXT_MODELS;
-  }
-  if (provider === "grok" && !hasMetadata) {
-    return FALLBACK_GROK_TEXT_MODELS;
-  }
-  return [];
+function fallbackTextModelsForProvider(
+  provider: TestProviderId,
+  hasMetadata: boolean,
+) {
+  const trial = getAccountProviderDefinition(provider).trial;
+  return trial.textFallbackMode === "always" || !hasMetadata
+    ? trial.textFallbackModels
+    : [];
 }
 
 function fallbackImageModelsForProvider(provider: TestProviderId) {
-  return provider === "gpt" ? FALLBACK_IMAGE_MODELS : [];
+  return getAccountProviderDefinition(provider).trial.imageFallbackModels;
 }
 
 function pickProviderScopedModel(models: string[], current: string) {
@@ -331,12 +416,21 @@ function ProviderSelect({
 }: {
   value: TestProviderId;
   onChange: (value: TestProviderId) => void;
-  availability?: Partial<Record<TestProviderId, { disabled: boolean; reason?: string }>>;
+  availability?: Partial<
+    Record<TestProviderId, { disabled: boolean; reason?: string }>
+  >;
 }) {
   return (
     <div className="min-w-0 space-y-2">
-      <label className="text-xs font-semibold tracking-[0.14em] text-stone-500 uppercase">服务</label>
-      <Select value={value} onValueChange={(nextValue) => onChange(normalizeTestProvider(nextValue))}>
+      <label className="text-xs font-semibold tracking-[0.14em] text-stone-500 uppercase">
+        服务
+      </label>
+      <Select
+        value={value}
+        onValueChange={(nextValue) =>
+          onChange(normalizeTestProvider(nextValue))
+        }
+      >
         <SelectTrigger className="h-11 rounded-2xl border-stone-200 bg-white/90 text-stone-800 shadow-none">
           <SelectValue />
         </SelectTrigger>
@@ -345,9 +439,17 @@ function ProviderSelect({
             const state = availability?.[provider];
             const definition = getAccountProviderDefinition(provider);
             return (
-              <SelectItem key={provider} value={provider} disabled={state?.disabled}>
+              <SelectItem
+                key={provider}
+                value={provider}
+                disabled={state?.disabled}
+              >
                 <span>{definition.label}</span>
-                {state?.reason ? <span className="ml-2 text-xs text-stone-400">{state.reason}</span> : null}
+                {state?.reason ? (
+                  <span className="ml-2 text-xs text-stone-400">
+                    {state.reason}
+                  </span>
+                ) : null}
               </SelectItem>
             );
           })}
@@ -370,7 +472,9 @@ function ModelSelect({
 }) {
   return (
     <div className="min-w-0 space-y-2">
-      <label className="text-xs font-semibold tracking-[0.14em] text-stone-500 uppercase">{label}</label>
+      <label className="text-xs font-semibold tracking-[0.14em] text-stone-500 uppercase">
+        {label}
+      </label>
       <Select value={value} onValueChange={onChange}>
         <SelectTrigger className="h-11 rounded-2xl border-stone-200 bg-white/90 text-stone-800 shadow-none">
           <SelectValue />
@@ -395,7 +499,7 @@ function ExperimentModeSwitch({
   onChange: (mode: ExperimentMode) => void;
 }) {
   return (
-    <div className="inline-flex rounded-full border border-white/80 bg-white/65 p-1 shadow-[var(--shadow-soft)] backdrop-blur-sm">
+    <div className="inline-flex rounded-full border border-stone-200/80 bg-white/70 p-1">
       {[
         { value: "text" as const, label: "文本试验" },
         { value: "image" as const, label: "图像试验" },
@@ -405,7 +509,9 @@ function ExperimentModeSwitch({
           type="button"
           className={cn(
             "rounded-full px-4 py-2 text-sm font-medium transition",
-            mode === item.value ? "bg-stone-900 text-white shadow-[0_12px_28px_-18px_rgba(68,64,60,0.9)]" : "text-stone-500 hover:bg-white/60 hover:text-stone-900",
+            mode === item.value
+              ? "bg-stone-900 text-white shadow-[0_12px_28px_-18px_rgba(68,64,60,0.9)]"
+              : "text-stone-500 hover:bg-white/60 hover:text-stone-900",
           )}
           onClick={() => onChange(item.value)}
         >
@@ -455,14 +561,19 @@ function TextExperimentPanel({
 
   return (
     <section className="grid min-h-0 flex-1 gap-3 overflow-hidden lg:grid-cols-[minmax(0,1fr)_320px]">
-      <div className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-white/80 bg-white/82 shadow-[var(--shadow-soft)] backdrop-blur-sm">
+      <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-stone-200/80 bg-white/72">
         <div className="border-b border-stone-200/70 px-4 py-4 sm:px-5">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Text to Text</div>
-              <h2 className="mt-1 text-xl font-semibold tracking-tight text-stone-950">文生文对话试验</h2>
+              <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
+                Text to Text
+              </div>
+              <h2 className="mt-1 text-xl font-semibold tracking-tight text-stone-950">
+                文生文对话试验
+              </h2>
               <p className="mt-1.5 max-w-xl text-sm leading-6 text-stone-500">
-                像聊天窗口一样连续验证 /v1/chat/completions，刷新页面后仍会保留当前对话。
+                像聊天窗口一样连续验证
+                /v1/chat/completions，刷新页面后仍会保留当前对话。
               </p>
             </div>
             <span className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-500">
@@ -478,10 +589,16 @@ function TextExperimentPanel({
                 const isUser = message.role === "user";
                 const isError = message.role === "error";
                 return (
-                  <div key={message.id} className={cn("flex", isUser ? "justify-end" : "justify-start")}>
+                  <div
+                    key={message.id}
+                    className={cn(
+                      "flex",
+                      isUser ? "justify-end" : "justify-start",
+                    )}
+                  >
                     <div
                       className={cn(
-                        "max-w-[min(82%,760px)] rounded-[22px] px-4 py-3 text-sm leading-7 shadow-[0_18px_48px_-36px_rgba(15,23,42,0.5)]",
+                        "max-w-[min(82%,760px)] rounded-2xl px-4 py-3 text-sm leading-7",
                         isUser
                           ? "rounded-br-md bg-primary text-primary-foreground"
                           : isError
@@ -490,17 +607,23 @@ function TextExperimentPanel({
                       )}
                     >
                       <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold tracking-[0.14em] uppercase opacity-70">
-                        <span>{isUser ? "You" : isError ? "Error" : "Assistant"}</span>
-                        {!isUser && message.model ? <span>{message.model}</span> : null}
+                        <span>
+                          {isUser ? "You" : isError ? "Error" : "Assistant"}
+                        </span>
+                        {!isUser && message.model ? (
+                          <span>{message.model}</span>
+                        ) : null}
                       </div>
-                      <div className="whitespace-pre-wrap">{message.content}</div>
+                      <div className="whitespace-pre-wrap">
+                        {message.content}
+                      </div>
                     </div>
                   </div>
                 );
               })}
               {isLoading ? (
                 <div className="flex justify-start">
-                  <div className="inline-flex items-center gap-2 rounded-[22px] rounded-bl-md border border-stone-200 bg-white px-4 py-3 text-sm text-stone-500 shadow-[0_18px_48px_-36px_rgba(15,23,42,0.5)]">
+                  <div className="inline-flex items-center gap-2 rounded-2xl rounded-bl-md border border-stone-200 bg-white px-4 py-3 text-sm text-stone-500">
                     <LoaderCircle className="size-4 animate-spin" />
                     正在等待模型响应...
                   </div>
@@ -509,10 +632,14 @@ function TextExperimentPanel({
               <div ref={messagesEndRef} />
             </div>
           ) : (
-            <div className="flex h-full min-h-[260px] items-center justify-center rounded-[22px] border border-dashed border-stone-200 bg-white/70 px-6 text-center">
+            <div className="flex h-full min-h-[260px] items-center justify-center border-y border-dashed border-stone-200 px-6 text-center">
               <div>
-                <div className="text-xs font-semibold tracking-[0.18em] text-stone-400 uppercase">Empty Thread</div>
-                <p className="mt-2 text-lg font-semibold text-stone-900">从底部输入第一条文本提示</p>
+                <div className="text-xs font-semibold tracking-[0.18em] text-stone-400 uppercase">
+                  Empty Thread
+                </div>
+                <p className="mt-2 text-lg font-semibold text-stone-900">
+                  从底部输入第一条文本提示
+                </p>
                 <p className="mt-2 max-w-md text-sm leading-6 text-stone-500">
                   每次发送都会保留在当前聊天窗口中，便于连续比较提示词和模型输出。
                 </p>
@@ -522,7 +649,7 @@ function TextExperimentPanel({
         </div>
 
         <div className="border-t border-stone-200/70 bg-white/95 p-3 sm:p-4">
-          <div className="rounded-[22px] border border-stone-200 bg-stone-50/80 p-2 shadow-sm">
+          <div className="rounded-2xl border border-stone-200 bg-stone-50/80 p-2">
             <Textarea
               value={prompt}
               onChange={(event) => onPromptChange(event.target.value)}
@@ -538,7 +665,12 @@ function TextExperimentPanel({
             <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
               <div className="grid min-w-0 flex-1 gap-2 sm:max-w-[520px] sm:grid-cols-[160px_minmax(0,1fr)]">
                 <ProviderSelect value={provider} onChange={onProviderChange} />
-                <ModelSelect value={model} models={models} label="模型" onChange={onModelChange} />
+                <ModelSelect
+                  value={model}
+                  models={models}
+                  label="模型"
+                  onChange={onModelChange}
+                />
               </div>
               <div className="flex items-center justify-between gap-3 sm:justify-end">
                 <p className="text-xs text-stone-400">Ctrl/⌘ + Enter 发送</p>
@@ -547,7 +679,11 @@ function TextExperimentPanel({
                   disabled={!prompt.trim() || isLoading}
                   onClick={() => void onSubmit()}
                 >
-                  {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <SendHorizonal className="size-4" />}
+                  {isLoading ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <SendHorizonal className="size-4" />
+                  )}
                   发送
                 </Button>
               </div>
@@ -556,12 +692,16 @@ function TextExperimentPanel({
         </div>
       </div>
 
-      <aside className="min-h-0 rounded-[24px] border border-stone-200/80 bg-white/80 p-3 shadow-[0_22px_80px_-54px_rgba(15,23,42,0.45)] sm:p-4">
+      <aside className="min-h-0 rounded-2xl border border-stone-200/80 bg-white/72 p-3 sm:p-4">
         <div className="flex h-full min-h-0 flex-col">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between lg:flex-col lg:items-start">
             <div>
-              <div className="text-xs font-semibold tracking-[0.16em] text-stone-500 uppercase">Text History</div>
-              <p className="mt-1 text-sm leading-6 text-stone-600">聊天记录会保存在本机浏览器，可随时清空。</p>
+              <div className="text-xs font-semibold tracking-[0.16em] text-stone-500 uppercase">
+                Text History
+              </div>
+              <p className="mt-1 text-sm leading-6 text-stone-600">
+                聊天记录会保存在本机浏览器，可随时清空。
+              </p>
             </div>
             <Button
               variant="outline"
@@ -578,8 +718,12 @@ function TextExperimentPanel({
 
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between lg:flex-col lg:items-start">
             <div>
-              <div className="text-xs font-semibold tracking-[0.16em] text-stone-500 uppercase">Model Availability</div>
-              <p className="mt-1 text-sm leading-6 text-stone-600">逐个发送小提示词，显示每个文生文模型是否可用。</p>
+              <div className="text-xs font-semibold tracking-[0.16em] text-stone-500 uppercase">
+                Model Availability
+              </div>
+              <p className="mt-1 text-sm leading-6 text-stone-600">
+                逐个发送小提示词，显示每个文生文模型是否可用。
+              </p>
             </div>
             <Button
               variant="outline"
@@ -587,7 +731,9 @@ function TextExperimentPanel({
               disabled={models.length === 0 || isTestingModels}
               onClick={() => void onTestModels()}
             >
-              {isTestingModels ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              {isTestingModels ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : null}
               批量测试模型
             </Button>
           </div>
@@ -598,8 +744,15 @@ function TextExperimentPanel({
                   key={item.model}
                   className="rounded-2xl border border-stone-200 bg-white px-3 py-2 text-sm"
                 >
-                  <div className="truncate font-medium text-stone-900">{item.model}</div>
-                  <div className={cn("mt-1 text-xs font-semibold", getModelTestStatusClassName(item.status))}>
+                  <div className="truncate font-medium text-stone-900">
+                    {item.model}
+                  </div>
+                  <div
+                    className={cn(
+                      "mt-1 text-xs font-semibold",
+                      getModelTestStatusClassName(item.status),
+                    )}
+                  >
                     {getModelTestStatusLabel(item.status)} · {item.message}
                   </div>
                 </div>
@@ -643,15 +796,28 @@ function getModelTestStatusClassName(status: TextModelTestStatus) {
 }
 
 function sortImageConversations(conversations: ImageConversation[]) {
-  return [...conversations].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return [...conversations].sort((a, b) =>
+    b.updatedAt.localeCompare(a.updatedAt),
+  );
 }
 
-function deriveTurnStatus(turn: ImageTurn): Pick<ImageTurn, "status" | "error"> {
-  const loadingCount = turn.images.filter((image) => image.status === "loading").length;
-  const failedCount = turn.images.filter((image) => image.status === "error").length;
-  const successCount = turn.images.filter((image) => image.status === "success").length;
+function deriveTurnStatus(
+  turn: ImageTurn,
+): Pick<ImageTurn, "status" | "error"> {
+  const loadingCount = turn.images.filter(
+    (image) => image.status === "loading",
+  ).length;
+  const failedCount = turn.images.filter(
+    (image) => image.status === "error",
+  ).length;
+  const successCount = turn.images.filter(
+    (image) => image.status === "success",
+  ).length;
   if (loadingCount > 0) {
-    return { status: turn.status === "queued" ? "queued" : "generating", error: undefined };
+    return {
+      status: turn.status === "queued" ? "queued" : "generating",
+      error: undefined,
+    };
   }
   if (failedCount > 0) {
     return { status: "error", error: `其中 ${failedCount} 张未成功生成` };
@@ -669,7 +835,11 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
         conversation.turns.flatMap((turn) =>
           turn.resultsDeleted
             ? []
-            : turn.images.flatMap((image) => (image.status === "loading" && image.taskId ? [image.taskId] : [])),
+            : turn.images.flatMap((image) =>
+                image.status === "loading" && image.taskId
+                  ? [image.taskId]
+                  : [],
+              ),
         ),
       ),
     ),
@@ -714,7 +884,10 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
         images,
       };
     });
-    if (turns === conversation.turns || !turns.some((turn, index) => turn !== conversation.turns[index])) {
+    if (
+      turns === conversation.turns ||
+      !turns.some((turn, index) => turn !== conversation.turns[index])
+    ) {
       return conversation;
     }
     return {
@@ -751,7 +924,11 @@ async function recoverConversationHistory(items: ImageConversation[]) {
         };
       });
       const derived = deriveTurnStatus({ ...turn, images });
-      if (!turnChanged && derived.status === turn.status && derived.error === turn.error) {
+      if (
+        !turnChanged &&
+        derived.status === turn.status &&
+        derived.error === turn.error
+      ) {
         return turn;
       }
       changed = true;
@@ -780,7 +957,6 @@ async function recoverConversationHistory(items: ImageConversation[]) {
   return syncConversationImageTasks(normalized);
 }
 
-
 function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const didLoadQuotaRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
@@ -789,25 +965,35 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [imagePrompt, setImagePrompt] = useState("");
-  const [imageProvider, setImageProvider] = useState<TestProviderId>("gpt");
-  const [imageModel, setImageModel] = useState(FALLBACK_IMAGE_MODELS[0]);
+  const [imageProvider, setImageProvider] = useState<TestProviderId>(
+    DEFAULT_TEST_PROVIDER,
+  );
+  const [imageModel, setImageModel] = useState(DEFAULT_IMAGE_MODEL);
   const [textPrompt, setTextPrompt] = useState("");
-  const [textProvider, setTextProvider] = useState<TestProviderId>("gpt");
-  const [textModel, setTextModel] = useState(FALLBACK_TEXT_MODELS[0]);
+  const [textProvider, setTextProvider] = useState<TestProviderId>(
+    DEFAULT_TEST_PROVIDER,
+  );
+  const [textModel, setTextModel] = useState(DEFAULT_TEXT_MODEL);
   const [textMessages, setTextMessages] = useState<TextChatMessage[]>([]);
   const [isLoadingTextHistory, setIsLoadingTextHistory] = useState(true);
   const [isSubmittingText, setIsSubmittingText] = useState(false);
   const [isTestingTextModels, setIsTestingTextModels] = useState(false);
-  const [textModelTestResults, setTextModelTestResults] = useState<TextModelTestResult[]>([]);
+  const [textModelTestResults, setTextModelTestResults] = useState<
+    TextModelTestResult[]
+  >([]);
   const [experimentMode, setExperimentMode] = useState<ExperimentMode>("text");
   const [modelMetadata, setModelMetadata] = useState<ModelInfo[]>([]);
   const [imageCount, setImageCount] = useState("1");
   const [imageSize, setImageSize] = useState("");
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [referenceImageFiles, setReferenceImageFiles] = useState<File[]>([]);
-  const [referenceImages, setReferenceImages] = useState<StoredReferenceImage[]>([]);
+  const [referenceImages, setReferenceImages] = useState<
+    StoredReferenceImage[]
+  >([]);
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
-  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [selectedConversationId, setSelectedConversationId] = useState<
+    string | null
+  >(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [availableQuota, setAvailableQuota] = useState("加载中...");
   const [lightboxImages, setLightboxImages] = useState<ImageLightboxItem[]>([]);
@@ -821,43 +1007,65 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     | null
   >(null);
 
-  const parsedCount = useMemo(() => Number(clampImageCount(imageCount)), [imageCount]);
+  const parsedCount = useMemo(
+    () => Number(clampImageCount(imageCount)),
+    [imageCount],
+  );
   const modelMetadataById = useMemo(
     () => new Map(modelMetadata.map((model) => [model.id, model])),
     [modelMetadata],
   );
   const selectedConversation = useMemo(
-    () => conversations.find((item) => item.id === selectedConversationId) ?? null,
+    () =>
+      conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
   );
   const imageModelOptions = useMemo(() => {
     const discovered = modelMetadata
-      .filter((model) => providerMatches(model.id, imageProvider, model) && isImageModel(model.id, model))
+      .filter(
+        (model) =>
+          providerMatches(model.id, imageProvider, model) &&
+          isImageModel(model.id, model),
+      )
       .map((model) => model.id);
-    const fallbacks = modelMetadata.length === 0 ? fallbackImageModelsForProvider(imageProvider) : [];
+    const fallbacks =
+      modelMetadata.length === 0
+        ? fallbackImageModelsForProvider(imageProvider)
+        : [];
     return uniqueModelIds([...discovered, ...fallbacks]);
   }, [imageProvider, modelMetadata]);
   const textModelOptions = useMemo(() => {
     const discovered = modelMetadata
-      .filter((model) => providerMatches(model.id, textProvider, model) && isTextModel(model.id, model))
+      .filter(
+        (model) =>
+          providerMatches(model.id, textProvider, model) &&
+          isTextModel(model.id, model),
+      )
       .map((model) => model.id);
     return uniqueModelIds([
       ...discovered,
       ...fallbackTextModelsForProvider(textProvider, modelMetadata.length > 0),
       textModel,
-    ]).filter((model) => providerMatches(model, textProvider, modelMetadataById.get(model)));
+    ]).filter((model) =>
+      providerMatches(model, textProvider, modelMetadataById.get(model)),
+    );
   }, [modelMetadata, modelMetadataById, textModel, textProvider]);
   const imageProviderOptions = useMemo(
     () =>
       SUPPORTED_TEST_PROVIDERS.map((provider) => {
         const providerModels = modelMetadata.filter(
-          (model) => providerMatches(model.id, provider, model) && isImageModel(model.id, model),
+          (model) =>
+            providerMatches(model.id, provider, model) &&
+            isImageModel(model.id, model),
         );
-        const fallbackModels = fallbackImageModelsForProvider(provider);
-        const disabled = modelMetadata.length > 0 ? providerModels.length === 0 : fallbackModels.length === 0;
+        const definition = getAccountProviderDefinition(provider);
+        const disabled =
+          modelMetadata.length > 0
+            ? providerModels.length === 0
+            : definition.trial.imageFallbackModels.length === 0;
         return {
           value: provider,
-          label: getAccountProviderDefinition(provider).label,
+          label: definition.label,
           disabled,
           reason: disabled ? "暂不支持图像" : undefined,
         };
@@ -867,8 +1075,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const imageModeUnavailableMessage =
     imageModelOptions.length === 0
       ? modelMetadata.length > 0
-        ? IMAGE_PROVIDER_UNSUPPORTED_COPY[imageProvider]
-        : IMAGE_PROVIDER_NO_METADATA_COPY[imageProvider]
+        ? getAccountProviderDefinition(imageProvider).trial.imageUnsupportedCopy
+        : getAccountProviderDefinition(imageProvider).trial.imageNoMetadataCopy
       : undefined;
   const activeTaskCount = useMemo(
     () =>
@@ -936,11 +1144,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   }, []);
 
   useEffect(() => {
-    setImageModel((current) => pickProviderScopedModel(imageModelOptions, current));
+    setImageModel((current) =>
+      pickProviderScopedModel(imageModelOptions, current),
+    );
   }, [imageModelOptions]);
 
   useEffect(() => {
-    setTextModel((current) => pickProviderScopedModel(textModelOptions, current));
+    setTextModel((current) =>
+      pickProviderScopedModel(textModelOptions, current),
+    );
   }, [textModelOptions]);
 
   useEffect(() => {
@@ -972,7 +1184,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           setTextMessages(messages);
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : "读取文本聊天记录失败";
+        const message =
+          error instanceof Error ? error.message : "读取文本聊天记录失败";
         toast.error(message);
       } finally {
         if (!cancelled) {
@@ -1002,18 +1215,42 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
     const loadHistory = async () => {
       try {
-        const storedSize = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_SIZE_STORAGE_KEY) : null;
-        const storedCount = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_COUNT_STORAGE_KEY) : null;
-        const storedImageModel = pickStoredModel(IMAGE_MODEL_STORAGE_KEY, FALLBACK_IMAGE_MODELS[0]);
-        const storedTextModel = pickStoredModel(TEXT_MODEL_STORAGE_KEY, FALLBACK_TEXT_MODELS[0]);
+        const storedSize =
+          typeof window !== "undefined"
+            ? window.localStorage.getItem(IMAGE_SIZE_STORAGE_KEY)
+            : null;
+        const storedCount =
+          typeof window !== "undefined"
+            ? window.localStorage.getItem(IMAGE_COUNT_STORAGE_KEY)
+            : null;
+        const storedImageModel = pickStoredModel(
+          IMAGE_MODEL_STORAGE_KEY,
+          DEFAULT_IMAGE_MODEL,
+        );
+        const storedTextModel = pickStoredModel(
+          TEXT_MODEL_STORAGE_KEY,
+          DEFAULT_TEXT_MODEL,
+        );
         const storedImageProvider =
-          typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_PROVIDER_STORAGE_KEY) : null;
+          typeof window !== "undefined"
+            ? window.localStorage.getItem(IMAGE_PROVIDER_STORAGE_KEY)
+            : null;
         const storedTextProvider =
-          typeof window !== "undefined" ? window.localStorage.getItem(TEXT_PROVIDER_STORAGE_KEY) : null;
+          typeof window !== "undefined"
+            ? window.localStorage.getItem(TEXT_PROVIDER_STORAGE_KEY)
+            : null;
         setImageSize(storedSize || "");
         setImageCount(storedCount ? clampImageCount(storedCount) : "1");
-        setImageProvider(normalizeTestProvider(storedImageProvider || providerFromModelId(storedImageModel)));
-        setTextProvider(normalizeTestProvider(storedTextProvider || providerFromModelId(storedTextModel)));
+        setImageProvider(
+          normalizeTestProvider(
+            storedImageProvider || providerFromModelId(storedImageModel),
+          ),
+        );
+        setTextProvider(
+          normalizeTestProvider(
+            storedTextProvider || providerFromModelId(storedTextModel),
+          ),
+        );
         setImageModel(storedImageModel);
         setTextModel(storedTextModel);
 
@@ -1026,14 +1263,20 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         conversationsRef.current = normalizedItems;
         setConversations(normalizedItems);
         const storedConversationId =
-          typeof window !== "undefined" ? window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) : null;
+          typeof window !== "undefined"
+            ? window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY)
+            : null;
         const nextSelectedConversationId =
-          (storedConversationId && normalizedItems.some((conversation) => conversation.id === storedConversationId)
+          (storedConversationId &&
+          normalizedItems.some(
+            (conversation) => conversation.id === storedConversationId,
+          )
             ? storedConversationId
             : null) ?? pickFallbackConversationId(normalizedItems);
         setSelectedConversationId(nextSelectedConversationId);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "读取会话记录失败";
+        const message =
+          error instanceof Error ? error.message : "读取会话记录失败";
         toast.error(message);
       } finally {
         if (!cancelled) {
@@ -1087,7 +1330,11 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       top: resultsViewportRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [selectedConversation?.updatedAt, selectedConversation?.turns.length, selectedConversation]);
+  }, [
+    selectedConversation?.updatedAt,
+    selectedConversation?.turns.length,
+    selectedConversation,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1095,7 +1342,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
 
     if (selectedConversationId) {
-      window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, selectedConversationId);
+      window.localStorage.setItem(
+        ACTIVE_CONVERSATION_STORAGE_KEY,
+        selectedConversationId,
+      );
     } else {
       window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
     }
@@ -1120,7 +1370,12 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   }, [parsedCount]);
 
   useEffect(() => {
-    if (selectedConversationId && !conversations.some((conversation) => conversation.id === selectedConversationId)) {
+    if (
+      selectedConversationId &&
+      !conversations.some(
+        (conversation) => conversation.id === selectedConversationId,
+      )
+    ) {
       setSelectedConversationId(pickFallbackConversationId(conversations));
     }
   }, [conversations, selectedConversationId]);
@@ -1141,11 +1396,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       updater: (current: ImageConversation | null) => ImageConversation,
       options: { persist?: boolean } = {},
     ) => {
-      const current = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
+      const current =
+        conversationsRef.current.find((item) => item.id === conversationId) ??
+        null;
       const nextConversation = updater(current);
       const nextConversations = sortImageConversations([
         nextConversation,
-        ...conversationsRef.current.filter((item) => item.id !== conversationId),
+        ...conversationsRef.current.filter(
+          (item) => item.id !== conversationId,
+        ),
       ]);
       conversationsRef.current = nextConversations;
       setConversations(nextConversations);
@@ -1195,8 +1454,14 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
   };
 
-  const handleDeleteTurnPart = async (conversationId: string, turnId: string, part: "prompt" | "results") => {
-    const conversation = conversationsRef.current.find((item) => item.id === conversationId);
+  const handleDeleteTurnPart = async (
+    conversationId: string,
+    turnId: string,
+    part: "prompt" | "results",
+  ) => {
+    const conversation = conversationsRef.current.find(
+      (item) => item.id === conversationId,
+    );
     if (!conversation) {
       return;
     }
@@ -1211,13 +1476,22 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           prompt: part === "prompt" ? "" : turn.prompt,
           promptDeleted: part === "prompt" ? true : turn.promptDeleted,
           resultsDeleted: part === "results" ? true : turn.resultsDeleted,
-          status: part === "results" && turn.status === "generating" ? "error" as const : turn.status,
+          status:
+            part === "results" && turn.status === "generating"
+              ? ("error" as const)
+              : turn.status,
           images:
             part === "results"
-              ? turn.images.map((image) => ({ id: image.id, status: "error" as const, error: "生成结果已删除" }))
+              ? turn.images.map((image) => ({
+                  id: image.id,
+                  status: "error" as const,
+                  error: "生成结果已删除",
+                }))
               : turn.images,
         };
-        return nextTurn.promptDeleted && nextTurn.resultsDeleted ? null : nextTurn;
+        return nextTurn.promptDeleted && nextTurn.resultsDeleted
+          ? null
+          : nextTurn;
       })
       .filter((turn): turn is ImageTurn => Boolean(turn));
 
@@ -1243,14 +1517,17 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       resetComposer();
       toast.success("已清空历史记录");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "清空历史记录失败";
+      const message =
+        error instanceof Error ? error.message : "清空历史记录失败";
       toast.error(message);
     }
   };
 
   const handleRenameConversation = async (id: string, title: string) => {
     const nextConversations = conversations.map((item) =>
-      item.id === id ? { ...item, title, updatedAt: new Date().toISOString() } : item,
+      item.id === id
+        ? { ...item, title, updatedAt: new Date().toISOString() }
+        : item,
     );
     conversationsRef.current = sortImageConversations(nextConversations);
     setConversations(conversationsRef.current);
@@ -1291,7 +1568,11 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       return;
     }
     if (target.type === "prompt" || target.type === "results") {
-      await handleDeleteTurnPart(target.conversationId, target.turnId, target.type);
+      await handleDeleteTurnPart(
+        target.conversationId,
+        target.turnId,
+        target.type,
+      );
       return;
     }
     await handleDeleteConversation(target.id);
@@ -1341,11 +1622,16 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       }
       return next;
     });
-    setReferenceImages((prev) => prev.filter((_, currentIndex) => currentIndex !== index));
+    setReferenceImages((prev) =>
+      prev.filter((_, currentIndex) => currentIndex !== index),
+    );
   }, []);
 
   const handleContinueEdit = useCallback(
-    async (conversationId: string, image: StoredImage | StoredReferenceImage) => {
+    async (
+      conversationId: string,
+      image: StoredImage | StoredReferenceImage,
+    ) => {
       try {
         const nextReference =
           "dataUrl" in image
@@ -1353,7 +1639,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 referenceImage: image,
                 file: dataUrlToFile(image.dataUrl, image.name, image.type),
               }
-            : await buildReferenceImageFromStoredImage(image, `conversation-${conversationId}-${Date.now()}.png`);
+            : await buildReferenceImageFromStoredImage(
+                image,
+                `conversation-${conversationId}-${Date.now()}.png`,
+              );
         if (!nextReference) {
           return;
         }
@@ -1366,46 +1655,59 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         textareaRef.current?.focus();
         toast.success("已加入当前参考图，继续输入描述即可编辑");
       } catch (error) {
-        const message = error instanceof Error ? error.message : "读取结果图失败";
+        const message =
+          error instanceof Error ? error.message : "读取结果图失败";
         toast.error(message);
       }
     },
     [],
   );
 
-  const handleReuseTurnConfig = useCallback(async (conversationId: string, turnId: string) => {
-    const conversation = conversationsRef.current.find((item) => item.id === conversationId);
-    const turn = conversation?.turns.find((item) => item.id === turnId);
-    if (!conversation || !turn || !turn.prompt.trim()) {
-      return;
-    }
+  const handleReuseTurnConfig = useCallback(
+    async (conversationId: string, turnId: string) => {
+      const conversation = conversationsRef.current.find(
+        (item) => item.id === conversationId,
+      );
+      const turn = conversation?.turns.find((item) => item.id === turnId);
+      if (!conversation || !turn || !turn.prompt.trim()) {
+        return;
+      }
 
-    setSelectedConversationId(conversationId);
-    setImageProvider(modelProvider(turn.model, modelMetadataById.get(turn.model)));
-    setImagePrompt(turn.prompt);
-    setImageModel(turn.model || FALLBACK_IMAGE_MODELS[0]);
-    setImageCount(String(Math.max(1, turn.count || turn.images.length || 1)));
-    setImageSize(turn.size);
-    setReferenceImages(turn.referenceImages);
-    setReferenceImageFiles(
-      turn.referenceImages.map((image) => dataUrlToFile(image.dataUrl, image.name, image.type)),
-    );
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
-    textareaRef.current?.focus();
-    toast.success("已复用这条提示词配置");
-  }, [modelMetadataById]);
+      setSelectedConversationId(conversationId);
+      setImageProvider(
+        modelProvider(turn.model, modelMetadataById.get(turn.model)),
+      );
+      setImagePrompt(turn.prompt);
+      setImageModel(turn.model || DEFAULT_IMAGE_MODEL);
+      setImageCount(String(Math.max(1, turn.count || turn.images.length || 1)));
+      setImageSize(turn.size);
+      setReferenceImages(turn.referenceImages);
+      setReferenceImageFiles(
+        turn.referenceImages.map((image) =>
+          dataUrlToFile(image.dataUrl, image.name, image.type),
+        ),
+      );
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      textareaRef.current?.focus();
+      toast.success("已复用这条提示词配置");
+    },
+    [modelMetadataById],
+  );
 
-  const openLightbox = useCallback((images: ImageLightboxItem[], index: number) => {
-    if (images.length === 0) {
-      return;
-    }
+  const openLightbox = useCallback(
+    (images: ImageLightboxItem[], index: number) => {
+      if (images.length === 0) {
+        return;
+      }
 
-    setLightboxImages(images);
-    setLightboxIndex(Math.max(0, Math.min(index, images.length - 1)));
-    setLightboxOpen(true);
-  }, []);
+      setLightboxImages(images);
+      setLightboxIndex(Math.max(0, Math.min(index, images.length - 1)));
+      setLightboxOpen(true);
+    },
+    [],
+  );
 
   const createLoadingImages = (turnId: string, count: number) =>
     Array.from({ length: count }, (_, index) => {
@@ -1424,7 +1726,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         return;
       }
 
-      const snapshot = conversationsRef.current.find((conversation) => conversation.id === conversationId);
+      const snapshot = conversationsRef.current.find(
+        (conversation) => conversation.id === conversationId,
+      );
       const activeTurn = snapshot?.turns.find(
         (turn) =>
           (turn.status === "queued" || turn.status === "generating") &&
@@ -1446,9 +1750,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             const images = turn.images.map((image) => {
               const taskId = image.taskId || image.id;
               const task = taskMap.get(taskId);
-              return task ? taskDataToStoredImage({ ...image, taskId }, task) : image;
+              return task
+                ? taskDataToStoredImage({ ...image, taskId }, task)
+                : image;
             });
-            const derived = deriveTurnStatus({ ...turn, status: "generating", images });
+            const derived = deriveTurnStatus({
+              ...turn,
+              status: "generating",
+              images,
+            });
             return {
               ...turn,
               ...derived,
@@ -1476,7 +1786,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                     status: "generating",
                     error: undefined,
                     images: turn.images.map((image) =>
-                      image.status === "loading" ? { ...image, taskId: image.taskId || image.id } : image,
+                      image.status === "loading"
+                        ? { ...image, taskId: image.taskId || image.id }
+                        : image,
                     ),
                   }
                 : turn,
@@ -1485,26 +1797,47 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         });
 
         const referenceFiles = activeTurn.referenceImages.map((image, index) =>
-          dataUrlToFile(image.dataUrl, image.name || `${activeTurn.id}-${index + 1}.png`, image.type),
+          dataUrlToFile(
+            image.dataUrl,
+            image.name || `${activeTurn.id}-${index + 1}.png`,
+            image.type,
+          ),
         );
         if (activeTurn.mode === "edit" && referenceFiles.length === 0) {
           throw new Error("未找到可用于继续编辑的参考图");
         }
 
-        const pendingImages = activeTurn.images.filter((image) => image.status === "loading");
+        const pendingImages = activeTurn.images.filter(
+          (image) => image.status === "loading",
+        );
         const submitted = await Promise.all(
           pendingImages.map((image) => {
             const taskId = image.taskId || image.id;
             return activeTurn.mode === "edit"
-              ? createImageEditTask(taskId, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size)
-              : createImageGenerationTask(taskId, activeTurn.prompt, activeTurn.model, activeTurn.size);
+              ? createImageEditTask(
+                  taskId,
+                  referenceFiles,
+                  activeTurn.prompt,
+                  activeTurn.model,
+                  activeTurn.size,
+                )
+              : createImageGenerationTask(
+                  taskId,
+                  activeTurn.prompt,
+                  activeTurn.model,
+                  activeTurn.size,
+                );
           }),
         );
         await applyTasks(submitted);
 
         while (true) {
-          const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
-          const latestTurn = latestConversation?.turns.find((turn) => turn.id === activeTurn.id);
+          const latestConversation = conversationsRef.current.find(
+            (conversation) => conversation.id === conversationId,
+          );
+          const latestTurn = latestConversation?.turns.find(
+            (turn) => turn.id === activeTurn.id,
+          );
           const loadingTaskIds =
             latestTurn?.images.flatMap((image) =>
               image.status === "loading" && image.taskId ? [image.taskId] : [],
@@ -1520,13 +1853,27 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           }
           if (taskList.missing_ids.length > 0 && latestTurn) {
             const missingImages = latestTurn.images.filter(
-              (image) => image.status === "loading" && image.taskId && taskList.missing_ids.includes(image.taskId),
+              (image) =>
+                image.status === "loading" &&
+                image.taskId &&
+                taskList.missing_ids.includes(image.taskId),
             );
             const resubmitted = await Promise.all(
               missingImages.map((image) =>
                 activeTurn.mode === "edit"
-                  ? createImageEditTask(image.taskId || image.id, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size)
-                  : createImageGenerationTask(image.taskId || image.id, activeTurn.prompt, activeTurn.model, activeTurn.size),
+                  ? createImageEditTask(
+                      image.taskId || image.id,
+                      referenceFiles,
+                      activeTurn.prompt,
+                      activeTurn.model,
+                      activeTurn.size,
+                    )
+                  : createImageGenerationTask(
+                      image.taskId || image.id,
+                      activeTurn.prompt,
+                      activeTurn.model,
+                      activeTurn.size,
+                    ),
               ),
             );
             if (resubmitted.length > 0) {
@@ -1550,7 +1897,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                     status: "error",
                     error: message,
                     images: turn.images.map((image) =>
-                      image.status === "loading" ? { ...image, status: "error", error: message } : image,
+                      image.status === "loading"
+                        ? { ...image, status: "error", error: message }
+                        : image,
                     ),
                   }
                 : turn,
@@ -1580,7 +1929,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
   const handleRegenerateTurn = useCallback(
     async (conversationId: string, turnId: string) => {
-      const conversation = conversationsRef.current.find((item) => item.id === conversationId);
+      const conversation = conversationsRef.current.find(
+        (item) => item.id === conversationId,
+      );
       const sourceTurn = conversation?.turns.find((turn) => turn.id === turnId);
       if (!conversation || !sourceTurn || !sourceTurn.prompt.trim()) {
         return;
@@ -1588,7 +1939,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
       const now = new Date().toISOString();
       const nextTurnId = createId();
-      const count = Math.max(1, sourceTurn.count || sourceTurn.images.length || 1);
+      const count = Math.max(
+        1,
+        sourceTurn.count || sourceTurn.images.length || 1,
+      );
       const nextTurn: ImageTurn = {
         id: nextTurnId,
         prompt: sourceTurn.prompt,
@@ -1617,7 +1971,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
   const handleRetryImage = useCallback(
     async (conversationId: string, turnId: string, imageId: string) => {
-      const conversation = conversationsRef.current.find((item) => item.id === conversationId);
+      const conversation = conversationsRef.current.find(
+        (item) => item.id === conversationId,
+      );
       if (!conversation) {
         return;
       }
@@ -1644,7 +2000,11 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 }
               : image,
           );
-          const derived = deriveTurnStatus({ ...turn, status: "queued", images });
+          const derived = deriveTurnStatus({
+            ...turn,
+            status: "queued",
+            images,
+          });
           return {
             ...turn,
             ...derived,
@@ -1683,14 +2043,21 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       return;
     }
 
-    const effectiveImageMode: ImageConversationMode = referenceImageFiles.length > 0 ? "edit" : "generate";
-    if (imageModeUnavailableMessage || imageModelOptions.length === 0 || !imageModelOptions.includes(imageModel)) {
+    const effectiveImageMode: ImageConversationMode =
+      referenceImageFiles.length > 0 ? "edit" : "generate";
+    if (
+      imageModeUnavailableMessage ||
+      imageModelOptions.length === 0 ||
+      !imageModelOptions.includes(imageModel)
+    ) {
       toast.error(imageModeUnavailableMessage || "当前服务暂无可用图像模型");
       return;
     }
 
     const targetConversation = selectedConversationId
-      ? conversationsRef.current.find((conversation) => conversation.id === selectedConversationId) ?? null
+      ? (conversationsRef.current.find(
+          (conversation) => conversation.id === selectedConversationId,
+        ) ?? null)
       : null;
     const now = new Date().toISOString();
     const conversationId = targetConversation?.id ?? createId();
@@ -1757,7 +2124,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     setTextPrompt("");
 
     try {
-      const apiMessages = textMessagesToChatMessages([...textMessages, userMessage]);
+      const apiMessages = textMessagesToChatMessages([
+        ...textMessages,
+        userMessage,
+      ]);
       const data = await createChatCompletion({
         model: textModel,
         messages: apiMessages,
@@ -1802,14 +2172,20 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       setTextMessages([]);
       toast.success("已清空文本聊天记录");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "清空文本聊天记录失败";
+      const message =
+        error instanceof Error ? error.message : "清空文本聊天记录失败";
       toast.error(message);
     }
   };
 
-  const updateTextModelTestResult = (modelId: string, update: Omit<TextModelTestResult, "model">) => {
+  const updateTextModelTestResult = (
+    modelId: string,
+    update: Omit<TextModelTestResult, "model">,
+  ) => {
     setTextModelTestResults((current) =>
-      current.map((item) => (item.model === modelId ? { ...item, ...update } : item)),
+      current.map((item) =>
+        item.model === modelId ? { ...item, ...update } : item,
+      ),
     );
   };
 
@@ -1830,7 +2206,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     );
 
     for (const modelId of modelsToTest) {
-      updateTextModelTestResult(modelId, { status: "testing", message: "测试中" });
+      updateTextModelTestResult(modelId, {
+        status: "testing",
+        message: "测试中",
+      });
       try {
         const data = await createChatCompletion({
           model: modelId,
@@ -1841,7 +2220,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         if (!content) {
           throw new Error("模型未返回文本内容");
         }
-        updateTextModelTestResult(modelId, { status: "success", message: "可用" });
+        updateTextModelTestResult(modelId, {
+          status: "success",
+          message: "可用",
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : "请求失败";
         updateTextModelTestResult(modelId, { status: "error", message });
@@ -1854,7 +2236,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
   const imageProviderLabel = getAccountProviderDefinition(imageProvider).label;
   const selectedConversationTurnCount = selectedConversation?.turns.length ?? 0;
-  const selectedConversationStats = selectedConversation ? getImageConversationStats(selectedConversation) : null;
+  const selectedConversationStats = selectedConversation
+    ? getImageConversationStats(selectedConversation)
+    : null;
   const selectedConversationStatus = selectedConversationStats
     ? selectedConversationStats.running > 0
       ? `${selectedConversationStats.running} 个处理中`
@@ -1865,36 +2249,47 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <>
-      <section className="mx-auto flex h-[calc(100dvh-5.5rem)] min-h-0 w-full max-w-[1380px] flex-col gap-3 overflow-hidden px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:h-[calc(100dvh-5.25rem)] sm:px-3 sm:pb-5">
-        <div className="rounded-[28px] border border-white/80 bg-white/58 px-4 py-3 shadow-[var(--shadow-soft)] backdrop-blur-xl sm:px-5">
+      <section className="mx-auto flex h-[calc(100dvh-5.5rem)] min-h-0 w-full max-w-[1380px] flex-col gap-4 overflow-hidden px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:h-[calc(100dvh-5.25rem)] sm:px-3 sm:pb-5">
+        <div className="border-b border-stone-200/80 px-1 pb-3 sm:px-0">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="min-w-0">
-              <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">试验页面</div>
+              <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
+                试验页面
+              </div>
               <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-end sm:gap-3">
-                <h1 className="text-xl font-semibold tracking-tight text-stone-950 sm:text-2xl">图像试验工作台</h1>
-                <p className="text-sm text-stone-500">文生文走聊天接口，文生图保留队列和历史。</p>
+                <h1 className="text-xl font-semibold tracking-tight text-stone-950 sm:text-2xl">
+                  图像试验工作台
+                </h1>
+                <p className="text-sm text-stone-500">
+                  文生文走聊天接口，文生图保留队列和历史。
+                </p>
               </div>
               {experimentMode === "image" ? (
                 <div className="mt-3 flex gap-2 overflow-x-auto pb-1 text-xs text-stone-600 sm:flex-wrap sm:overflow-visible sm:pb-0">
-                  <span className="shrink-0 rounded-full border border-stone-200/80 bg-white/75 px-3 py-1.5 shadow-sm">
+                  <span className="shrink-0 rounded-full border border-stone-200/80 bg-white/70 px-3 py-1.5">
                     服务 {imageProviderLabel}
                   </span>
-                  <span className="max-w-[240px] shrink-0 truncate rounded-full border border-stone-200/80 bg-white/75 px-3 py-1.5 shadow-sm sm:max-w-[320px]">
+                  <span className="max-w-[240px] shrink-0 truncate rounded-full border border-stone-200/80 bg-white/70 px-3 py-1.5 sm:max-w-[320px]">
                     模型 {imageModel || "待选择"}
                   </span>
-                  <span className="shrink-0 rounded-full border border-amber-200/80 bg-amber-50/80 px-3 py-1.5 text-amber-800 shadow-sm">
+                  <span className="shrink-0 rounded-full border border-amber-200/80 bg-amber-50/80 px-3 py-1.5 text-amber-800">
                     额度 {availableQuota}
                   </span>
-                  <span className="shrink-0 rounded-full border border-lime-200/80 bg-lime-50/80 px-3 py-1.5 text-lime-800 shadow-sm">
-                    {activeTaskCount > 0 ? `${activeTaskCount} 个活跃任务` : "任务空闲"}
+                  <span className="shrink-0 rounded-full border border-lime-200/80 bg-lime-50/80 px-3 py-1.5 text-lime-800">
+                    {activeTaskCount > 0
+                      ? `${activeTaskCount} 个活跃任务`
+                      : "任务空闲"}
                   </span>
-                  <span className="shrink-0 rounded-full border border-stone-200/80 bg-white/75 px-3 py-1.5 shadow-sm">
+                  <span className="shrink-0 rounded-full border border-stone-200/80 bg-white/70 px-3 py-1.5">
                     {selectedConversationStatus}
                   </span>
                 </div>
               ) : null}
             </div>
-            <ExperimentModeSwitch mode={experimentMode} onChange={setExperimentMode} />
+            <ExperimentModeSwitch
+              mode={experimentMode}
+              onChange={setExperimentMode}
+            />
           </div>
         </div>
 
@@ -1916,120 +2311,124 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             onClearMessages={handleClearTextMessages}
           />
         ) : (
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-hidden sm:gap-3 lg:grid-cols-[260px_minmax(0,1fr)]">
-            <div className="hidden h-full min-h-0 rounded-[24px] border border-white/70 bg-white/45 px-3 shadow-[var(--shadow-soft)] backdrop-blur-sm lg:block">
-              <ImageSidebar
-            conversations={conversations}
-            isLoadingHistory={isLoadingHistory}
-            selectedConversationId={selectedConversationId}
-            onCreateDraft={handleCreateDraft}
-            onClearHistory={openClearHistoryConfirm}
-            onSelectConversation={setSelectedConversationId}
-            onDeleteConversation={openDeleteConversationConfirm}
-            onRenameConversation={handleRenameConversation}
-            formatConversationTime={formatConversationTime}
-              />
-            </div>
-
-            <Dialog open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>
-          <DialogContent className="flex h-[min(82dvh,760px)] w-[92vw] max-w-[460px] flex-col overflow-hidden rounded-[32px] border-white/80 bg-white p-0 shadow-[0_32px_110px_-38px_rgba(15,23,42,0.45)] sm:rounded-[36px]">
-            <DialogHeader className="px-6 pt-7 pb-4 sm:px-8">
-              <DialogTitle className="flex items-center gap-2 text-xl font-bold tracking-tight">
-                <History className="size-5" />
-                历史记录
-              </DialogTitle>
-            </DialogHeader>
-            <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-8 sm:px-8">
+          <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-hidden lg:grid-cols-[260px_minmax(0,1fr)]">
+            <div className="hidden h-full min-h-0 border-r border-stone-200/80 pr-3 lg:block">
               <ImageSidebar
                 conversations={conversations}
                 isLoadingHistory={isLoadingHistory}
                 selectedConversationId={selectedConversationId}
-                onCreateDraft={() => {
-                  handleCreateDraft();
-                  setIsHistoryOpen(false);
-                }}
+                onCreateDraft={handleCreateDraft}
                 onClearHistory={openClearHistoryConfirm}
-                onSelectConversation={(id) => {
-                  setSelectedConversationId(id);
-                  setIsHistoryOpen(false);
-                }}
+                onSelectConversation={setSelectedConversationId}
                 onDeleteConversation={openDeleteConversationConfirm}
                 onRenameConversation={handleRenameConversation}
                 formatConversationTime={formatConversationTime}
-                hideActionButtons
               />
             </div>
-          </DialogContent>
-        </Dialog>
+
+            <Dialog open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>
+              <DialogContent className="flex h-[min(82dvh,760px)] w-[92vw] max-w-[460px] flex-col overflow-hidden rounded-2xl border-stone-200 bg-white p-0 shadow-sm">
+                <DialogHeader className="px-6 pt-7 pb-4 sm:px-8">
+                  <DialogTitle className="flex items-center gap-2 text-xl font-bold tracking-tight">
+                    <History className="size-5" />
+                    历史记录
+                  </DialogTitle>
+                </DialogHeader>
+                <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-8 sm:px-8">
+                  <ImageSidebar
+                    conversations={conversations}
+                    isLoadingHistory={isLoadingHistory}
+                    selectedConversationId={selectedConversationId}
+                    onCreateDraft={() => {
+                      handleCreateDraft();
+                      setIsHistoryOpen(false);
+                    }}
+                    onClearHistory={openClearHistoryConfirm}
+                    onSelectConversation={(id) => {
+                      setSelectedConversationId(id);
+                      setIsHistoryOpen(false);
+                    }}
+                    onDeleteConversation={openDeleteConversationConfirm}
+                    onRenameConversation={handleRenameConversation}
+                    formatConversationTime={formatConversationTime}
+                    hideActionButtons
+                  />
+                </div>
+              </DialogContent>
+            </Dialog>
 
             <div className="flex min-h-0 flex-col gap-2 sm:gap-4">
-          <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 px-1 lg:hidden">
-            <Button
-              variant="outline"
-              className="h-10 min-w-0 rounded-2xl border-stone-200 bg-white/90 text-stone-700 shadow-sm"
-              onClick={() => setIsHistoryOpen(true)}
-            >
-              <History className="mr-2 size-4" />
-              历史记录 ({conversations.length})
-            </Button>
-            <Button
-              className="h-10 rounded-2xl bg-stone-950 text-white shadow-sm"
-              onClick={handleCreateDraft}
-            >
-              <Plus className="size-4" />
-              新建
-            </Button>
-            <Button
-              variant="outline"
-              className="h-10 rounded-2xl border-stone-200 bg-white/85 px-3 text-stone-600 shadow-sm"
-              onClick={openClearHistoryConfirm}
-              disabled={conversations.length === 0}
-            >
-              <Trash2 className="size-4" />
-            </Button>
-          </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 px-1 lg:hidden">
+                <Button
+                  variant="outline"
+                  className="h-10 min-w-0 rounded-2xl border-stone-200 bg-white/90 text-stone-700 shadow-sm"
+                  onClick={() => setIsHistoryOpen(true)}
+                >
+                  <History className="mr-2 size-4" />
+                  历史记录 ({conversations.length})
+                </Button>
+                <Button
+                  className="h-10 rounded-2xl bg-stone-950 text-white shadow-sm"
+                  onClick={handleCreateDraft}
+                >
+                  <Plus className="size-4" />
+                  新建
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-10 rounded-2xl border-stone-200 bg-white/85 px-3 text-stone-600 shadow-sm"
+                  onClick={openClearHistoryConfirm}
+                  disabled={conversations.length === 0}
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
 
-          <div
-            ref={resultsViewportRef}
-            className="hide-scrollbar min-h-0 flex-1 overscroll-contain overflow-y-auto rounded-[24px] border border-white/60 bg-white/25 px-1 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] sm:px-4 sm:py-4"
-          >
-            <ImageResults
-              selectedConversation={selectedConversation}
-              onOpenLightbox={openLightbox}
-              onContinueEdit={handleContinueEdit}
-              onDeletePrompt={openDeletePromptConfirm}
-              onDeleteResults={openDeleteResultsConfirm}
-              onReuseTurnConfig={handleReuseTurnConfig}
-              onRegenerateTurn={handleRegenerateTurn}
-              onRetryImage={handleRetryImage}
-              formatConversationTime={formatConversationTime}
-            />
-          </div>
+              <div
+                ref={resultsViewportRef}
+                className="hide-scrollbar min-h-0 flex-1 overscroll-contain overflow-y-auto border-y border-stone-200/70 px-1 py-3 sm:px-4 sm:py-4"
+              >
+                <ImageResults
+                  selectedConversation={selectedConversation}
+                  onOpenLightbox={openLightbox}
+                  onContinueEdit={handleContinueEdit}
+                  onDeletePrompt={openDeletePromptConfirm}
+                  onDeleteResults={openDeleteResultsConfirm}
+                  onReuseTurnConfig={handleReuseTurnConfig}
+                  onRegenerateTurn={handleRegenerateTurn}
+                  onRetryImage={handleRetryImage}
+                  formatConversationTime={formatConversationTime}
+                />
+              </div>
 
-          <ImageComposer
-            prompt={imagePrompt}
-            imageCount={imageCount}
-            imageSize={imageSize}
-            imageModel={imageModel}
-            imageModels={imageModelOptions}
-            imageProvider={imageProvider}
-            imageProviderOptions={imageProviderOptions}
-            imageModeUnavailableMessage={imageModeUnavailableMessage}
-            availableQuota={availableQuota}
-            activeTaskCount={activeTaskCount}
-            referenceImages={referenceImages}
-            textareaRef={textareaRef}
-            fileInputRef={fileInputRef}
-            onPromptChange={setImagePrompt}
-            onImageCountChange={(value) => setImageCount(value ? clampImageCount(value) : "")}
-            onImageSizeChange={setImageSize}
-            onImageModelChange={setImageModel}
-            onImageProviderChange={(value) => setImageProvider(normalizeTestProvider(value))}
-            onSubmit={handleSubmit}
-            onPickReferenceImage={() => fileInputRef.current?.click()}
-            onReferenceImageChange={handleReferenceImageChange}
-            onRemoveReferenceImage={handleRemoveReferenceImage}
-          />
+              <ImageComposer
+                prompt={imagePrompt}
+                imageCount={imageCount}
+                imageSize={imageSize}
+                imageModel={imageModel}
+                imageModels={imageModelOptions}
+                imageProvider={imageProvider}
+                imageProviderOptions={imageProviderOptions}
+                imageModeUnavailableMessage={imageModeUnavailableMessage}
+                availableQuota={availableQuota}
+                activeTaskCount={activeTaskCount}
+                referenceImages={referenceImages}
+                textareaRef={textareaRef}
+                fileInputRef={fileInputRef}
+                onPromptChange={setImagePrompt}
+                onImageCountChange={(value) =>
+                  setImageCount(value ? clampImageCount(value) : "")
+                }
+                onImageSizeChange={setImageSize}
+                onImageModelChange={setImageModel}
+                onImageProviderChange={(value) =>
+                  setImageProvider(normalizeTestProvider(value))
+                }
+                onSubmit={handleSubmit}
+                onPickReferenceImage={() => fileInputRef.current?.click()}
+                onReferenceImageChange={handleReferenceImageChange}
+                onRemoveReferenceImage={handleRemoveReferenceImage}
+              />
             </div>
           </div>
         )}
@@ -2044,7 +2443,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       />
 
       {deleteConfirm ? (
-        <Dialog open onOpenChange={(open) => (!open ? setDeleteConfirm(null) : null)}>
+        <Dialog
+          open
+          onOpenChange={(open) => (!open ? setDeleteConfirm(null) : null)}
+        >
           <DialogContent showCloseButton={false} className="rounded-2xl p-6">
             <DialogHeader className="gap-2">
               <DialogTitle>{deleteConfirmTitle}</DialogTitle>
@@ -2056,7 +2458,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
               <Button variant="outline" onClick={() => setDeleteConfirm(null)}>
                 取消
               </Button>
-              <Button className="bg-rose-600 text-white hover:bg-rose-700" onClick={() => void handleConfirmDelete()}>
+              <Button
+                className="bg-rose-600 text-white hover:bg-rose-700"
+                onClick={() => void handleConfirmDelete()}
+              >
                 确认删除
               </Button>
             </DialogFooter>

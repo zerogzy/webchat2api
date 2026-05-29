@@ -20,7 +20,6 @@ import {
 } from "@/components/image-thumbnail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -188,7 +187,7 @@ function LogsContent() {
   }, [type, startDate, endDate]);
 
   return (
-    <section className="relative overflow-hidden rounded-[28px] border border-white/70 bg-white/55 p-5 shadow-[var(--shadow-soft)] backdrop-blur-sm before:pointer-events-none before:absolute before:inset-x-6 before:top-0 before:h-px before:bg-white/90 lg:p-6">
+    <section className="flex flex-col gap-5">
       <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div className="space-y-2">
           <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
@@ -198,7 +197,7 @@ function LogsContent() {
             日志管理
           </h1>
         </div>
-        <div className="grid gap-2 rounded-2xl border border-white/70 bg-white/45 p-2 shadow-sm sm:grid-cols-2 lg:flex lg:items-center">
+        <div className="grid gap-2 sm:grid-cols-2 lg:flex lg:items-center">
           <Select value={type} onValueChange={setType}>
             <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/90 shadow-sm lg:w-[150px]">
               <SelectValue />
@@ -238,243 +237,241 @@ function LogsContent() {
         </div>
       </div>
 
-      <Card className="overflow-hidden rounded-[26px] border-white/80 bg-white/90 shadow-[var(--shadow-soft)]">
-        <CardContent className="p-0">
-          <div className="flex flex-col gap-3 border-b border-stone-100 bg-stone-50/35 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
-              <span>共 {items.length} 条</span>
-              <label className="flex items-center gap-2">
-                <Checkbox
-                  checked={currentPageSelected}
-                  onCheckedChange={(checked) =>
-                    toggleIds(
-                      currentRows.map((item) => item.id),
-                      Boolean(checked),
-                    )
-                  }
-                />
-                本页全选
-              </label>
-              <label className="flex items-center gap-2">
-                <Checkbox
-                  checked={allSelected}
-                  onCheckedChange={(checked) =>
-                    toggleIds(
-                      items.map((item) => item.id),
-                      Boolean(checked),
-                    )
-                  }
-                />
-                全选结果
-              </label>
-              {selectedIds.length > 0 ? (
-                <span className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-semibold text-stone-600 shadow-sm">
-                  已选 {selectedIds.length} 条
-                </span>
-              ) : null}
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                variant="ghost"
-                className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
-                onClick={() => void loadLogs()}
-                disabled={isLoading}
-              >
-                <RefreshCw
-                  className={`size-4 ${isLoading ? "animate-spin" : ""}`}
-                />
-                刷新
-              </Button>
-              <button
-                type="button"
-                className="rounded-lg px-3 py-1.5 text-sm text-stone-500 transition hover:bg-white hover:text-stone-900 disabled:text-stone-300"
-                onClick={() => setSelectedIds([])}
-                disabled={selectedIds.length === 0 || isDeleting}
-              >
-                取消选择
-              </button>
-              <Button
-                variant="outline"
-                className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 shadow-sm hover:bg-rose-50 hover:text-rose-700"
-                onClick={() =>
-                  setDeletingItems(
-                    items.filter((item) => selectedSet.has(item.id)),
+      <div className="overflow-hidden rounded-2xl border border-stone-200/80 bg-white/72">
+        <div className="flex flex-col gap-3 border-b border-stone-200/70 bg-stone-50/45 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
+            <span>共 {items.length} 条</span>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={currentPageSelected}
+                onCheckedChange={(checked) =>
+                  toggleIds(
+                    currentRows.map((item) => item.id),
+                    Boolean(checked),
                   )
                 }
-                disabled={selectedIds.length === 0 || isDeleting}
-              >
-                <Trash2 className="size-4" />
-                删除所选
-              </Button>
-            </div>
+              />
+              本页全选
+            </label>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={allSelected}
+                onCheckedChange={(checked) =>
+                  toggleIds(
+                    items.map((item) => item.id),
+                    Boolean(checked),
+                  )
+                }
+              />
+              全选结果
+            </label>
+            {selectedIds.length > 0 ? (
+              <span className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-semibold text-stone-600 shadow-sm">
+                已选 {selectedIds.length} 条
+              </span>
+            ) : null}
           </div>
-          <div className="overflow-x-auto overscroll-x-contain">
-            <Table className="min-w-[900px]">
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-12"></TableHead>
-                  <TableHead>时间</TableHead>
-                  <TableHead>类型</TableHead>
-                  {isCallLog ? <TableHead>令牌名称</TableHead> : null}
-                  {isCallLog ? <TableHead>调用耗时</TableHead> : null}
-                  {isCallLog ? <TableHead>状态</TableHead> : null}
-                  {isCallLog ? (
-                    <TableHead className="w-36">图片</TableHead>
-                  ) : null}
-                  <TableHead>简述</TableHead>
-                  <TableHead className="w-40">操作</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {currentRows.map((item) => {
-                  const urls = getUrls(item);
-                  return (
-                    <TableRow
-                      key={item.id}
-                      className="text-stone-600 hover:bg-stone-50/80"
-                    >
-                      <TableCell>
-                        <Checkbox
-                          checked={selectedSet.has(item.id)}
-                          onCheckedChange={(checked) =>
-                            toggleIds([item.id], Boolean(checked))
-                          }
-                        />
-                      </TableCell>
-                      <TableCell className="whitespace-nowrap">
-                        {item.time}
-                      </TableCell>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="ghost"
+              className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
+              onClick={() => void loadLogs()}
+              disabled={isLoading}
+            >
+              <RefreshCw
+                className={`size-4 ${isLoading ? "animate-spin" : ""}`}
+              />
+              刷新
+            </Button>
+            <button
+              type="button"
+              className="rounded-lg px-3 py-1.5 text-sm text-stone-500 transition hover:bg-white hover:text-stone-900 disabled:text-stone-300"
+              onClick={() => setSelectedIds([])}
+              disabled={selectedIds.length === 0 || isDeleting}
+            >
+              取消选择
+            </button>
+            <Button
+              variant="outline"
+              className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 shadow-sm hover:bg-rose-50 hover:text-rose-700"
+              onClick={() =>
+                setDeletingItems(
+                  items.filter((item) => selectedSet.has(item.id)),
+                )
+              }
+              disabled={selectedIds.length === 0 || isDeleting}
+            >
+              <Trash2 className="size-4" />
+              删除所选
+            </Button>
+          </div>
+        </div>
+        <div className="overflow-x-auto overscroll-x-contain">
+          <Table className="min-w-[900px]">
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-12"></TableHead>
+                <TableHead>时间</TableHead>
+                <TableHead>类型</TableHead>
+                {isCallLog ? <TableHead>令牌名称</TableHead> : null}
+                {isCallLog ? <TableHead>调用耗时</TableHead> : null}
+                {isCallLog ? <TableHead>状态</TableHead> : null}
+                {isCallLog ? (
+                  <TableHead className="w-36">图片</TableHead>
+                ) : null}
+                <TableHead>简述</TableHead>
+                <TableHead className="w-40">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {currentRows.map((item) => {
+                const urls = getUrls(item);
+                return (
+                  <TableRow
+                    key={item.id}
+                    className="text-stone-600 hover:bg-stone-50/80"
+                  >
+                    <TableCell>
+                      <Checkbox
+                        checked={selectedSet.has(item.id)}
+                        onCheckedChange={(checked) =>
+                          toggleIds([item.id], Boolean(checked))
+                        }
+                      />
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap">
+                      {item.time}
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant="secondary"
+                        className="rounded-md px-2.5 py-1 shadow-sm"
+                      >
+                        {typeLabels[item.type] || item.type}
+                      </Badge>
+                    </TableCell>
+                    {isCallLog ? (
+                      <TableCell>{getDetailText(item, "key_name")}</TableCell>
+                    ) : null}
+                    {isCallLog ? (
+                      <TableCell>{formatDuration(item)}</TableCell>
+                    ) : null}
+                    {isCallLog ? (
                       <TableCell>
                         <Badge
-                          variant="secondary"
+                          variant={
+                            item.detail?.status === "failed"
+                              ? "danger"
+                              : "success"
+                          }
                           className="rounded-md px-2.5 py-1 shadow-sm"
                         >
-                          {typeLabels[item.type] || item.type}
+                          {getStatus(item)}
                         </Badge>
                       </TableCell>
-                      {isCallLog ? (
-                        <TableCell>{getDetailText(item, "key_name")}</TableCell>
-                      ) : null}
-                      {isCallLog ? (
-                        <TableCell>{formatDuration(item)}</TableCell>
-                      ) : null}
-                      {isCallLog ? (
-                        <TableCell>
-                          <Badge
-                            variant={
-                              item.detail?.status === "failed"
-                                ? "danger"
-                                : "success"
-                            }
-                            className="rounded-md px-2.5 py-1 shadow-sm"
-                          >
-                            {getStatus(item)}
-                          </Badge>
-                        </TableCell>
-                      ) : null}
-                      {isCallLog ? (
-                        <TableCell>
-                          {urls.length ? (
-                            <div className="flex items-center gap-1.5">
-                              {urls.slice(0, 3).map((url, imageIndex) => (
-                                <button
-                                  key={`${url}-${imageIndex}`}
-                                  type="button"
-                                  className="relative size-9 overflow-hidden rounded-lg border border-stone-200 bg-stone-100 shadow-sm transition hover:scale-105"
-                                  onClick={() => openLogImage(item, imageIndex)}
-                                  title="预览图片"
-                                >
-                                  <ImageThumbnail
-                                    src={url}
-                                    thumbnailSrc={getImageThumbnailUrl(url)}
-                                    className="h-full w-full"
-                                  />
-                                </button>
-                              ))}
-                              {urls.length > 3 ? (
-                                <span className="text-xs text-stone-400">
-                                  +{urls.length - 3}
-                                </span>
-                              ) : null}
-                            </div>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-xs text-stone-400">
-                              <ImageIcon className="size-3.5" />-
-                            </span>
-                          )}
-                        </TableCell>
-                      ) : null}
-                      <TableCell className="max-w-[420px] truncate text-stone-500">
-                        {item.summary || "-"}
-                      </TableCell>
+                    ) : null}
+                    {isCallLog ? (
                       <TableCell>
-                        <div className="flex items-center gap-1">
-                          <Button
-                            variant="ghost"
-                            className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100 hover:text-stone-900"
-                            onClick={() => openDetail(item)}
-                          >
-                            查看详情
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                            onClick={() => setDeletingItems([item])}
-                          >
-                            删除
-                          </Button>
-                        </div>
+                        {urls.length ? (
+                          <div className="flex items-center gap-1.5">
+                            {urls.slice(0, 3).map((url, imageIndex) => (
+                              <button
+                                key={`${url}-${imageIndex}`}
+                                type="button"
+                                className="relative size-9 overflow-hidden rounded-lg border border-stone-200 bg-stone-100 shadow-sm transition hover:scale-105"
+                                onClick={() => openLogImage(item, imageIndex)}
+                                title="预览图片"
+                              >
+                                <ImageThumbnail
+                                  src={url}
+                                  thumbnailSrc={getImageThumbnailUrl(url)}
+                                  className="h-full w-full"
+                                />
+                              </button>
+                            ))}
+                            {urls.length > 3 ? (
+                              <span className="text-xs text-stone-400">
+                                +{urls.length - 3}
+                              </span>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-xs text-stone-400">
+                            <ImageIcon className="size-3.5" />-
+                          </span>
+                        )}
                       </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </div>
-          <div className="flex flex-col gap-3 border-t border-stone-100 bg-stone-50/30 px-4 py-3 text-sm text-stone-500 sm:flex-row sm:items-center sm:justify-end">
-            <span>
-              第 {safePage} / {pageCount} 页，共 {items.length} 条
-            </span>
-            <Button
-              variant="outline"
-              size="icon"
-              className="size-9 rounded-lg border-stone-200 bg-white"
-              disabled={safePage <= 1}
-              onClick={() => setPage((value) => Math.max(1, value - 1))}
-            >
-              <ChevronLeft className="size-4" />
-            </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              className="size-9 rounded-lg border-stone-200 bg-white"
-              disabled={safePage >= pageCount}
-              onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
-            >
-              <ChevronRight className="size-4" />
-            </Button>
-          </div>
-          {!isLoading && items.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center text-sm text-stone-500">
-              <div className="rounded-2xl bg-stone-100/80 p-3 text-stone-500 shadow-inner">
-                <Search className="size-5" />
-              </div>
-              <div className="space-y-1">
-                <p className="font-medium text-stone-700">没有找到日志</p>
-                <p>调整日期或日志类型后重试。</p>
-              </div>
+                    ) : null}
+                    <TableCell className="max-w-[420px] truncate text-stone-500">
+                      {item.summary || "-"}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100 hover:text-stone-900"
+                          onClick={() => openDetail(item)}
+                        >
+                          查看详情
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                          onClick={() => setDeletingItems([item])}
+                        >
+                          删除
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+        <div className="flex flex-col gap-3 border-t border-stone-200/70 bg-stone-50/45 px-4 py-3 text-sm text-stone-500 sm:flex-row sm:items-center sm:justify-end">
+          <span>
+            第 {safePage} / {pageCount} 页，共 {items.length} 条
+          </span>
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-9 rounded-lg border-stone-200 bg-white"
+            disabled={safePage <= 1}
+            onClick={() => setPage((value) => Math.max(1, value - 1))}
+          >
+            <ChevronLeft className="size-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-9 rounded-lg border-stone-200 bg-white"
+            disabled={safePage >= pageCount}
+            onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
+          >
+            <ChevronRight className="size-4" />
+          </Button>
+        </div>
+        {!isLoading && items.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center text-sm text-stone-500">
+            <div className="rounded-2xl bg-stone-100/80 p-3 text-stone-500 shadow-inner">
+              <Search className="size-5" />
             </div>
-          ) : null}
-        </CardContent>
-      </Card>
+            <div className="space-y-1">
+              <p className="font-medium text-stone-700">没有找到日志</p>
+              <p>调整日期或日志类型后重试。</p>
+            </div>
+          </div>
+        ) : null}
+      </div>
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="flex h-[min(88vh,860px)] w-[min(92vw,920px)] flex-col overflow-hidden rounded-2xl p-0">
+        <DialogContent className="flex h-[min(88vh,860px)] w-[min(92vw,920px)] flex-col overflow-hidden rounded-2xl border-stone-200 bg-white p-0 shadow-sm">
           <DialogHeader className="shrink-0 border-b border-stone-100 px-6 py-5">
             <DialogTitle>日志详情</DialogTitle>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto px-6 py-5">
             <div className="space-y-4">
-              <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600 md:grid-cols-2">
+              <div className="grid gap-3 border-y border-stone-200/80 py-4 text-sm text-stone-600 md:grid-cols-2">
                 {Object.entries(detailLog?.detail || {})
                   .filter(
                     ([key, value]) =>
@@ -513,7 +510,7 @@ function LogsContent() {
                   ))}
                 </div>
               ) : null}
-              <pre className="max-h-[72vh] overflow-auto rounded-xl border border-stone-200 bg-stone-50 p-4 text-xs leading-6 text-stone-700">
+              <pre className="max-h-[72vh] overflow-auto rounded-xl border border-stone-200/80 bg-stone-50/80 p-4 text-xs leading-6 text-stone-700">
                 {JSON.stringify(detailLog?.detail || {}, null, 2)}
               </pre>
             </div>
