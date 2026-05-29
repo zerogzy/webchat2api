@@ -10,9 +10,13 @@ _CLIENT_EXPORTS = {
     "GeminiWebClient",
     "GeminiWebError",
     "account_cookie_header",
+    "account_session_token",
     "build_prompt",
+    "build_stream_generate_form_payload",
     "build_web_payload",
     "chat_completion",
+    "classify_upstream_error",
+    "cookie_header_from_mapping",
     "extract_completion",
     "extract_stream_generate_text",
     "extract_text",
@@ -20,6 +24,9 @@ _CLIENT_EXPORTS = {
     "message_text",
     "parse_cookie_header",
     "parse_web_response_text",
+    "sanitize_cookie_header",
+    "session_token_from_response",
+    "stream_generate_url",
     "synthetic_stream_content",
 }
 
