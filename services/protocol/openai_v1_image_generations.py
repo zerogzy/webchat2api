@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from services.models import GEMINI_PROVIDER, GROK_PROVIDER, resolve_model
-from services.providers.gemini import images as gemini_images
-from services.providers.gpt import images as gpt_images
-from services.providers.grok import images as grok_images
+from services.models import resolve_model
+from services.providers.registry import image_generation_outputs
 from services.protocol.conversation import (
     ConversationRequest,
     collect_image_outputs,
@@ -30,12 +28,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         base_url=base_url,
         message_as_error=True,
     )
-    if spec.provider == GROK_PROVIDER:
-        outputs = grok_images.generation_outputs(body, spec, prompt, n)
-    elif spec.provider == GEMINI_PROVIDER:
-        outputs = gemini_images.generation_outputs(request, spec)
-    else:
-        outputs = gpt_images.generation_outputs(request, spec)
+    outputs = image_generation_outputs(spec, request, body=body, prompt=prompt, n=n)
     if body.get("stream"):
         return stream_image_chunks(outputs)
     return collect_image_outputs(outputs)
