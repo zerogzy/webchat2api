@@ -40,7 +40,9 @@ class ResponseRoutingUnitTests(unittest.TestCase):
             calls.append((body, spec, messages))
             return GeminiCompletion("Gemini routed text")
 
-        with mock.patch.object(openai_v1_response.gemini_chat, "chat_completion", fake_chat_completion):
+        gemini_adapter = mock.Mock()
+        gemini_adapter.chat_completion.side_effect = fake_chat_completion
+        with mock.patch.object(openai_v1_response, "gemini_chat", gemini_adapter):
             result = cast(dict[str, Any], openai_v1_response.handle({"model": "gemini-2.5-pro", "input": "hello"}))
 
         self.assertEqual(result["object"], "response")
@@ -51,7 +53,9 @@ class ResponseRoutingUnitTests(unittest.TestCase):
         self.assertEqual(calls[0][2], [{"role": "user", "content": "hello"}])
 
     def test_gemini_text_response_stream_preserves_response_events(self) -> None:
-        with mock.patch.object(openai_v1_response.gemini_chat, "chat_completion", return_value=GeminiCompletion("stream text")):
+        gemini_adapter = mock.Mock()
+        gemini_adapter.chat_completion.return_value = GeminiCompletion("stream text")
+        with mock.patch.object(openai_v1_response, "gemini_chat", gemini_adapter):
             events = list(cast(Any, openai_v1_response.handle({"model": "gemini-2.5-flash", "input": "hello", "stream": True})))
 
         event_types = [event.get("type") for event in events]

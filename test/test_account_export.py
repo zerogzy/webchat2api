@@ -196,6 +196,24 @@ class AccountExportTests(unittest.TestCase):
         self.assertEqual(intersected_items[0]["id_token"], "grok-id")
         self.assertEqual(intersected_items[0]["refresh_token"], "grok-rt")
 
+    def test_build_export_items_filters_duplicate_tokens_by_provider(self) -> None:
+        service = AccountService(
+            MemoryStorage(
+                [
+                    {"access_token": "shared-token", "provider": GPT_PROVIDER, "id_token": "gpt-id", "refresh_token": "gpt-rt"},
+                    {"access_token": "shared-token", "provider": GROK_PROVIDER, "id_token": "grok-id", "refresh_token": "grok-rt"},
+                ]
+            )
+        )
+
+        gpt_items = service.build_export_items(["shared-token"], provider=GPT_PROVIDER)
+        grok_items = service.build_export_items(["shared-token"], provider=GROK_PROVIDER)
+
+        self.assertEqual(len(gpt_items), 1)
+        self.assertEqual(len(grok_items), 1)
+        self.assertEqual(gpt_items[0]["id_token"], "gpt-id")
+        self.assertEqual(grok_items[0]["id_token"], "grok-id")
+
     def test_account_txt_content_is_line_oriented_and_keeps_tokens(self) -> None:
         content = AccountService.build_export_text(
             [

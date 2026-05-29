@@ -39,10 +39,14 @@ class FakeAccountService:
             "__Secure-1PSIDTS": "psidts",
         }
 
-    def list_accounts(self) -> list[dict[str, Any]]:
+    def list_accounts(self, provider: str | None = None) -> list[dict[str, Any]]:
+        if provider and provider != self.account.get("provider"):
+            return []
         return [dict(self.account)]
 
-    def list_tokens(self) -> list[str]:
+    def list_tokens(self, provider: str | None = None) -> list[str]:
+        if provider and provider != self.account.get("provider"):
+            return []
         return [GEMINI_TOKEN]
 
     def add_account_items(self, items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -51,18 +55,20 @@ class FakeAccountService:
     def add_accounts(self, tokens: list[str]) -> dict[str, Any]:
         return {"added": 1, "skipped": 0, "items": self.list_accounts()}
 
-    def refresh_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
-        return {"refreshed": 0, "errors": [], "items": self.list_accounts()}
+    def refresh_accounts(self, access_tokens: list[str], provider: str | None = None) -> dict[str, Any]:
+        return {"refreshed": 0, "errors": [], "items": self.list_accounts(provider=provider)}
 
-    def update_account(self, access_token: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+    def update_account(self, access_token: str, updates: dict[str, Any], provider: str | None = None) -> dict[str, Any] | None:
+        if provider and provider != self.account.get("provider"):
+            return None
         self.account.update(updates)
         return dict(self.account)
 
-    def delete_accounts(self, tokens: list[str]) -> dict[str, Any]:
-        return {"removed": 0, "items": self.list_accounts()}
+    def delete_accounts(self, tokens: list[str], provider: str | None = None) -> dict[str, Any]:
+        return {"removed": 0, "items": self.list_accounts(provider=provider)}
 
-    def delete_limited_accounts(self) -> dict[str, Any]:
-        return {"removed": 0, "items": self.list_accounts()}
+    def delete_limited_accounts(self, provider: str | None = None) -> dict[str, Any]:
+        return {"removed": 0, "items": self.list_accounts(provider=provider)}
 
     def build_export_items(self, access_tokens: list[str] | None = None, provider: str | None = None) -> list[dict[str, str]]:
         return [{"access_token": GEMINI_TOKEN, "sso": ""}]
@@ -142,6 +148,21 @@ class GeminiAccountApiSanitizationTests(unittest.TestCase):
         body = cast(dict[str, Any], response.json())
         self.assert_no_gemini_secrets(body["item"])
         self.assert_no_gemini_secrets(body["items"][0])
+
+    def test_provider_filter_is_forwarded_to_get_accounts(self) -> None:
+        response = self.client.get("/api/accounts?provider=gpt", headers=AUTH_HEADERS)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["items"], [])
+
+    def test_update_account_target_provider_does_not_match_other_provider(self) -> None:
+        response = self.client.post(
+            "/api/accounts/update",
+            headers=AUTH_HEADERS,
+            json={"access_token": GEMINI_TOKEN, "target_provider": "gpt", "status": "禁用"},
+        )
+
+        self.assertEqual(response.status_code, 404)
 
     def test_export_accounts_keeps_gemini_cookie_header(self) -> None:
         items = self.account_service.build_export_items(provider="gemini")
