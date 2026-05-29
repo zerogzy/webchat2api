@@ -14,7 +14,8 @@ from curl_cffi import requests
 from fastapi import HTTPException
 
 from services.config import config
-from services.models import GROK_PROVIDER, ModelSpec, is_supported_grok_app_chat_image_model
+from services.providers.base import GROK_PROVIDER, ModelSpec
+from services.providers.grok.models import is_supported_grok_app_chat_image_model
 from services.network.client import create_session
 from services.network.flaresolverr import FlareSolverrClearanceProvider
 from services.network.headers import build_grok_console_headers
