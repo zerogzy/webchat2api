@@ -8,12 +8,7 @@ from typing import Any, Iterable, Iterator
 from fastapi import HTTPException
 
 from services.models import GEMINI_PROVIDER, GROK_PROVIDER, resolve_model
-from services.providers.gemini import chat as gemini_chat
-from services.providers.gemini import images as gemini_images
-from services.providers.gpt import chat as gpt_chat
-from services.providers.gpt import images as gpt_images
-from services.providers.grok import chat as grok_chat
-from services.providers.grok import images as grok_images
+from services.providers.registry import chat_adapter, response_image_outputs
 import services.protocol.tool_calls as tool_calls
 from services.protocol.conversation import (
     ConversationRequest,
@@ -23,6 +18,11 @@ from services.protocol.conversation import (
     text_backend,
 )
 from utils.helper import extract_image_from_message_content, extract_response_prompt, has_response_image_generation_tool
+
+
+gpt_chat = chat_adapter("gpt")
+grok_chat = chat_adapter("grok")
+gemini_chat = chat_adapter("gemini")
 
 
 def is_text_response_request(body: dict[str, Any]) -> bool:
@@ -312,11 +312,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         if images:
             from services.protocol.conversation import ImageGenerationError
             raise ImageGenerationError("Grok response image generation does not support image input", status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model")
-        image_outputs = grok_images.generation_outputs(body, spec, prompt, 1)
-    elif spec.provider == GEMINI_PROVIDER:
-        image_outputs = gemini_images.response_image_outputs(request, spec)
-    else:
-        image_outputs = gpt_images.response_image_outputs(request, spec)
+    image_outputs = response_image_outputs(spec, request, body=body, prompt=prompt, n=1)
     yield from stream_image_response(image_outputs, prompt, model)
 
 

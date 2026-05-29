@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from services.models import GEMINI_PROVIDER, GROK_PROVIDER, resolve_model
-from services.providers.gemini import images as gemini_images
-from services.providers.gpt import images as gpt_images
-from services.providers.grok import images as grok_images
+from services.models import GROK_PROVIDER, resolve_model
+from services.providers.registry import image_edit_outputs
 from services.protocol.conversation import (
     ConversationRequest,
     ImageGenerationError,
@@ -25,7 +23,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     base_url = str(body.get("base_url") or "") or None
     spec = resolve_model(model)
     if spec.provider == GROK_PROVIDER:
-        outputs = grok_images.edit_outputs(body, spec, prompt, images, n, size)
+        outputs = image_edit_outputs(spec, None, body=body, prompt=prompt, images=images, n=n, size=size)
         if body.get("stream"):
             return stream_image_chunks(outputs)
         return collect_image_outputs(outputs)
@@ -42,10 +40,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         images=encoded_images,
         message_as_error=True,
     )
-    if spec.provider == GEMINI_PROVIDER:
-        outputs = gemini_images.edit_outputs(request, spec)
-    else:
-        outputs = gpt_images.edit_outputs(request, spec)
+    outputs = image_edit_outputs(spec, request, body=body, prompt=prompt, images=images, n=n, size=size)
     if body.get("stream"):
         return stream_image_chunks(outputs)
     return collect_image_outputs(outputs)

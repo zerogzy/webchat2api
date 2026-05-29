@@ -8,12 +8,7 @@ from fastapi import HTTPException
 
 from services.models import GEMINI_PROVIDER, GROK_PROVIDER, resolve_model, is_grok_app_chat_model
 from services.providers import grok
-from services.providers.gemini import chat as gemini_chat
-from services.providers.gemini import images as gemini_images
-from services.providers.gpt import chat as gpt_chat
-from services.providers.gpt import images as gpt_images
-from services.providers.grok import chat as grok_chat
-from services.providers.grok import images as grok_images
+from services.providers.registry import chat_adapter, image_adapter, image_generation_outputs
 from services.config import config
 import services.protocol.tool_calls as tool_calls
 from services.protocol.conversation import (
@@ -29,6 +24,18 @@ from services.protocol.conversation import (
     text_backend,
 )
 from utils.helper import build_chat_image_markdown_content, extract_chat_image, extract_chat_prompt, is_image_chat_request, parse_image_count
+
+
+gpt_chat = chat_adapter("gpt")
+grok_chat = chat_adapter("grok")
+gemini_chat = chat_adapter("gemini")
+
+
+def _unsupported_image_error(provider: str) -> HTTPException:
+    adapter = image_adapter(provider)
+    if hasattr(adapter, "unsupported_image_error"):
+        return adapter.unsupported_image_error()
+    return HTTPException(status_code=400, detail={"error": f"{provider} image chat is unsupported"})
 
 
 def completion_chunk(model: str, delta: dict[str, Any], finish_reason: str | None = None, completion_id: str = "", created: int | None = None) -> dict[str, Any]:
@@ -434,7 +441,7 @@ def image_result_content(result: dict[str, Any]) -> str:
 
 
 def gemini_image_chat_unsupported() -> HTTPException:
-    return gemini_images.unsupported_image_error()
+    return _unsupported_image_error(GEMINI_PROVIDER)
 
 
 def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
@@ -444,7 +451,7 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
         if images:
             from services.protocol.conversation import ImageGenerationError
             raise ImageGenerationError("Grok image chat does not support image input", status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model")
-        result = collect_image_outputs(grok_images.generation_outputs(body, spec, prompt, n))
+        result = collect_image_outputs(image_generation_outputs(spec, None, body=body, prompt=prompt, n=n))
         return completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
     request = ConversationRequest(
         prompt=prompt,
@@ -453,10 +460,7 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
         response_format="b64_json",
         images=encode_images(images) or None,
     )
-    if spec.provider == GEMINI_PROVIDER:
-        result = collect_image_outputs(gemini_images.generation_outputs(request, spec))
-    else:
-        result = collect_image_outputs(gpt_images.generation_outputs(request, spec))
+    result = collect_image_outputs(image_generation_outputs(spec, request, body=body, prompt=prompt, n=n))
     return completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
 
 
@@ -467,7 +471,7 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         if images:
             from services.protocol.conversation import ImageGenerationError
             raise ImageGenerationError("Grok image chat does not support image input", status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model")
-        yield from stream_image_chat_completion(grok_images.generation_outputs(body, spec, prompt, n), model)
+        yield from stream_image_chat_completion(image_generation_outputs(spec, None, body=body, prompt=prompt, n=n), model)
         return
     request = ConversationRequest(
         prompt=prompt,
@@ -476,10 +480,7 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         response_format="b64_json",
         images=encode_images(images) or None,
     )
-    if spec.provider == GEMINI_PROVIDER:
-        image_outputs = gemini_images.generation_outputs(request, spec)
-    else:
-        image_outputs = gpt_images.generation_outputs(request, spec)
+    image_outputs = image_generation_outputs(spec, request, body=body, prompt=prompt, n=n)
     yield from stream_image_chat_completion(image_outputs, model)
 
 
