@@ -21,7 +21,7 @@ from services.network.client import create_session
 from services.network.flaresolverr import FlareSolverrClearanceProvider
 from services.network.headers import build_grok_console_headers
 from services.network.profiles import build_grok_app_chat_profile, build_grok_console_profile, infer_chromium_impersonate
-from services.protocol.conversation import ImageGenerationError, ImageOutput, format_image_result
+from services.protocol.conversation import ImageGenerationError, ImageOutput
 from utils.log import logger
 
 CONSOLE_BASE_URL = "https://console.x.ai"
@@ -39,6 +39,20 @@ GROK_IMAGE_EDIT_MEDIA_TYPE = "MEDIA_POST_TYPE_IMAGE"
 GROK_IMAGE_EDIT_SIZE = "1024x1024"
 GROK_IMAGE_EDIT_MAX_REFERENCES = 7
 GROK_IMAGE_EDIT_MAX_N = 2
+GROK_IMAGE_ASPECT_RATIOS = {
+    "1024x1024": "1:1",
+    "1280x720": "16:9",
+    "720x1280": "9:16",
+    "1792x1024": "3:2",
+    "1024x1792": "2:3",
+    "1:1": "1:1",
+    "2:3": "2:3",
+    "3:2": "3:2",
+    "9:16": "9:16",
+    "16:9": "16:9",
+}
+GROK_IMAGE_RESPONSE_FORMATS = {"url", "b64_json", "base64"}
+GROK_IMAGE_DOWNLOAD_TIMEOUT = 30
 SEARCH_SOURCES_MARKER = "[webchat2api-sources]: #"
 _GROK_IMAGE_PLACEHOLDER_RE = re.compile(r"@IMAGE(\d+)\b", re.IGNORECASE)
 _SEARCH_SOURCES_BLOCK_RE = re.compile(r"\n{0,2}\[webchat2api-sources\]: #\n+## Sources\n(?:\d+\. \[[^\n\]]*\]\([^\n)]*\)\n?)+\s*", re.MULTILINE)
@@ -846,6 +860,26 @@ def latest_user_message(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def grok_image_aspect_ratio(size: object) -> str:
+    return GROK_IMAGE_ASPECT_RATIOS.get(str(size or "").strip().lower(), "")
+
+
+def grok_image_response_format(value: object, default: str = "b64_json") -> str:
+    if value is None or value == "":
+        response_format = default
+    else:
+        response_format = str(value).strip().lower()
+    if response_format in GROK_IMAGE_RESPONSE_FORMATS:
+        return response_format
+    raise ImageGenerationError(
+        "Grok image response_format must be one of base64, b64_json, url",
+        status_code=400,
+        error_type="invalid_request_error",
+        code="invalid_response_format",
+        param="response_format",
+    )
+
+
 def build_app_chat_payload(
     spec: ModelSpec,
     body: dict[str, Any],
@@ -901,6 +935,17 @@ def build_app_chat_payload(
         payload["modelTier"] = spec.model_tier
     if spec.prefer_best:
         payload["preferBest"] = True
+    if image_generation:
+        aspect_ratio = grok_image_aspect_ratio(body.get("size"))
+        if aspect_ratio:
+            payload["modelConfigOverride"] = {
+                "modelMap": {
+                    "imageGenModel": spec.upstream_model or spec.id,
+                    "imageGenModelConfig": {
+                        "aspectRatio": aspect_ratio,
+                    },
+                }
+            }
     return payload
 
 
@@ -1135,7 +1180,9 @@ def _resolve_app_chat_image_url(value: object) -> str:
     return ""
 
 
-def extract_app_chat_image_url(event: dict[str, Any]) -> str:
+def extract_app_chat_image_urls(event: dict[str, Any]) -> list[str]:
+    image_urls: list[str] = []
+    seen: set[str] = set()
     for chunk in _app_chat_image_chunk_values(event):
         try:
             progress = int(chunk.get("progress") or 100)
@@ -1145,12 +1192,19 @@ def extract_app_chat_image_url(event: dict[str, Any]) -> str:
             continue
         for key in ("imageUrl", "imageURL", "url", "mediaUrl", "mediaURL", "generatedImageUrl", "generatedImageURL", "assetUrl", "assetURL", "finalUrl", "finalURL", "contentUrl", "contentURL"):
             image_url = _resolve_app_chat_image_url(chunk.get(key))
-            if image_url:
-                return image_url
+            if image_url and image_url not in seen:
+                image_urls.append(image_url)
+                seen.add(image_url)
         image_url = resolve_grok_asset_reference(str(chunk.get("assetId") or chunk.get("asset_id") or chunk.get("fileId") or chunk.get("file_id") or "").strip(), "", str(chunk.get("userId") or chunk.get("user_id") or ""))
-        if image_url:
-            return image_url
-    return ""
+        if image_url and image_url not in seen:
+            image_urls.append(image_url)
+            seen.add(image_url)
+    return image_urls
+
+
+def extract_app_chat_image_url(event: dict[str, Any]) -> str:
+    urls = extract_app_chat_image_urls(event)
+    return urls[0] if urls else ""
 
 
 def _search_source_text(value: object) -> str:
@@ -1404,6 +1458,18 @@ def classify_app_chat_upstream_error(upstream_status: int, access_token: str | N
     return GrokConsoleError(f"{_APP_CHAT_PUBLIC_ERROR_PREFIX} (HTTP {status})", _openai_status(status), status)
 
 
+def _is_safe_grok_asset_path(value: str) -> bool:
+    if not value:
+        return False
+    if value.startswith("//") or "\\" in value:
+        return False
+    if any(ord(char) < 32 for char in value):
+        return False
+    if ":" in value.split("/", 1)[0]:
+        return False
+    return True
+
+
 def _resolve_grok_asset_url(value: str) -> str:
     url = str(value or "").strip()
     if not url:
@@ -1412,6 +1478,8 @@ def _resolve_grok_asset_url(value: str) -> str:
         parsed = urlparse(url)
         if parsed.scheme == "https" and parsed.netloc == "assets.grok.com":
             return url
+        return ""
+    if not _is_safe_grok_asset_path(url):
         return ""
     return GROK_ASSET_BASE_URL + url.lstrip("/")
 
@@ -1874,6 +1942,65 @@ def app_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[di
     return collect_app_chat_response(app_chat_completion_events(body, spec, messages))
 
 
+def _grok_asset_base64(url: str) -> str:
+    resolved_url = _resolve_grok_asset_url(url)
+    if not resolved_url:
+        raise ImageGenerationError(
+            "Grok image base64 response_format only supports https://assets.grok.com assets",
+            status_code=502,
+            code="image_download_failed",
+        )
+    session = create_session()
+    try:
+        response = session.get(resolved_url, timeout=GROK_IMAGE_DOWNLOAD_TIMEOUT)
+        if int(getattr(response, "status_code", 0) or 0) >= 400:
+            raise ImageGenerationError(
+                "Grok image asset download failed",
+                status_code=502,
+                code="image_download_failed",
+            )
+        content = getattr(response, "content", b"")
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        elif not isinstance(content, bytes):
+            content = bytes(content or b"")
+        if not content:
+            raise ImageGenerationError(
+                "Grok image asset download returned an empty response",
+                status_code=502,
+                code="image_download_failed",
+            )
+        return base64.b64encode(content).decode("ascii")
+    except ImageGenerationError:
+        raise
+    except requests.exceptions.RequestException as exc:
+        raise ImageGenerationError(
+            "Grok image asset download failed",
+            status_code=502,
+            code="image_download_failed",
+        ) from exc
+    finally:
+        close = getattr(session, "close", None)
+        if callable(close):
+            close()
+
+
+def _format_grok_image_items(image_items: list[dict[str, Any]], response_format: str) -> list[dict[str, Any]]:
+    data: list[dict[str, Any]] = []
+    for item in image_items:
+        url = str(item.get("url") or "").strip()
+        revised_prompt = str(item.get("revised_prompt") or "").strip()
+        if response_format == "url":
+            data.append({"url": url, "revised_prompt": revised_prompt})
+            continue
+        b64_json = _grok_asset_base64(url)
+        if response_format == "base64":
+            data.append({"base64": b64_json, "revised_prompt": revised_prompt})
+        else:
+            data.append({"b64_json": b64_json, "revised_prompt": revised_prompt})
+    return data
+
+
 def app_chat_image_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n: int = 1) -> Iterator[ImageOutput]:
     if not is_supported_grok_app_chat_image_model(spec.id):
         if spec.capability == "video":
@@ -1892,6 +2019,7 @@ def app_chat_image_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n
     request_body = dict(body)
     request_body["prompt"] = prompt
     request_body["n"] = n
+    response_format = grok_image_response_format(request_body.get("response_format"))
     payload = build_app_chat_payload(spec, request_body, [{"role": "user", "content": prompt}], image_generation=True)
 
     from services.account_service import account_service
@@ -1901,15 +2029,20 @@ def app_chat_image_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n
         raise ImageGenerationError("no available Grok account", status_code=503, code="no_available_account")
     account = account_service.get_account(access_token)
     image_items: list[dict[str, Any]] = []
+    seen_image_urls: set[str] = set()
     try:
         with GrokAppChatClient(access_token, account) as client:
             for event in client.stream_events(payload):
                 token, thinking = extract_app_chat_token(event)
                 if token and not thinking:
                     yield ImageOutput(kind="progress", model=spec.id, index=1, total=n, text=token, upstream_event_type="app_chat.token")
-                image_url = extract_app_chat_image_url(event)
-                if image_url:
+                for image_url in extract_app_chat_image_urls(event):
+                    if image_url in seen_image_urls:
+                        continue
                     image_items.append({"url": image_url, "revised_prompt": prompt})
+                    seen_image_urls.add(image_url)
+                    if len(image_items) >= n:
+                        break
                 moderation_message = app_chat_moderation_message(event)
                 if moderation_message:
                     raise ImageGenerationError(moderation_message, status_code=400, error_type="invalid_request_error", code="content_policy_violation")
@@ -1918,10 +2051,11 @@ def app_chat_image_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n
     except GrokConsoleError as exc:
         raise ImageGenerationError(str(exc), status_code=exc.status_code) from exc
     account_service.mark_text_used(access_token)
+    image_items = image_items[:n]
     if image_items:
-        yield ImageOutput(kind="result", model=spec.id, index=1, total=n, data=format_image_result(image_items, prompt, "url")["data"])
+        yield ImageOutput(kind="result", model=spec.id, index=1, total=n, data=_format_grok_image_items(image_items, response_format))
         return
-    raise ImageGenerationError("Grok image generation did not return an image", status_code=502, code="image_generation_failed")
+    raise ImageGenerationError("Grok image generation reached final response without an image", status_code=502, code="image_generation_failed")
 
 
 def app_chat_image_edit_outputs(
@@ -1933,6 +2067,7 @@ def app_chat_image_edit_outputs(
     size: str | None = None,
 ) -> Iterator[ImageOutput]:
     validate_grok_image_edit_request(images, n, size)
+    response_format = grok_image_response_format(body.get("response_format"))
 
     from services.account_service import account_service
 
@@ -1983,7 +2118,7 @@ def app_chat_image_edit_outputs(
         for _, url in sorted(final_urls.items())[:n]
     ]
     if image_items:
-        yield ImageOutput(kind="result", model=spec.id, index=1, total=n, data=image_items)
+        yield ImageOutput(kind="result", model=spec.id, index=1, total=n, data=_format_grok_image_items(image_items, response_format))
         return
     raise ImageGenerationError("Grok image edit did not return an image", status_code=502, code="image_edit_failed")
 
