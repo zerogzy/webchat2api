@@ -31,7 +31,7 @@ export const gptProvider: AccountProviderDefinition = {
     providerDescription: "导入 GPT access token、ChatGPT session JSON，或 CPA/OpenAI 账号 JSON。",
     methodIntro: "GPT 支持 token 文本、Session JSON 和 CPA/OpenAI JSON；导入后会刷新邮箱、套餐与图像额度。",
     emptyMethodsLabel: "当前没有可用的 GPT 导入方式。",
-    cpaHelp: "每个 JSON 文件应包含 access_token 或 accessToken；缺省会按 GPT 导入，codex 类型会保留为导出类型。",
+    cpaHelp: "每个 JSON 文件应包含 access_token 或 accessToken；GPT 会保留原始 token 字段，type=codex 会按 Codex 来源/导出类型导入。",
     remoteCpaDescription: "前往设置页配置远程 CPA 服务器后导入 OpenAI/GPT 账号。",
     sub2apiDescription: "前往设置页配置 Sub2API 服务器，再选择其中的 OpenAI/GPT 账号。",
   },

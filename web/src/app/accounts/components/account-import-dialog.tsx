@@ -112,9 +112,12 @@ function buildCpaPayload(raw: Record<string, unknown>, token: string, provider: 
     access_token: token,
     provider,
   };
-  delete payload.accessToken;
-  if (payload.type === "codex") {
+  if (provider !== "gpt") {
+    delete payload.accessToken;
+  }
+  if (provider === "gpt" && payload.type === "codex") {
     payload.export_type = "codex";
+    payload.source_type = "codex";
     delete payload.type;
   }
   return payload;
