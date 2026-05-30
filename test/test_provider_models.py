@@ -29,6 +29,7 @@ from services.openai_backend_api import OpenAIBackendAPI
 from services.protocol import openai_v1_models
 from services.providers.gemini import models as gemini_models
 from services.providers.gpt import images as gpt_images
+from services.providers.gpt.models import GPT_FALLBACK_MODEL_IDS, GPT_IMAGE_MODEL_SPECS
 
 
 class FakeBackend:
@@ -95,6 +96,29 @@ class ProviderModelListTests(unittest.TestCase):
         for model_id in ["gpt-5-1", "gpt-5-2", "gpt-5-3", "gpt-5-3-mini", "gpt-5-mini"]:
             self.assertEqual(models[model_id]["provider"], "gpt")
             self.assertEqual(models[model_id]["owned_by"], "chatgpt")
+
+    def test_gpt_model_specs_match_upstream_old_feature_ids(self) -> None:
+        expected_text_models = {
+            "auto",
+            "gpt-5",
+            "gpt-5-1",
+            "gpt-5-2",
+            "gpt-5-3",
+            "gpt-5-3-mini",
+            "gpt-5-mini",
+        }
+        self.assertTrue(expected_text_models.issubset(GPT_FALLBACK_MODEL_IDS))
+
+        image_specs = {spec.id: spec for spec in GPT_IMAGE_MODEL_SPECS}
+        self.assertEqual(image_specs["gpt-image-2"].upstream_model, "gpt-image-2")
+        self.assertEqual(image_specs["codex-gpt-image-2"].upstream_model, "codex-gpt-image-2")
+        for model_id, tier in [
+            ("plus-codex-gpt-image-2", "plus"),
+            ("team-codex-gpt-image-2", "team"),
+            ("pro-codex-gpt-image-2", "pro"),
+        ]:
+            self.assertEqual(image_specs[model_id].upstream_model, "codex-gpt-image-2")
+            self.assertEqual(image_specs[model_id].model_tier, tier)
 
     def test_list_models_includes_dynamic_gemini_metadata(self) -> None:
         with mock.patch.dict(sys.modules, {"services.openai_backend_api": None}), \
