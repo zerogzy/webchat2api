@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 EXPORT_FILENAME = "webchat2api_gemini.txt"
@@ -106,10 +107,21 @@ def build_export_item(account: dict[str, Any]) -> dict[str, str] | None:
     }
 
 
+def account_row_id(account: dict[str, Any]) -> str:
+    access_token, psid, psidts = normalize_account_credentials(dict(account))
+    source = "\0".join([access_token, psid, psidts, clean_string(account.get("account_id"))])
+    if not source.strip("\0"):
+        return ""
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
 def sanitize_account(item: dict[str, Any]) -> dict[str, Any]:
     account = dict(item)
+    row_id = account_row_id(item)
     for key in SECRET_KEYS:
         account.pop(key, None)
+    if row_id:
+        account["row_id"] = row_id
     account["has_gemini_session"] = bool(
         item.get("access_token")
         or item.get("__Secure-1PSID")

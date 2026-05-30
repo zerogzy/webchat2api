@@ -13,6 +13,7 @@ from services.log_service import (
 )
 from services.models import GEMINI_PROVIDER, GPT_PROVIDER, GROK_PROVIDER, ModelSpec, normalize_account_provider, normalize_provider
 from services.providers.registry import account_strategy
+from services.providers.gemini.accounts import account_row_id as gemini_account_row_id
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
@@ -65,6 +66,29 @@ def _matched_delete_tokens_for_provider(target_set: set[str], accounts: dict[str
                 matched_tokens.add(account_token)
                 break
     return matched_tokens
+
+
+def _matched_delete_identifiers_for_provider(identifiers: list[dict[str, str]], accounts: dict[str, dict], provider: str | None) -> set[str]:
+    if provider != GEMINI_PROVIDER or not identifiers:
+        return set()
+    account_ids = {
+        _clean_string(identifier.get("account_id"))
+        for identifier in identifiers
+        if isinstance(identifier, dict) and _clean_string(identifier.get("account_id"))
+    }
+    row_ids = {
+        _clean_string(identifier.get("row_id"))
+        for identifier in identifiers
+        if isinstance(identifier, dict) and _clean_string(identifier.get("row_id"))
+    }
+    if not account_ids and not row_ids:
+        return set()
+    return {
+        account_token
+        for account_token, account in accounts.items()
+        if (account_ids and _clean_string(account.get("account_id")) in account_ids)
+        or (row_ids and gemini_account_row_id(account) in row_ids)
+    }
 
 
 class AccountService:
@@ -603,17 +627,19 @@ class AccountService:
             items = [dict(item) for item in self._all_accounts_locked()]
         return {"added": added, "skipped": skipped, "removed": removed, "items": items}
 
-    def delete_accounts(self, tokens: list[str], provider: str | None = None) -> dict:
+    def delete_accounts(self, tokens: list[str], provider: str | None = None, identifiers: list[dict[str, str]] | None = None) -> dict:
         target_provider = self._provider_filter(provider)
         target_set = _normalized_delete_tokens_for_provider(tokens, target_provider)
-        if not target_set:
+        if not target_set and not identifiers:
             return {"removed": 0, "items": self.list_accounts(provider)}
         with self._lock:
+            provider_accounts = self._accounts.get(target_provider, {}) if target_provider else {}
             matched_tokens = _matched_delete_tokens_for_provider(
                 set(target_set),
-                self._accounts.get(target_provider, {}) if target_provider else {},
+                provider_accounts,
                 target_provider,
             )
+            matched_tokens.update(_matched_delete_identifiers_for_provider(identifiers or [], provider_accounts, target_provider))
             target_set.update(matched_tokens)
             removed = sum(self._pop_accounts_by_token_locked(token, target_provider) for token in target_set)
             for token in target_set:

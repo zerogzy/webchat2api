@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -48,8 +48,14 @@ class AccountCreateRequest(BaseModel):
     provider: Literal["gpt", "grok", "gemini"] | None = None
 
 
+class AccountDeleteIdentifier(BaseModel):
+    account_id: str | None = None
+    row_id: str | None = None
+
+
 class AccountDeleteRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
+    identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
     mode: Literal["tokens", "limited"] = "tokens"
     provider: Literal["gpt", "grok", "gemini"] | None = None
 
@@ -153,6 +159,33 @@ def _account_payload_token(item: dict[str, Any]) -> str:
 
 def _unique_tokens(tokens: list[str]) -> list[str]:
     return list(dict.fromkeys(str(token or "").strip() for token in tokens if str(token or "").strip()))
+
+
+def _delete_identifiers(identifiers: Sequence[AccountDeleteIdentifier | dict[str, Any]]) -> list[dict[str, str]]:
+    payloads: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for identifier in identifiers:
+        payload: dict[str, str] = {}
+        if isinstance(identifier, dict):
+            raw_account_id = identifier.get("account_id")
+            raw_row_id = identifier.get("row_id")
+        else:
+            raw_account_id = identifier.account_id
+            raw_row_id = identifier.row_id
+        account_id = str(raw_account_id or "").strip()
+        row_id = str(raw_row_id or "").strip()
+        if account_id:
+            payload["account_id"] = account_id
+        if row_id:
+            payload["row_id"] = row_id
+        if not payload:
+            continue
+        key = (payload.get("account_id", ""), payload.get("row_id", ""))
+        if key in seen:
+            continue
+        payloads.append(payload)
+        seen.add(key)
+    return payloads
 
 
 def _account_strategy(provider: Any):
@@ -267,9 +300,10 @@ def create_router() -> APIRouter:
         if body.mode == "limited":
             return sanitize_account_result(account_service.delete_limited_accounts(provider=body.provider))
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
-        if not tokens:
-            raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        return sanitize_account_result(account_service.delete_accounts(tokens, provider=body.provider))
+        identifiers = _delete_identifiers(body.identifiers)
+        if not tokens and not identifiers:
+            raise HTTPException(status_code=400, detail={"error": "tokens or identifiers is required"})
+        return sanitize_account_result(account_service.delete_accounts(tokens, provider=body.provider, identifiers=identifiers))
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
