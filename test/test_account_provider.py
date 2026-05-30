@@ -245,6 +245,100 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(result["removed"], 1)
         self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
 
+    def test_gemini_account_normalizes_cookie_sources_and_metadata(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {
+                "access_token": "SID=sid; __Secure-1PSID=psid; NID=nid; SNlM0e=embedded-session",
+                "cookies": {"__Secure-1PSIDTS": "psidts", "CONSENT": "yes", "at": "cookie-at"},
+                "session_token": "top-session",
+                "provider": "gemini",
+            },
+        ])
+
+        [account] = service.list_accounts(provider=GEMINI_PROVIDER)
+        self.assertEqual(account["access_token"], "SID=sid; __Secure-1PSID=psid; NID=nid; SNlM0e=embedded-session")
+        self.assertEqual(account["__Secure-1PSID"], "psid")
+        self.assertEqual(account["__Secure-1PSIDTS"], "psidts")
+        self.assertEqual(account["cookies"]["SID"], "sid")
+        self.assertEqual(account["cookies"]["NID"], "nid")
+        self.assertEqual(account["cookies"]["CONSENT"], "yes")
+        self.assertEqual(account["cookies"]["SNlM0e"], "embedded-session")
+        self.assertEqual(account["cookies"]["at"], "cookie-at")
+        self.assertEqual(account["session_token"], "top-session")
+        self.assertEqual(account["SNlM0e"], "embedded-session")
+        self.assertEqual(account["at"], "cookie-at")
+        self.assertTrue(account["has_gemini_session"])
+        self.assertEqual(account["account_category"], "full_session")
+        self.assertEqual(account["account_status"], "usable_gemini_session")
+
+    def test_gemini_account_categories_cover_session_shapes(self) -> None:
+        strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
+
+        cases = [
+            ({}, "missing_session", "missing_gemini_session", False),
+            ({"__Secure-1PSID": "psid"}, "psid_only", "usable_gemini_session", True),
+            ({"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts"}, "psid_psidts", "usable_gemini_session", True),
+            (
+                {"access_token": "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts; SNlM0e=session"},
+                "full_session",
+                "usable_gemini_session",
+                True,
+            ),
+        ]
+
+        for account, category, status, has_session in cases:
+            with self.subTest(category=category):
+                normalized = strategy.normalize_account({**account, "provider": GEMINI_PROVIDER, "access_token": strategy.normalize_access_token(account)}) if account else account
+                source = normalized or account
+                self.assertEqual(strategy.account_category(source), category)
+                self.assertEqual(strategy.account_status(source), status)
+                self.assertEqual(strategy.has_gemini_session(source), has_session)
+
+    def test_gemini_refresh_uses_client_helpers_not_generic_account_refresh(self) -> None:
+        strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": GEMINI_PROVIDER, "status": "正常"},
+        ])
+
+        self.assertFalse(strategy.supports_refresh({"__Secure-1PSID": "psid"}))
+        result = service.refresh_accounts([], provider=GEMINI_PROVIDER)
+
+        self.assertEqual(result["refreshed"], 0)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["items"][0]["account_category"], "psid_psidts")
+
+    def test_gemini_auth_failure_detection_and_refresh_error_message(self) -> None:
+        strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
+
+        self.assertTrue(strategy.is_auth_failure_payload({"status_code": 401, "detail": "Unauthorized"}))
+        self.assertTrue(strategy.is_auth_failure_payload({"error": {"message": "SNlM0e not found"}}))
+        self.assertTrue(strategy.is_auth_failure_payload([{"code": "gemini_auth_failed"}]))
+        self.assertFalse(strategy.is_auth_failure_payload({"status_code": 429, "message": "rate limited"}))
+        self.assertFalse(strategy.is_auth_failure_payload({"message": "token budget was exceeded"}))
+        self.assertEqual(strategy.refresh_error_message(RuntimeError("rotate failed")), "rotate failed")
+        self.assertEqual(strategy.refresh_error_message(Exception()), "Gemini session refresh failed")
+
+    def test_gemini_sanitization_redacts_secrets_and_preserves_metadata(self) -> None:
+        strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
+        account = strategy.normalize_account({
+            "accessToken": "SID=sid; __Secure-1PSID=psid; __Secure-1PSIDTS=psidts; SNlM0e=session",
+            "cookies": {"NID": "nid", "at": "at-token"},
+            "provider": GEMINI_PROVIDER,
+            "account_id": "account-a",
+        })
+
+        sanitized = strategy.sanitize_account(account)
+
+        for key in ("access_token", "accessToken", "cookies", "__Secure-1PSID", "__Secure-1PSIDTS", "SNlM0e", "session_token", "at"):
+            self.assertNotIn(key, sanitized)
+        self.assertEqual(sanitized["account_id"], "account-a")
+        self.assertTrue(sanitized["row_id"])
+        self.assertTrue(sanitized["has_gemini_session"])
+        self.assertEqual(sanitized["account_category"], "full_session")
+        self.assertEqual(sanitized["account_status"], "usable_gemini_session")
+
     def test_grok_account_normalizes_simple_sso_cookie_token(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
@@ -306,6 +400,44 @@ class AccountProviderTests(unittest.TestCase):
         ])
         self.assertEqual(accounts[0]["tier"], "super")
 
+    def test_grok_account_imports_sso_alias_payloads(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"raw_sso": "raw-sso-token", "provider": "grok"},
+            {"rawSso": "raw-camel-sso-token", "provider": "grok"},
+            {"sso_token": "sso-token-field", "provider": "grok"},
+            {"ssoToken": "sso-camel-token-field", "provider": "grok"},
+            {"raw_sso": "sso=raw-cookie-token", "provider": "grok"},
+            {"sso_token": "sso=alias-cookie-token; other=value", "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 6)
+        tokens = service.list_tokens(provider=GROK_PROVIDER)
+        self.assertEqual(tokens, [
+            "raw-sso-token",
+            "raw-camel-sso-token",
+            "sso-token-field",
+            "sso-camel-token-field",
+            "raw-cookie-token",
+            "sso=alias-cookie-token; other=value",
+        ])
+
+    def test_grok_account_imports_sso_from_token_and_cookies_dict(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"token": "sso=grok-token-field", "provider": "grok"},
+            {"cookies": {"sso": "grok-cookies-dict-token", "sso-rw": "rw-token"}, "provider": "grok"},
+            {"cookies": {"SSO": "sso=grok-cookies-dict-cookie-token"}, "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 3)
+        tokens = service.list_tokens(provider=GROK_PROVIDER)
+        self.assertEqual(tokens, [
+            "grok-token-field",
+            "grok-cookies-dict-token",
+            "grok-cookies-dict-cookie-token",
+        ])
+
     def test_grok_account_rejects_explicit_sso_cookie_like_payload_without_sso_pair(self) -> None:
         service = AccountService(MemoryStorage())
         result = service.add_account_items([
@@ -334,6 +466,9 @@ class AccountProviderTests(unittest.TestCase):
         service = AccountService(MemoryStorage())
         result = service.add_account_items([
             {"cookie": "sso-rw=grok-token", "provider": "grok"},
+            {"token": "grok-token", "provider": "grok"},
+            {"cookies": {"sso-rw": "rw-token"}, "provider": "grok"},
+            {"cookies": {"not-sso": "grok-token"}, "provider": "grok"},
         ])
 
         self.assertEqual(result["added"], 0)
