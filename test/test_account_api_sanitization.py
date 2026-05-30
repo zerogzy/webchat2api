@@ -34,11 +34,13 @@ class FakeAccountService:
             "provider": "gemini",
             "status": "正常",
             "type": "free",
+            "account_id": "gemini-account-1",
+            "row_id": "gemini-row-1",
             "cookies": {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts"},
             "__Secure-1PSID": "psid",
             "__Secure-1PSIDTS": "psidts",
         }
-        self.deleted: tuple[list[str], str | None] | None = None
+        self.deleted: tuple[list[str], str | None, list[dict[str, str]] | None] | None = None
 
     def list_accounts(self, provider: str | None = None) -> list[dict[str, Any]]:
         if provider and provider != self.account.get("provider"):
@@ -65,8 +67,13 @@ class FakeAccountService:
         self.account.update(updates)
         return dict(self.account)
 
-    def delete_accounts(self, tokens: list[str], provider: str | None = None) -> dict[str, Any]:
-        self.deleted = (tokens, provider)
+    def delete_accounts(
+        self,
+        tokens: list[str],
+        provider: str | None = None,
+        identifiers: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        self.deleted = (tokens, provider, identifiers)
         return {"removed": 0, "items": self.list_accounts(provider=provider)}
 
     def delete_limited_accounts(self, provider: str | None = None) -> dict[str, Any]:
@@ -175,7 +182,34 @@ class GeminiAccountApiSanitizationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.account_service.deleted, ([GEMINI_TOKEN], "gemini"))
+        self.assertEqual(self.account_service.deleted, ([GEMINI_TOKEN], "gemini", []))
+        body = cast(dict[str, Any], response.json())
+        self.assert_no_gemini_secrets(body["items"][0])
+
+    def test_delete_accounts_accepts_sanitized_gemini_account_identifier(self) -> None:
+        response = self.client._request(
+            "DELETE",
+            "/api/accounts",
+            headers=AUTH_HEADERS,
+            json_data={"provider": "gemini", "identifiers": [{"account_id": "gemini-account-1"}]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.account_service.deleted, ([], "gemini", [{"account_id": "gemini-account-1"}]))
+        body = cast(dict[str, Any], response.json())
+        self.assert_no_gemini_secrets(body["items"][0])
+        self.assertEqual(body["items"][0]["account_id"], "gemini-account-1")
+
+    def test_delete_accounts_accepts_sanitized_gemini_row_identifier(self) -> None:
+        response = self.client._request(
+            "DELETE",
+            "/api/accounts",
+            headers=AUTH_HEADERS,
+            json_data={"provider": "gemini", "identifiers": [{"row_id": "gemini-row-1"}]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.account_service.deleted, ([], "gemini", [{"row_id": "gemini-row-1"}]))
         body = cast(dict[str, Any], response.json())
         self.assert_no_gemini_secrets(body["items"][0])
 

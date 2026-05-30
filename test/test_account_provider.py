@@ -657,6 +657,79 @@ class AccountProviderTests(unittest.TestCase):
         self.assertTrue(any(spec.provider == GROK_PROVIDER for spec in definitions[GROK_PROVIDER].model_specs))
         self.assertTrue(any(spec.provider == GEMINI_PROVIDER for spec in definitions[GEMINI_PROVIDER].model_specs))
 
+    def test_gemini_account_deletes_by_sanitized_account_id_identifier(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {
+                "__Secure-1PSID": "psid-a",
+                "__Secure-1PSIDTS": "psidts-a",
+                "provider": "gemini",
+                "account_id": "gemini-account-a",
+            },
+            {
+                "__Secure-1PSID": "psid-b",
+                "__Secure-1PSIDTS": "psidts-b",
+                "provider": "gemini",
+                "account_id": "gemini-account-b",
+            },
+        ])
+
+        result = service.delete_accounts([], provider=GEMINI_PROVIDER, identifiers=[{"account_id": "gemini-account-a"}])
+
+        self.assertEqual(result["removed"], 1)
+        remaining = service.list_accounts(provider=GEMINI_PROVIDER)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["account_id"], "gemini-account-b")
+        self.assertEqual(remaining[0]["access_token"], "__Secure-1PSID=psid-b; __Secure-1PSIDTS=psidts-b")
+
+    def test_gemini_account_deletes_by_sanitized_row_id_identifier_without_account_id(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {
+                "__Secure-1PSID": "psid-row",
+                "__Secure-1PSIDTS": "psidts-row",
+                "provider": "gemini",
+            },
+        ])
+        [account] = service.list_accounts(provider=GEMINI_PROVIDER)
+        row_id = provider_registry.account_strategy(GEMINI_PROVIDER).sanitize_account(account)["row_id"]
+
+        result = service.delete_accounts([], provider=GEMINI_PROVIDER, identifiers=[{"row_id": row_id}])
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
+
+    def test_gemini_account_identifier_delete_is_provider_scoped(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {
+                "__Secure-1PSID": "psid-a",
+                "__Secure-1PSIDTS": "psidts-a",
+                "provider": "gemini",
+                "account_id": "shared-account-id",
+            },
+            {
+                "access_token": "gpt-token",
+                "provider": "gpt",
+                "account_id": "shared-account-id",
+            },
+        ])
+
+        result = service.delete_accounts([], provider=GEMINI_PROVIDER, identifiers=[{"account_id": "shared-account-id"}])
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_tokens(provider=GPT_PROVIDER), ["gpt-token"])
+        self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
+
+    def test_gpt_account_delete_by_token_still_ignores_identifier_only_payload(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([{"access_token": "gpt-token", "provider": "gpt", "account_id": "gpt-account"}])
+
+        result = service.delete_accounts([], provider=GPT_PROVIDER, identifiers=[{"account_id": "gpt-account"}])
+
+        self.assertEqual(result["removed"], 0)
+        self.assertEqual(service.list_tokens(provider=GPT_PROVIDER), ["gpt-token"])
+
     def test_account_service_uses_registry_account_strategy(self) -> None:
         service = AccountService(MemoryStorage())
         strategy = Mock(wraps=provider_registry.account_strategy(GPT_PROVIDER))
