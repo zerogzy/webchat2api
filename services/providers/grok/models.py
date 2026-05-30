@@ -31,7 +31,7 @@ GROK_MODEL_SPECS = (
     ModelSpec("grok-imagine-video", GROK_PROVIDER, "xai", "grok-imagine-video", mode_id="auto", model_tier="super", capability="video"),
 )
 
-GROK_IMAGE_MODEL_IDS = {spec.id for spec in GROK_MODEL_SPECS if spec.capability in {"image", "image_edit", "video"}}
+GROK_IMAGE_MODEL_IDS = {spec.id for spec in GROK_MODEL_SPECS if spec.capability in {"image", "image_edit"}}
 SUPPORTED_GROK_APP_CHAT_IMAGE_MODEL_IDS = {spec.id for spec in GROK_MODEL_SPECS if spec.capability == "image"}
 
 

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any, Iterator, cast
 from types import ModuleType
 
-from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_tiktoken_stub
+from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_pydantic_stub, install_starlette_stub, install_tiktoken_stub
 
 install_curl_cffi_stub()
 install_fastapi_stubs()
 install_pil_stub()
 install_pybase64_stub()
+install_pydantic_stub()
+install_starlette_stub()
 install_tiktoken_stub()
 
 import json
@@ -28,6 +31,7 @@ from services.providers import registry as provider_registry
 from services.providers.grok import accounts as grok_accounts
 from services.providers.grok import client as grok
 from services.providers.grok import images as grok_images
+from services.providers.grok.models import GROK_MODEL_SPECS, is_supported_grok_app_chat_image_model
 
 
 def _chat_chunks(chunks: object) -> list[Mapping[str, Any]]:
@@ -41,6 +45,48 @@ def _account_service_module(account_service: object) -> ModuleType:
 
 
 class GrokProviderTests(unittest.TestCase):
+    def test_grok_model_specs_follow_upstream_mode_tier_table(self) -> None:
+        expected = {
+            "grok-4.20-0309-non-reasoning": ("fast", "basic", False, "chat"),
+            "grok-4.20-0309": ("auto", "super", False, "chat"),
+            "grok-4.20-0309-reasoning": ("expert", "super", False, "chat"),
+            "grok-4.20-0309-non-reasoning-super": ("fast", "super", False, "chat"),
+            "grok-4.20-0309-super": ("auto", "super", False, "chat"),
+            "grok-4.20-0309-reasoning-super": ("expert", "super", False, "chat"),
+            "grok-4.20-0309-non-reasoning-heavy": ("fast", "heavy", False, "chat"),
+            "grok-4.20-0309-heavy": ("auto", "heavy", False, "chat"),
+            "grok-4.20-0309-reasoning-heavy": ("expert", "heavy", False, "chat"),
+            "grok-4.20-multi-agent-0309": ("heavy", "heavy", False, "chat"),
+            "grok-4.20-fast": ("fast", "basic", True, "chat"),
+            "grok-4.20-auto": ("auto", "super", True, "chat"),
+            "grok-4.20-expert": ("expert", "super", True, "chat"),
+            "grok-4.20-heavy": ("heavy", "heavy", True, "chat"),
+            "grok-4.3-beta": ("grok-420-computer-use-sa", "super", False, "chat"),
+            "grok-imagine-image-lite": ("fast", "basic", False, "image"),
+            "grok-imagine-image": ("auto", "super", False, "image"),
+            "grok-imagine-image-pro": ("auto", "super", False, "image"),
+            "grok-imagine-image-edit": ("auto", "super", False, "image_edit"),
+            "grok-imagine-video": ("auto", "super", False, "video"),
+        }
+
+        specs = {spec.id: spec for spec in GROK_MODEL_SPECS}
+
+        for model_id, (mode_id, model_tier, prefer_best, capability) in expected.items():
+            spec = specs[model_id]
+            self.assertEqual(spec.mode_id, mode_id, model_id)
+            self.assertEqual(spec.model_tier, model_tier, model_id)
+            self.assertEqual(spec.prefer_best, prefer_best, model_id)
+            self.assertEqual(spec.capability, capability, model_id)
+
+    def test_grok_app_chat_model_and_image_support_metadata(self) -> None:
+        self.assertFalse(openai_v1_chat_complete.is_grok_app_chat_model(resolve_model("grok-4.20-reasoning")))
+        self.assertTrue(openai_v1_chat_complete.is_grok_app_chat_model(resolve_model("grok-4.20-fast")))
+        self.assertTrue(openai_v1_chat_complete.is_grok_app_chat_model(resolve_model("grok-imagine-image-lite")))
+        self.assertTrue(is_supported_grok_app_chat_image_model("grok-imagine-image-lite"))
+        self.assertTrue(is_supported_grok_app_chat_image_model("grok-imagine-image-pro"))
+        self.assertFalse(is_supported_grok_app_chat_image_model("grok-imagine-image-edit"))
+        self.assertFalse(is_supported_grok_app_chat_image_model("grok-imagine-video"))
+
     def test_build_console_payload_converts_chat_messages(self) -> None:
         spec = resolve_model("grok-4.3")
         payload = grok.build_console_payload(
@@ -754,6 +800,194 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(chunks[-1]["choices"], [])
         self.assertEqual(chunks[-1]["usage"], {"prompt_tokens": 5, "completion_tokens": 8, "total_tokens": 13})
 
+    def test_classify_app_chat_auth_json_marks_auth_failure_not_cloudflare(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+        sys.modules["services.account_service"] = _account_service_module(account_service)
+        response = mock.Mock()
+        response.json.return_value = {"error": {"code": "unauthenticated", "message": "expired token"}}
+        response.text = ""
+
+        error = grok.classify_app_chat_upstream_error(401, "token-1", response)
+
+        self.assertEqual(error.status_code, 401)
+        self.assertEqual(error.code, "authentication_failed")
+        account_service.update_account.assert_called_once_with("token-1", {"status": "异常"})
+
+    def test_classify_app_chat_cloudflare_html_is_challenge_not_auth(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+        sys.modules["services.account_service"] = _account_service_module(account_service)
+        response = mock.Mock()
+        response.json.side_effect = ValueError("not json")
+        response.text = "<html><title>Just a moment...</title><script src='/cdn-cgi/challenge-platform/h/b'></script></html>"
+
+        error = grok.classify_app_chat_upstream_error(403, "token-1", response)
+
+        self.assertEqual(error.status_code, 502)
+        self.assertEqual(error.code, "cloudflare_challenge")
+        account_service.update_account.assert_not_called()
+
+    def test_classify_app_chat_429_marks_rate_limit_not_auth_failure(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+        sys.modules["services.account_service"] = _account_service_module(account_service)
+        response = mock.Mock()
+        response.json.return_value = {"error": {"code": "rate_limit_exceeded", "message": "Too many requests"}}
+        response.text = ""
+
+        error = grok.classify_app_chat_upstream_error(429, "token-1", response)
+
+        self.assertEqual(error.status_code, 429)
+        self.assertEqual(error.code, "rate_limit_exceeded")
+        account_service.update_account.assert_called_once_with("token-1", {"status": "限流"})
+
+    def test_app_chat_completion_events_retries_second_token_after_rate_limit(self) -> None:
+        calls: list[set[str]] = []
+
+        def select_token(_spec: Any, excluded_tokens: set[str] | None = None) -> str:
+            excluded = set(excluded_tokens or set())
+            calls.append(excluded)
+            return "token-2" if "token-1" in excluded else "token-1"
+
+        account_service = types.SimpleNamespace(
+            get_grok_app_chat_access_token=mock.Mock(side_effect=select_token),
+            get_account=mock.Mock(side_effect=lambda token: {"access_token": token}),
+            mark_text_used=mock.Mock(),
+            refresh_accounts=mock.Mock(),
+        )
+        sys.modules["services.account_service"] = _account_service_module(account_service)
+        spec = resolve_model("grok-4.20-heavy")
+
+        def client_factory(access_token: str, _account: dict[str, Any] | None = None) -> mock.Mock:
+            client = mock.Mock()
+            client.__enter__ = mock.Mock(return_value=client)
+            client.__exit__ = mock.Mock(return_value=None)
+            if access_token == "token-1":
+                client.stream_events.side_effect = grok.GrokConsoleError("limited", 429, 429, "rate_limit_exceeded")
+            else:
+                client.stream_events.return_value = iter([{"result": {"response": {"token": "ok", "isSoftStop": True}}}])
+            return client
+
+        with mock.patch.object(grok, "GrokAppChatClient", side_effect=client_factory):
+            events = list(grok.app_chat_completion_events({"messages": [{"role": "user", "content": "Hello"}]}, spec, [{"role": "user", "content": "Hello"}]))
+
+        self.assertEqual(events, [{"result": {"response": {"token": "ok", "isSoftStop": True}}}])
+        self.assertEqual(calls, [set(), {"token-1"}])
+        account_service.mark_text_used.assert_called_once_with("token-2")
+
+    def test_app_chat_completion_events_does_not_retry_after_partial_output(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_app_chat_access_token=mock.Mock(return_value="token-1"),
+            get_account=mock.Mock(return_value={"access_token": "token-1"}),
+            mark_text_used=mock.Mock(),
+            refresh_accounts=mock.Mock(),
+        )
+        sys.modules["services.account_service"] = _account_service_module(account_service)
+        spec = resolve_model("grok-4.20-heavy")
+
+        def partial_then_limited() -> Iterator[dict[str, Any]]:
+            yield {"result": {"response": {"token": "partial"}}}
+            raise grok.GrokConsoleError("limited", 429, 429, "rate_limit_exceeded")
+
+        client = mock.Mock()
+        client.__enter__ = mock.Mock(return_value=client)
+        client.__exit__ = mock.Mock(return_value=None)
+        client.stream_events.return_value = partial_then_limited()
+
+        with mock.patch.object(grok, "GrokAppChatClient", return_value=client):
+            events = grok.app_chat_completion_events({"messages": [{"role": "user", "content": "Hello"}]}, spec, [{"role": "user", "content": "Hello"}])
+            self.assertEqual(next(events), {"result": {"response": {"token": "partial"}}})
+            with self.assertRaises(HTTPException) as context:
+                next(events)
+
+        self.assertEqual(context.exception.status_code, 429)
+        self.assertEqual(account_service.get_grok_app_chat_access_token.call_count, 1)
+        account_service.mark_text_used.assert_not_called()
+
+    def test_app_chat_completion_does_not_mix_retry_after_partial_output(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_app_chat_access_token=mock.Mock(return_value="token-1"),
+            get_account=mock.Mock(return_value={"access_token": "token-1"}),
+            mark_text_used=mock.Mock(),
+            refresh_accounts=mock.Mock(),
+        )
+        sys.modules["services.account_service"] = _account_service_module(account_service)
+        spec = resolve_model("grok-4.20-heavy")
+
+        def partial_then_transient() -> Iterator[dict[str, Any]]:
+            yield {"result": {"response": {"token": "partial"}}}
+            raise grok.GrokConsoleError("temporary", 502, 502, "upstream_transient")
+
+        client = mock.Mock()
+        client.__enter__ = mock.Mock(return_value=client)
+        client.__exit__ = mock.Mock(return_value=None)
+        client.stream_events.return_value = partial_then_transient()
+
+        with mock.patch.object(grok, "GrokAppChatClient", return_value=client):
+            with self.assertRaises(HTTPException) as context:
+                grok.app_chat_completion({"messages": [{"role": "user", "content": "Hello"}]}, spec, [{"role": "user", "content": "Hello"}])
+
+        self.assertEqual(context.exception.status_code, 502)
+        self.assertEqual(account_service.get_grok_app_chat_access_token.call_count, 1)
+        account_service.mark_text_used.assert_not_called()
+
+    def test_app_chat_completion_events_exhausted_retry_returns_last_error(self) -> None:
+        excluded_calls: list[set[str]] = []
+        tokens = iter(["token-1", "token-2", ""])
+
+        def next_token(*args: object, **kwargs: object) -> str:
+            excluded_tokens = kwargs.get("excluded_tokens")
+            excluded_calls.append(set(cast(set[str], excluded_tokens)) if isinstance(excluded_tokens, set) else set())
+            return next(tokens)
+
+        account_service = types.SimpleNamespace(
+            get_grok_app_chat_access_token=mock.Mock(side_effect=next_token),
+            get_account=mock.Mock(side_effect=lambda token: {"access_token": token}),
+            mark_text_used=mock.Mock(),
+            refresh_accounts=mock.Mock(),
+        )
+        sys.modules["services.account_service"] = _account_service_module(account_service)
+        client = mock.Mock()
+        client.__enter__ = mock.Mock(return_value=client)
+        client.__exit__ = mock.Mock(return_value=None)
+        client.stream_events.side_effect = grok.GrokConsoleError("transient", 502, 503, "upstream_transient")
+        spec = resolve_model("grok-4.20-heavy")
+
+        with mock.patch.object(grok, "GrokAppChatClient", return_value=client):
+            with self.assertRaises(HTTPException) as context:
+                list(grok.app_chat_completion_events({"messages": [{"role": "user", "content": "Hello"}]}, spec, [{"role": "user", "content": "Hello"}]))
+
+        self.assertEqual(context.exception.status_code, 502)
+        self.assertEqual(context.exception.detail["code"], "upstream_transient")
+        self.assertEqual(excluded_calls[0], set())
+        self.assertEqual(excluded_calls[1], {"token-1"})
+        self.assertEqual(excluded_calls[2], {"token-1", "token-2"})
+        account_service.mark_text_used.assert_not_called()
+
+    def test_app_chat_image_outputs_retries_second_token_after_rate_limit(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_app_chat_access_token=mock.Mock(side_effect=["token-1", "token-2"]),
+            get_account=mock.Mock(side_effect=lambda token: {"access_token": token}),
+            mark_text_used=mock.Mock(),
+        )
+        sys.modules["services.account_service"] = _account_service_module(account_service)
+        spec = resolve_model("grok-imagine-image")
+
+        def client_factory(access_token: str, _account: dict[str, Any] | None = None) -> mock.Mock:
+            client = mock.Mock()
+            client.__enter__ = mock.Mock(return_value=client)
+            client.__exit__ = mock.Mock(return_value=None)
+            if access_token == "token-1":
+                client.stream_events.side_effect = grok.GrokConsoleError("limited", 429, 429, "rate_limit_exceeded")
+            else:
+                client.stream_events.return_value = iter([{"result": {"response": {"streamingImageGenerationResponse": {"progress": 100, "imageUrl": "generated/second.png"}, "isSoftStop": True}}}])
+            return client
+
+        with mock.patch.object(grok, "GrokAppChatClient", side_effect=client_factory):
+            outputs = list(grok.app_chat_image_outputs({"prompt": "Draw", "response_format": "url"}, spec, "Draw", 1))
+
+        self.assertEqual(outputs[-1].data, [{"url": "https://assets.grok.com/generated/second.png", "revised_prompt": "Draw"}])
+        self.assertEqual(account_service.get_grok_app_chat_access_token.call_args_list[1].kwargs["excluded_tokens"], {"token-1"})
+        account_service.mark_text_used.assert_called_once_with("token-2")
+
     def test_non_streaming_grok_app_chat_completion_includes_reasoning_content(self) -> None:
         body = {
             "model": "grok-4.20-heavy",
@@ -938,6 +1172,70 @@ class GrokProviderTests(unittest.TestCase):
         patched_stream.assert_called_once()
         patched_console.assert_not_called()
         self.assertEqual(response["output"][0]["content"][0]["text"], "generic")
+
+    def test_responses_extract_image_accepts_input_image_data_url_object(self) -> None:
+        png_bytes = b"\x89PNG\r\n\x1a\n"
+        data_url = f"data:image/png;base64,{base64.b64encode(png_bytes).decode('ascii')}"
+
+        image = openai_v1_response.extract_response_image([
+            {"type": "input_text", "text": "edit this"},
+            {"type": "input_image", "image_url": {"url": data_url}},
+        ])
+
+        self.assertEqual(image, (png_bytes, "image/png"))
+
+    def test_responses_extract_image_accepts_content_image_url_object(self) -> None:
+        gif_bytes = b"GIF89a"
+        data_url = f"data:image/gif;base64,{base64.b64encode(gif_bytes).decode('ascii')}"
+
+        image = openai_v1_response.extract_response_image({
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "edit this"},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        })
+
+        self.assertEqual(image, (gif_bytes, "image/gif"))
+
+    def test_responses_image_tool_preserves_request_dispatch_with_image_input(self) -> None:
+        png_bytes = b"\x89PNG\r\n\x1a\n"
+        data_url = f"data:image/png;base64,{base64.b64encode(png_bytes).decode('ascii')}"
+        body = {
+            "model": "gpt-image-2",
+            "input": [
+                {"type": "input_text", "text": "make it brighter"},
+                {"type": "input_image", "image_url": {"url": data_url}},
+            ],
+            "tools": [{"type": "image_generation"}],
+        }
+        outputs = [ImageOutput(kind="result", model="gpt-image-2", index=1, total=1, data=[{"b64_json": "abc"}])]
+
+        with mock.patch.object(openai_v1_response, "response_image_outputs", return_value=iter(outputs)) as patched_outputs:
+            response = cast(dict[str, Any], openai_v1_response.handle(body))
+
+        request = patched_outputs.call_args.args[1]
+        self.assertEqual(request.prompt, "make it brighter")
+        self.assertEqual(request.images, [base64.b64encode(png_bytes).decode("ascii")])
+        self.assertEqual(response["output"][0]["type"], "image_generation_call")
+        self.assertEqual(response["output"][0]["result"], "abc")
+
+    def test_responses_image_tool_still_dispatches_without_image_input(self) -> None:
+        body = {
+            "model": "gpt-image-2",
+            "input": [{"type": "input_text", "text": "draw a cat"}],
+            "tools": [{"type": "image_generation"}],
+        }
+        outputs = [ImageOutput(kind="result", model="gpt-image-2", index=1, total=1, data=[{"b64_json": "abc"}])]
+
+        with mock.patch.object(openai_v1_response, "response_image_outputs", return_value=iter(outputs)) as patched_outputs:
+            response = cast(dict[str, Any], openai_v1_response.handle(body))
+
+        request = patched_outputs.call_args.args[1]
+        self.assertEqual(request.prompt, "draw a cat")
+        self.assertIsNone(request.images)
+        self.assertEqual(request.size, "1:1")
+        self.assertEqual(response["output"][0]["result"], "abc")
 
     def test_responses_grok_app_chat_returns_explicit_error(self) -> None:
         body = {
@@ -1514,7 +1812,7 @@ class GrokProviderTests(unittest.TestCase):
             client.stream_events.return_value = iter([{"result": {"response": {"token": "Hi", "messageTag": "final"}}}])
             events = list(grok.app_chat_completion_events({}, spec, [{"role": "user", "content": "Hello"}]))
 
-        account_service.get_grok_app_chat_access_token.assert_called_once_with(spec)
+        account_service.get_grok_app_chat_access_token.assert_called_once_with(spec, excluded_tokens=set())
         account_service.get_account.assert_called_once_with("selected-token")
         client_class.assert_called_once_with("selected-token", {"access_token": "selected-token", "cf_cookies": "cf_bm=account-bm"})
         self.assertEqual(events[0]["result"]["response"]["token"], "Hi")
