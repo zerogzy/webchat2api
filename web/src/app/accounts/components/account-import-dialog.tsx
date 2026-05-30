@@ -69,17 +69,44 @@ function getSessionAccessToken(value: unknown) {
   return typeof token === "string" ? token.trim() : "";
 }
 
-function getCpaAccount(value: unknown, provider: ImportProvider): AccountImportPayload | null {
+function getRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
-  const raw = value as Record<string, unknown>;
-  const tokenValue = raw.access_token ?? raw.accessToken;
-  const token = typeof tokenValue === "string" ? tokenValue.trim() : "";
-  if (!token) {
+  return value as Record<string, unknown>;
+}
+
+function getStringField(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function hasCookiePair(value: string, name: string) {
+  return new RegExp(`(?:^|[;\\s])${name}\\s*=`, "i").test(value);
+}
+
+function normalizeGrokSsoCookie(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (hasCookiePair(trimmed, "sso")) {
+    return trimmed;
+  }
+  if (trimmed.includes("=") || hasCookiePair(trimmed, "sso-rw")) {
+    return "";
+  }
+  return `sso=${trimmed}`;
+}
+
+function getProviderScopedRecord(raw: Record<string, unknown>, provider: ImportProvider) {
+  const rawProvider = getStringField(raw.provider).toLowerCase();
+  if (rawProvider && rawProvider !== provider) {
     return null;
   }
+  return raw;
+}
 
+function buildCpaPayload(raw: Record<string, unknown>, token: string, provider: ImportProvider): AccountImportPayload {
   const payload: AccountImportPayload = {
     ...raw,
     access_token: token,
@@ -91,6 +118,79 @@ function getCpaAccount(value: unknown, provider: ImportProvider): AccountImportP
     delete payload.type;
   }
   return payload;
+}
+
+function getCookieStringField(value: unknown) {
+  const stringValue = getStringField(value);
+  if (stringValue) {
+    return stringValue;
+  }
+
+  const record = getRecord(value);
+  if (!record) {
+    return "";
+  }
+
+  return Object.entries(record)
+    .map(([name, cookieValue]) => {
+      const normalizedValue = getStringField(cookieValue);
+      return normalizedValue ? `${name}=${normalizedValue}` : "";
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
+function getCpaToken(raw: Record<string, unknown>, provider: ImportProvider) {
+  if (provider === "grok") {
+    const directSso = normalizeGrokSsoCookie(getStringField(raw.sso));
+    if (directSso) {
+      return directSso;
+    }
+
+    const cookie = getStringField(raw.cookie) || getStringField(raw.cookie_header) || getStringField(raw.cookieHeader) || getCookieStringField(raw.cookies);
+    if (hasCookiePair(cookie, "sso")) {
+      return cookie;
+    }
+
+    const accessToken = getStringField(raw.access_token) || getStringField(raw.accessToken);
+    return hasCookiePair(accessToken, "sso") ? accessToken : "";
+  }
+
+  return getStringField(raw.access_token) || getStringField(raw.accessToken);
+}
+
+function getCpaAccount(value: unknown, provider: ImportProvider): AccountImportPayload | null {
+  const raw = getRecord(value);
+  if (!raw) {
+    return null;
+  }
+
+  const scopedRaw = getProviderScopedRecord(raw, provider);
+  if (!scopedRaw) {
+    return null;
+  }
+
+  const token = getCpaToken(scopedRaw, provider);
+  return token ? buildCpaPayload(scopedRaw, token, provider) : null;
+}
+
+function collectCpaAccounts(value: unknown, provider: ImportProvider): AccountImportPayload[] {
+  const directAccount = getCpaAccount(value, provider);
+  if (directAccount) {
+    return [directAccount];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectCpaAccounts(item, provider));
+  }
+
+  const raw = getRecord(value);
+  if (!raw) {
+    return [];
+  }
+
+  const nestedValues = [raw.account, raw.accounts, raw.items, raw.data, raw.results, raw.records, raw.list].filter((item): item is unknown => item !== undefined);
+  return nestedValues.flatMap((item) => collectCpaAccounts(item, provider));
 }
 
 function readFileAsText(file: File) {
@@ -221,16 +321,23 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   const buildTokenPayloads = (tokens: string[]): AccountImportPayload[] => tokens.map((token) => ({ access_token: token, provider: importProvider }));
 
   const buildGeminiSessionPayload = (secure1Psid: string, secure1Psidts: string): AccountImportPayload => {
-    const accessToken = `__Secure-1PSID=${secure1Psid}; __Secure-1PSIDTS=${secure1Psidts}`;
+    const cookieParts = [`__Secure-1PSID=${secure1Psid}`];
+    if (secure1Psidts) {
+      cookieParts.push(`__Secure-1PSIDTS=${secure1Psidts}`);
+    }
+    const accessToken = cookieParts.join("; ");
+    const cookies: Record<string, string> = {
+      "__Secure-1PSID": secure1Psid,
+    };
+    if (secure1Psidts) {
+      cookies["__Secure-1PSIDTS"] = secure1Psidts;
+    }
     return {
       access_token: accessToken,
       provider: "gemini",
       "__Secure-1PSID": secure1Psid,
-      "__Secure-1PSIDTS": secure1Psidts,
-      cookies: {
-        "__Secure-1PSID": secure1Psid,
-        "__Secure-1PSIDTS": secure1Psidts,
-      },
+      ...(secure1Psidts ? { "__Secure-1PSIDTS": secure1Psidts } : {}),
+      cookies,
     };
   };
 
@@ -271,11 +378,17 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     const sessionCopy = providerDefinition.importSessionCopy;
 
     if (importProvider === "gemini") {
+      const fullCookieTokens = splitTokens(sessionInput);
+      if (fullCookieTokens.length > 0) {
+        await submitTokens(fullCookieTokens, sessionCopy.successLabel, buildTokenPayloads(fullCookieTokens));
+        return;
+      }
+
       const secure1Psid = geminiSecure1Psid.trim();
       const secure1Psidts = geminiSecure1Psidts.trim();
 
-      if (!secure1Psid || !secure1Psidts) {
-        toast.error("请分别填写 __Secure-1PSID 和 __Secure-1PSIDTS");
+      if (!secure1Psid) {
+        toast.error("请填写 __Secure-1PSID，或粘贴完整 Gemini Cookie 行");
         return;
       }
 
@@ -324,14 +437,14 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
         files.map(async (file) => {
           const raw = await readFileAsText(file);
           const parsed = JSON.parse(raw) as unknown;
-          const account = getCpaAccount(parsed, importProvider);
-          return { account };
+          const accountList = collectCpaAccounts(parsed, importProvider);
+          return { accounts: accountList };
         }),
       );
 
-      const accounts = results.map((item) => item.account).filter((item): item is AccountImportPayload => Boolean(item));
+      const accounts = results.flatMap((item) => item.accounts);
       const tokens = accounts.map((item) => item.access_token);
-      const parsedFileCount = accounts.length;
+      const parsedFileCount = results.filter((item) => item.accounts.length > 0).length;
       const errorCount = results.length - parsedFileCount;
 
       if (parsedFileCount === 0) {
@@ -497,40 +610,52 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             <div className="font-medium">风险提示</div>
             <div>不要使用自己的大号，尽量使用不常用的小号进行导入，避免出现封号风险。本项目不承担任何封号风险责任。</div>
           </div>
-          {importProvider === "gemini" ? (
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-stone-700">__Secure-1PSID</label>
-                <Input
-                  value={geminiSecure1Psid}
-                  onChange={(event) => setGeminiSecure1Psid(event.target.value)}
-                  placeholder="只填写 __Secure-1PSID 的值"
-                  className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs"
+          <div className="grid gap-4 sm:grid-cols-2">
+            {importProvider === "gemini" ? (
+              <>
+                <div className="space-y-2 sm:col-span-2">
+                  <label className="text-sm font-medium text-stone-700">完整 Gemini Cookie/session 行</label>
+                  <Textarea
+                    placeholder={sessionCopy.placeholder}
+                    value={sessionInput}
+                    onChange={(event) => setSessionInput(event.target.value)}
+                    className="min-h-32 resize-none rounded-xl border-stone-200 font-mono text-xs"
+                  />
+                  <p className="text-xs leading-5 text-stone-500">可直接粘贴一行或多行完整 Cookie；填写此处时会优先按完整 Cookie 列表提交。</p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700">__Secure-1PSID</label>
+                  <Input
+                    value={geminiSecure1Psid}
+                    onChange={(event) => setGeminiSecure1Psid(event.target.value)}
+                    placeholder="只填写 __Secure-1PSID 的值"
+                    className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs"
+                  />
+                  <p className="text-xs leading-5 text-stone-500">不要包含 cookie 名称，只粘贴等号右侧的完整值。</p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700">__Secure-1PSIDTS</label>
+                  <Input
+                    value={geminiSecure1Psidts}
+                    onChange={(event) => setGeminiSecure1Psidts(event.target.value)}
+                    placeholder="只填写 __Secure-1PSIDTS 的值"
+                    className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs"
+                  />
+                  <p className="text-xs leading-5 text-stone-500">可选；如果没有此 cookie，后端会按可用字段归一化。</p>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-2 sm:col-span-2">
+                <label className="text-sm font-medium text-stone-700">{sessionCopy.label}</label>
+                <Textarea
+                  placeholder={sessionCopy.placeholder}
+                  value={sessionInput}
+                  onChange={(event) => setSessionInput(event.target.value)}
+                  className="min-h-48 resize-none rounded-xl border-stone-200 font-mono text-xs"
                 />
-                <p className="text-xs leading-5 text-stone-500">不要包含 cookie 名称，只粘贴等号右侧的完整值。</p>
               </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-stone-700">__Secure-1PSIDTS</label>
-                <Input
-                  value={geminiSecure1Psidts}
-                  onChange={(event) => setGeminiSecure1Psidts(event.target.value)}
-                  placeholder="只填写 __Secure-1PSIDTS 的值"
-                  className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs"
-                />
-                <p className="text-xs leading-5 text-stone-500">一个框只填一个值，提交时会自动组合为 Gemini cookie。</p>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">{sessionCopy.label}</label>
-              <Textarea
-                placeholder={sessionCopy.placeholder}
-                value={sessionInput}
-                onChange={(event) => setSessionInput(event.target.value)}
-                className="min-h-48 resize-none rounded-xl border-stone-200 font-mono text-xs"
-              />
-            </div>
-          )}
+            )}
+          </div>
         </div>
       );
     }
