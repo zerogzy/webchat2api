@@ -35,6 +35,38 @@ def _normalize_access_token_for_provider(item: dict, provider: str) -> str:
     return _account_strategy(provider).normalize_access_token(item)
 
 
+def _normalized_delete_tokens_for_provider(tokens: list[str], provider: str | None) -> set[str]:
+    target_set = set(token for token in tokens if token)
+    if not target_set or not provider:
+        return target_set
+    provider_strategy = _account_strategy(provider)
+    for token in tokens:
+        token_text = _clean_string(token)
+        if not token_text:
+            continue
+        normalized = provider_strategy.normalize_access_token({"access_token": token_text, "provider": provider})
+        if normalized:
+            target_set.add(normalized)
+            normalized_account = provider_strategy.normalize_account({"access_token": normalized, "provider": provider})
+            normalized_account_token = _clean_string(normalized_account.get("access_token"))
+            if normalized_account_token:
+                target_set.add(normalized_account_token)
+    return target_set
+
+
+def _matched_delete_tokens_for_provider(target_set: set[str], accounts: dict[str, dict], provider: str | None) -> set[str]:
+    if not target_set or not provider:
+        return set()
+    provider_strategy = _account_strategy(provider)
+    matched_tokens: set[str] = set()
+    for account_token, account in accounts.items():
+        for token in target_set:
+            if provider_strategy.delete_token_matches_account(token, account):
+                matched_tokens.add(account_token)
+                break
+    return matched_tokens
+
+
 class AccountService:
     """账号池服务，按 provider + token 管理账号。"""
 
@@ -572,11 +604,18 @@ class AccountService:
         return {"added": added, "skipped": skipped, "removed": removed, "items": items}
 
     def delete_accounts(self, tokens: list[str], provider: str | None = None) -> dict:
-        target_set = set(token for token in tokens if token)
+        target_provider = self._provider_filter(provider)
+        target_set = _normalized_delete_tokens_for_provider(tokens, target_provider)
         if not target_set:
             return {"removed": 0, "items": self.list_accounts(provider)}
         with self._lock:
-            removed = sum(self._pop_accounts_by_token_locked(token, provider) for token in target_set)
+            matched_tokens = _matched_delete_tokens_for_provider(
+                set(target_set),
+                self._accounts.get(target_provider, {}) if target_provider else {},
+                target_provider,
+            )
+            target_set.update(matched_tokens)
+            removed = sum(self._pop_accounts_by_token_locked(token, target_provider) for token in target_set)
             for token in target_set:
                 self._image_inflight.pop(token, None)
             if removed:
