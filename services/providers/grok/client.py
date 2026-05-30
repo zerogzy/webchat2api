@@ -16,7 +16,7 @@ from fastapi import HTTPException  # type: ignore[import-not-found]
 
 from services.config import config
 from services.providers.base import GROK_PROVIDER, ModelSpec
-from services.providers.grok.models import is_supported_grok_app_chat_image_model
+from services.providers.grok.models import GROK_MODEL_SPECS, is_supported_grok_app_chat_image_model
 from services.network.client import create_session
 from services.network.flaresolverr import FlareSolverrClearanceProvider
 from services.network.headers import build_grok_console_headers
@@ -61,13 +61,31 @@ _APP_CHAT_AUTH_ERROR_MARKERS = (
     "unauthorized",
     "bad credentials",
     "bad_credentials",
+    "bad-credentials",
     "invalid token",
     "invalid_token",
+    "invalid-token",
     "expired token",
     "token expired",
+    "token_expired",
+    "token-expired",
     "auth token expired",
+    "auth_token_expired",
+    "login required",
+    "login_required",
+    "session expired",
 )
-_APP_CHAT_RATE_LIMIT_MARKERS = ("rate_limit_exceeded", "rate limit", "rate-limit", "too many requests")
+_APP_CHAT_RATE_LIMIT_MARKERS = (
+    "rate_limit_exceeded",
+    "rate-limit-exceeded",
+    "rate limit",
+    "rate-limit",
+    "rate limited",
+    "rate_limited",
+    "too many requests",
+    "quota exhausted",
+    "quota_exhausted",
+)
 _APP_CHAT_TRANSIENT_ERROR_MARKERS = (
     "timed out",
     "timeout",
@@ -82,18 +100,106 @@ _APP_CHAT_CHALLENGE_MARKERS = (
     "cloudflare",
     "cf-chl",
     "cf_clearance",
+    "cf-mitigated",
     "turnstile",
     "challenge-platform",
     "checking your browser",
     "just a moment",
     "attention required",
     "enable javascript and cookies",
+    "captcha",
+    "interstitial",
+    "browser integrity check",
 )
 _APP_CHAT_AUTH_STATUS_CODES = {401, 403}
 _APP_CHAT_LIMIT_STATUS_CODES = {402, 429}
 _APP_CHAT_TRANSIENT_STATUS_CODES = {408, 500, 502, 503, 504}
+_APP_CHAT_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+_APP_CHAT_MAX_ACCOUNT_ATTEMPTS = 3
 _APP_CHAT_PUBLIC_ERROR_PREFIX = "Grok app-chat upstream error"
 _APP_CHAT_CLEARANCE_LOCK = threading.Lock()
+
+GROK_RATE_LIMIT_MODEL_NAME = "grok-4-1-thinking-1129"
+GROK_SUPER_WINDOW_THRESHOLD_SECONDS = 14400
+
+
+def _int_or_none(value: object) -> int | None:
+    if not isinstance(value, (str, bytes, bytearray, int, float)):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _walk_dict_values(value: object) -> Iterator[dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from _walk_dict_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_dict_values(item)
+
+
+def _rate_limit_model_name(account: dict[str, Any] | None = None) -> str:
+    if isinstance(account, dict):
+        for key in ("modelName", "model_name", "upstream_model", "model", "model_id"):
+            value = str(account.get(key) or "").strip()
+            if value:
+                return value
+    for spec in GROK_MODEL_SPECS:
+        if spec.mode_id and (spec.upstream_model or spec.id):
+            return spec.upstream_model or spec.id
+    return GROK_RATE_LIMIT_MODEL_NAME
+
+
+def build_grok_rate_limits_payload(account: dict[str, Any] | None = None) -> dict[str, str]:
+    return {"requestKind": "DEFAULT", "modelName": _rate_limit_model_name(account)}
+
+
+def extract_grok_rate_limit_value(payload: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+    for item in _walk_dict_values(payload):
+        for key in keys:
+            if key in item:
+                value = _int_or_none(item.get(key))
+                if value is not None:
+                    return value
+    return None
+
+
+def extract_grok_rate_limit_remaining(payload: dict[str, Any]) -> int | None:
+    return extract_grok_rate_limit_value(payload, ("remainingTokens", "remaining_tokens", "remainingQueries", "remaining_queries"))
+
+
+def extract_grok_rate_limit_window_seconds(payload: dict[str, Any]) -> int | None:
+    return extract_grok_rate_limit_value(payload, ("windowSizeSeconds", "window_size_seconds"))
+
+
+def grok_rate_limit_account_hints(payload: dict[str, Any]) -> dict[str, Any]:
+    updates: dict[str, Any] = {"app_chat": True}
+    remaining = extract_grok_rate_limit_remaining(payload)
+    if remaining is not None:
+        updates["quota"] = max(0, remaining)
+        updates["status"] = "正常" if remaining > 0 else "限流"
+    window_seconds = extract_grok_rate_limit_window_seconds(payload)
+    if window_seconds is not None:
+        updates["rate_limit_window_seconds"] = window_seconds
+        updates["tier"] = "basic" if window_seconds >= GROK_SUPER_WINDOW_THRESHOLD_SECONDS else "super"
+    explicit_tier = ""
+    for item in _walk_dict_values(payload):
+        for key in ("tier", "modelTier", "model_tier", "subscriptionTier", "subscription_tier"):
+            value = str(item.get(key) or "").strip().lower()
+            if value in {"basic", "free", "fast", "super", "premium", "supergrok", "super-grok", "heavy", "max"}:
+                from services.providers.grok.accounts import normalize_tier
+
+                explicit_tier = normalize_tier(value)
+                break
+        if explicit_tier:
+            break
+    if explicit_tier:
+        updates["tier"] = explicit_tier
+    return updates
 
 _BRIDGE_DEFAULT_URL = "http://127.0.0.1:3080"
 _bridge_detected_url: str | None = None
@@ -979,7 +1085,7 @@ def _decode_app_chat_line(line: str | bytes) -> str:
 
 
 def _split_app_chat_embedded_data(raw: str) -> list[str]:
-    if "\ndata:" not in raw:
+    if "data:" not in raw:
         return [raw]
     parts: list[str] = []
     current: list[str] = []
@@ -992,9 +1098,30 @@ def _split_app_chat_embedded_data(raw: str) -> list[str]:
                 current = []
             continue
         if stripped.startswith("data:"):
+            if stripped.count("data:") > 1:
+                for frame in re.split(r"(?=data:)", stripped):
+                    if not frame:
+                        continue
+                    if current:
+                        parts.append("\n".join(current))
+                        parts.append("")
+                    current = [frame]
+                if current:
+                    parts.append("\n".join(current))
+                    current = []
+                continue
             if current:
                 parts.append("\n".join(current))
             current = [line]
+            continue
+        if "data:" in line:
+            prefix, suffix = line.split("data:", 1)
+            if prefix.strip():
+                current.append(prefix)
+            if current:
+                parts.append("\n".join(current))
+                parts.append("")
+            current = ["data:" + suffix]
             continue
         current.append(line)
     if current:
@@ -1026,7 +1153,22 @@ def app_chat_line_events(lines: Iterable[str | bytes]) -> Iterator[dict[str, Any
                     yield event
                 continue
             if stripped.startswith("data:"):
-                data_parts.append(stripped[5:].strip())
+                value = stripped[5:].strip()
+                if value == "[DONE]":
+                    event = _parse_app_chat_data_parts(data_parts)
+                    data_parts.clear()
+                    if event is not None:
+                        yield event
+                    continue
+                parsed = parse_app_chat_payload_line(stripped)
+                if parsed is not None:
+                    event = _parse_app_chat_data_parts(data_parts)
+                    data_parts.clear()
+                    if event is not None:
+                        yield event
+                    yield parsed
+                    continue
+                data_parts.append(value)
                 continue
             event = _parse_app_chat_data_parts(data_parts)
             data_parts.clear()
@@ -1413,45 +1555,85 @@ def _app_chat_error_contains(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in text for marker in markers)
 
 
-def _is_app_chat_challenge_error(status: int, text: str) -> bool:
-    return status in _APP_CHAT_AUTH_STATUS_CODES and _app_chat_error_contains(text, _APP_CHAT_CHALLENGE_MARKERS)
+def _app_chat_error_field_text(value: object) -> str:
+    parts: list[str] = []
+    if isinstance(value, dict):
+        for key in ("error", "code", "type", "reason", "message", "detail", "status"):
+            item = value.get(key)
+            if isinstance(item, (str, int, float)):
+                parts.append(str(item))
+            elif isinstance(item, dict):
+                parts.append(_app_chat_error_field_text(item))
+        for item in value.values():
+            if isinstance(item, (dict, list)):
+                parts.append(_app_chat_error_field_text(item))
+    elif isinstance(value, list):
+        for item in value:
+            parts.append(_app_chat_error_field_text(item))
+    elif isinstance(value, (str, int, float)):
+        parts.append(str(value))
+    return " ".join(part for part in parts if part).lower()
 
 
-def _is_app_chat_auth_error(status: int, text: str) -> bool:
+def _app_chat_structured_error_text(response: object | None = None, detail: object | None = None) -> str:
+    values: list[object] = []
+    if detail is not None:
+        values.append(detail)
+    if response is not None:
+        json_method = getattr(response, "json", None)
+        if callable(json_method):
+            try:
+                values.append(json_method())
+            except Exception:
+                pass
+    return " ".join(_app_chat_error_field_text(value) for value in values).strip()
+
+
+def _is_app_chat_challenge_error(status: int, text: str, structured_text: str = "") -> bool:
+    return status in _APP_CHAT_AUTH_STATUS_CODES and _app_chat_error_contains(text, _APP_CHAT_CHALLENGE_MARKERS) and not _app_chat_error_contains(structured_text, _APP_CHAT_AUTH_ERROR_MARKERS)
+
+
+def _is_app_chat_auth_error(status: int, text: str, structured_text: str = "") -> bool:
+    auth_text = structured_text or text
     if status == 401:
-        return not text or _app_chat_error_contains(text, _APP_CHAT_AUTH_ERROR_MARKERS)
+        return not auth_text or _app_chat_error_contains(auth_text, _APP_CHAT_AUTH_ERROR_MARKERS)
     if status == 403:
-        return _app_chat_error_contains(text, _APP_CHAT_AUTH_ERROR_MARKERS)
+        return _app_chat_error_contains(auth_text, _APP_CHAT_AUTH_ERROR_MARKERS)
     return False
 
 
-def _is_app_chat_limit_error(status: int, text: str) -> bool:
-    return status in _APP_CHAT_LIMIT_STATUS_CODES or _app_chat_error_contains(text, _APP_CHAT_RATE_LIMIT_MARKERS)
+def _is_app_chat_limit_error(status: int, text: str, structured_text: str = "") -> bool:
+    return status in _APP_CHAT_LIMIT_STATUS_CODES or _app_chat_error_contains(structured_text or text, _APP_CHAT_RATE_LIMIT_MARKERS)
 
 
-def _is_app_chat_transient_error(status: int, text: str) -> bool:
-    return status in _APP_CHAT_TRANSIENT_STATUS_CODES or _app_chat_error_contains(text, _APP_CHAT_TRANSIENT_ERROR_MARKERS)
+def _is_app_chat_transient_error(status: int, text: str, structured_text: str = "") -> bool:
+    return status in _APP_CHAT_TRANSIENT_STATUS_CODES or _app_chat_error_contains(structured_text or text, _APP_CHAT_TRANSIENT_ERROR_MARKERS)
 
 
 def classify_app_chat_upstream_error(upstream_status: int, access_token: str | None = None, response: object | None = None, detail: object | None = None) -> GrokConsoleError:
     status = int(upstream_status)
     text = _safe_app_chat_error_text(response, detail)
+    structured_text = _app_chat_structured_error_text(response, detail)
+    is_limit = _is_app_chat_limit_error(status, text, structured_text)
+    is_challenge = _is_app_chat_challenge_error(status, text, structured_text)
+    is_auth = _is_app_chat_auth_error(status, text, structured_text)
+    is_transient = _is_app_chat_transient_error(status, text, structured_text)
     feedback_status: str | None = None
-    if _is_app_chat_limit_error(status, text):
+    if is_limit:
         feedback_status = "限流"
-    elif _is_app_chat_auth_error(status, text) and not _is_app_chat_challenge_error(status, text):
+    elif is_auth and not is_challenge:
         feedback_status = "异常"
     if access_token and feedback_status:
         from services.account_service import account_service
 
         account_service.update_account(access_token, {"status": feedback_status})
-    if _is_app_chat_limit_error(status, text):
+    if is_limit:
         return GrokConsoleError(f"Grok app-chat rate limited (HTTP {status})", 429, status, "rate_limit_exceeded")
-    if _is_app_chat_challenge_error(status, text):
+    if is_challenge:
         return GrokConsoleError(f"Grok app-chat Cloudflare challenge blocked request (HTTP {status})", 502, status, "cloudflare_challenge")
-    if _is_app_chat_auth_error(status, text):
+    if is_auth:
         return GrokConsoleError(f"Grok app-chat authentication failed (HTTP {status})", 401, status, "authentication_failed")
-    if _is_app_chat_transient_error(status, text):
+    if is_transient:
         return GrokConsoleError(f"Grok app-chat transient upstream error (HTTP {status})", 502, status, "upstream_transient")
     if status == 403:
         return GrokConsoleError("Grok app-chat forbidden (HTTP 403)", 403, status)
@@ -1686,7 +1868,7 @@ class GrokAppChatClient:
                 lambda: self.session.post(
                     APP_CHAT_RATE_LIMITS_URL,
                     headers=app_chat_headers(self.access_token, self.account),
-                    json={},
+                    json=build_grok_rate_limits_payload(self.account),
                     timeout=self.network_profile.timeout,
                 ),
                 context="app_chat_rate_limits",
@@ -1701,6 +1883,14 @@ class GrokAppChatClient:
             raise GrokConsoleError("Grok app-chat rate-limit validation returned an invalid response", 502) from exc
         if not isinstance(data, dict):
             raise GrokConsoleError("Grok app-chat rate-limit validation returned an invalid response", 502)
+        try:
+            from services.account_service import account_service
+
+            updates = grok_rate_limit_account_hints(data)
+            if updates:
+                account_service.update_account(self.access_token, updates)
+        except Exception:
+            logger.debug({"event": "grok_app_chat_rate_limit_hints_skipped"})
         return data
 
     def _refresh_clearance(self) -> bool:
@@ -1813,7 +2003,12 @@ class GrokAppChatClient:
                 raise GrokConsoleError(f"Grok app-chat upstream request failed: {_safe_exception_message(exc)}", 502) from exc
         if response.status_code >= 400:
             raise classify_app_chat_upstream_error(int(response.status_code), self.access_token, response)
-        yield from app_chat_line_events(response.iter_lines())
+        try:
+            yield from app_chat_line_events(response.iter_lines())
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
 
     def stream_events(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
         bridge_first = bool(config.browser_bridge_url)
@@ -1922,20 +2117,62 @@ def validate_grok_access_token(access_token: str, account: dict[str, Any] | None
         return client.validate_rate_limits()
 
 
+def _is_retryable_app_chat_account_error(exc: GrokConsoleError) -> bool:
+    if exc.code in {"rate_limit_exceeded", "upstream_transient"}:
+        return True
+    status = exc.upstream_status or exc.status_code
+    return int(status) in _APP_CHAT_RETRYABLE_STATUS_CODES
+
+
+def _image_generation_error_from_grok(exc: GrokConsoleError) -> ImageGenerationError:
+    return ImageGenerationError(str(exc), status_code=exc.status_code, code=exc.code)
+
+
+def _no_available_grok_image_account_error(last_error: GrokConsoleError | None = None) -> ImageGenerationError:
+    if last_error is not None:
+        return _image_generation_error_from_grok(last_error)
+    return ImageGenerationError("no available Grok account", status_code=503, code="no_available_account")
+
+
 def app_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     from services.account_service import account_service
 
-    access_token = account_service.get_grok_app_chat_access_token(spec)
-    if not access_token:
-        raise HTTPException(status_code=503, detail={"error": "no available Grok account"})
-    account = account_service.get_account(access_token)
     payload = build_app_chat_payload(spec, body, messages)
-    try:
-        with GrokAppChatClient(access_token, account) as client:
-            yield from client.stream_events(payload)
-    except GrokConsoleError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
-    account_service.mark_text_used(access_token)
+    excluded_tokens: set[str] = set()
+    refreshed_after_empty = False
+    last_error: GrokConsoleError | None = None
+
+    for _ in range(_APP_CHAT_MAX_ACCOUNT_ATTEMPTS):
+        access_token = account_service.get_grok_app_chat_access_token(spec, excluded_tokens=excluded_tokens)
+        if not access_token:
+            if not refreshed_after_empty:
+                refreshed_after_empty = True
+                try:
+                    account_service.refresh_accounts([], provider=GROK_PROVIDER)
+                except Exception as exc:
+                    logger.warning({"event": "grok_app_chat_refresh_before_empty_failed", "error": _safe_exception_message(exc)})
+                continue
+            if last_error is not None:
+                raise HTTPException(status_code=last_error.status_code, detail=last_error.to_http_detail()) from last_error
+            raise HTTPException(status_code=503, detail={"error": "no available Grok account"})
+        account = account_service.get_account(access_token)
+        emitted_output = False
+        try:
+            with GrokAppChatClient(access_token, account) as client:
+                for event in client.stream_events(payload):
+                    emitted_output = True
+                    yield event
+        except GrokConsoleError as exc:
+            if emitted_output or not _is_retryable_app_chat_account_error(exc):
+                raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
+            excluded_tokens.add(access_token)
+            last_error = exc
+            continue
+        account_service.mark_text_used(access_token)
+        return
+    if last_error is not None:
+        raise HTTPException(status_code=last_error.status_code, detail=last_error.to_http_detail()) from last_error
+    raise HTTPException(status_code=503, detail={"error": "no available Grok account"})
 
 
 def app_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2024,38 +2261,48 @@ def app_chat_image_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n
 
     from services.account_service import account_service
 
-    access_token = account_service.get_grok_app_chat_access_token(spec)
-    if not access_token:
-        raise ImageGenerationError("no available Grok account", status_code=503, code="no_available_account")
-    account = account_service.get_account(access_token)
-    image_items: list[dict[str, Any]] = []
-    seen_image_urls: set[str] = set()
-    try:
-        with GrokAppChatClient(access_token, account) as client:
-            for event in client.stream_events(payload):
-                token, thinking = extract_app_chat_token(event)
-                if token and not thinking:
-                    yield ImageOutput(kind="progress", model=spec.id, index=1, total=n, text=token, upstream_event_type="app_chat.token")
-                for image_url in extract_app_chat_image_urls(event):
-                    if image_url in seen_image_urls:
-                        continue
-                    image_items.append({"url": image_url, "revised_prompt": prompt})
-                    seen_image_urls.add(image_url)
-                    if len(image_items) >= n:
+    excluded_tokens: set[str] = set()
+    last_error: GrokConsoleError | None = None
+    for _ in range(_APP_CHAT_MAX_ACCOUNT_ATTEMPTS):
+        access_token = account_service.get_grok_app_chat_access_token(spec, excluded_tokens=excluded_tokens)
+        if not access_token:
+            raise _no_available_grok_image_account_error(last_error)
+        account = account_service.get_account(access_token)
+        image_items: list[dict[str, Any]] = []
+        seen_image_urls: set[str] = set()
+        emitted_output = False
+        try:
+            with GrokAppChatClient(access_token, account) as client:
+                for event in client.stream_events(payload):
+                    token, thinking = extract_app_chat_token(event)
+                    if token and not thinking:
+                        emitted_output = True
+                        yield ImageOutput(kind="progress", model=spec.id, index=1, total=n, text=token, upstream_event_type="app_chat.token")
+                    for image_url in extract_app_chat_image_urls(event):
+                        if image_url in seen_image_urls:
+                            continue
+                        image_items.append({"url": image_url, "revised_prompt": prompt})
+                        seen_image_urls.add(image_url)
+                        if len(image_items) >= n:
+                            break
+                    moderation_message = app_chat_moderation_message(event)
+                    if moderation_message:
+                        raise ImageGenerationError(moderation_message, status_code=400, error_type="invalid_request_error", code="content_policy_violation")
+                    if is_app_chat_final_event(event):
                         break
-                moderation_message = app_chat_moderation_message(event)
-                if moderation_message:
-                    raise ImageGenerationError(moderation_message, status_code=400, error_type="invalid_request_error", code="content_policy_violation")
-                if is_app_chat_final_event(event):
-                    break
-    except GrokConsoleError as exc:
-        raise ImageGenerationError(str(exc), status_code=exc.status_code) from exc
-    account_service.mark_text_used(access_token)
-    image_items = image_items[:n]
-    if image_items:
-        yield ImageOutput(kind="result", model=spec.id, index=1, total=n, data=_format_grok_image_items(image_items, response_format))
-        return
-    raise ImageGenerationError("Grok image generation reached final response without an image", status_code=502, code="image_generation_failed")
+        except GrokConsoleError as exc:
+            if emitted_output or not _is_retryable_app_chat_account_error(exc):
+                raise _image_generation_error_from_grok(exc) from exc
+            excluded_tokens.add(access_token)
+            last_error = exc
+            continue
+        account_service.mark_text_used(access_token)
+        image_items = image_items[:n]
+        if image_items:
+            yield ImageOutput(kind="result", model=spec.id, index=1, total=n, data=_format_grok_image_items(image_items, response_format))
+            return
+        raise ImageGenerationError("Grok image generation reached final response without an image", status_code=502, code="image_generation_failed")
+    raise _no_available_grok_image_account_error(last_error)
 
 
 def app_chat_image_edit_outputs(
@@ -2071,56 +2318,66 @@ def app_chat_image_edit_outputs(
 
     from services.account_service import account_service
 
-    access_token = account_service.get_grok_app_chat_access_token(spec)
-    if not access_token:
-        raise ImageGenerationError("no available Grok account", status_code=503, code="no_available_account")
-    account = account_service.get_account(access_token)
-    try:
-        with GrokAppChatClient(access_token, account) as client:
-            references = [
-                client.upload_image_edit_reference(data, filename, mime_type)
-                for data, filename, mime_type in images
-            ]
-            edit_prompt = replace_grok_image_placeholders(prompt, references)
-            parent_post_id, edit_prompt = client.create_image_edit_parent_post(edit_prompt)
-            final_urls: dict[int, str] = {}
-            user_id = _extract_x_user_id(access_token)
-            for event in client.stream_image_edit_events(
-                edit_prompt,
-                [reference.content_url for reference in references],
-                parent_post_id,
-            ):
-                stream = _extract_grok_streaming_image_response(event)
-                if stream:
-                    try:
-                        progress = int(stream.get("progress") or 0)
-                    except (TypeError, ValueError):
-                        progress = 0
-                    yield ImageOutput(
-                        kind="progress",
-                        model=spec.id,
-                        index=1,
-                        total=n,
-                        text=str(progress) if progress else "",
-                        upstream_event_type="app_chat.image_edit_progress",
-                    )
-                final_urls.update(extract_grok_image_edit_final_urls(event, user_id))
-                moderation_message = app_chat_moderation_message(event)
-                if moderation_message:
-                    raise ImageGenerationError(moderation_message, status_code=400, error_type="invalid_request_error", code="content_policy_violation")
-                if is_app_chat_final_event(event):
-                    break
-    except GrokConsoleError as exc:
-        raise ImageGenerationError(str(exc), status_code=exc.status_code) from exc
-    account_service.mark_text_used(access_token)
-    image_items = [
-        {"url": url, "revised_prompt": prompt}
-        for _, url in sorted(final_urls.items())[:n]
-    ]
-    if image_items:
-        yield ImageOutput(kind="result", model=spec.id, index=1, total=n, data=_format_grok_image_items(image_items, response_format))
-        return
-    raise ImageGenerationError("Grok image edit did not return an image", status_code=502, code="image_edit_failed")
+    excluded_tokens: set[str] = set()
+    last_error: GrokConsoleError | None = None
+    for _ in range(_APP_CHAT_MAX_ACCOUNT_ATTEMPTS):
+        access_token = account_service.get_grok_app_chat_access_token(spec, excluded_tokens=excluded_tokens)
+        if not access_token:
+            raise _no_available_grok_image_account_error(last_error)
+        account = account_service.get_account(access_token)
+        emitted_output = False
+        try:
+            with GrokAppChatClient(access_token, account) as client:
+                references = [
+                    client.upload_image_edit_reference(data, filename, mime_type)
+                    for data, filename, mime_type in images
+                ]
+                edit_prompt = replace_grok_image_placeholders(prompt, references)
+                parent_post_id, edit_prompt = client.create_image_edit_parent_post(edit_prompt)
+                final_urls: dict[int, str] = {}
+                user_id = _extract_x_user_id(access_token)
+                for event in client.stream_image_edit_events(
+                    edit_prompt,
+                    [reference.content_url for reference in references],
+                    parent_post_id,
+                ):
+                    stream = _extract_grok_streaming_image_response(event)
+                    if stream:
+                        try:
+                            progress = int(stream.get("progress") or 0)
+                        except (TypeError, ValueError):
+                            progress = 0
+                        emitted_output = True
+                        yield ImageOutput(
+                            kind="progress",
+                            model=spec.id,
+                            index=1,
+                            total=n,
+                            text=str(progress) if progress else "",
+                            upstream_event_type="app_chat.image_edit_progress",
+                        )
+                    final_urls.update(extract_grok_image_edit_final_urls(event, user_id))
+                    moderation_message = app_chat_moderation_message(event)
+                    if moderation_message:
+                        raise ImageGenerationError(moderation_message, status_code=400, error_type="invalid_request_error", code="content_policy_violation")
+                    if is_app_chat_final_event(event):
+                        break
+        except GrokConsoleError as exc:
+            if emitted_output or not _is_retryable_app_chat_account_error(exc):
+                raise _image_generation_error_from_grok(exc) from exc
+            excluded_tokens.add(access_token)
+            last_error = exc
+            continue
+        account_service.mark_text_used(access_token)
+        image_items = [
+            {"url": url, "revised_prompt": prompt}
+            for _, url in sorted(final_urls.items())[:n]
+        ]
+        if image_items:
+            yield ImageOutput(kind="result", model=spec.id, index=1, total=n, data=_format_grok_image_items(image_items, response_format))
+            return
+        raise ImageGenerationError("Grok image edit did not return an image", status_code=502, code="image_edit_failed")
+    raise _no_available_grok_image_account_error(last_error)
 
 
 def console_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> GrokConsoleCompletion:
