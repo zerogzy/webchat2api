@@ -19,6 +19,7 @@ _CLIENT_EXPORTS = {
     "cookie_header_from_mapping",
     "extract_completion",
     "extract_stream_generate_text",
+    "fetch_authenticated_init_body",
     "extract_text",
     "list_model_metadata",
     "message_text",

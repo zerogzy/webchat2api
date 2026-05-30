@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterator
 
 from fastapi import HTTPException
 
-from services.models import GEMINI_MODEL_SPECS, ModelSpec, resolve_model
+from services.models import gemini_model_specs, ModelSpec, resolve_model
 from services.providers import gemini
 from services.protocol import tool_calls
 
@@ -38,7 +38,7 @@ def list_models() -> dict[str, Any]:
                 "displayName": spec.id,
                 "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
             }
-            for spec in GEMINI_MODEL_SPECS
+            for spec in gemini_model_specs()
         ]
     }
 

@@ -24,6 +24,7 @@ HTTPException = cast(type[Exception], getattr(sys.modules["fastapi"], "HTTPExcep
 from api import gemini as gemini_api
 from services import gemini_deep_research
 from services.providers import gemini as gemini_provider
+from services.providers.gemini import models as gemini_models
 from services.protocol import gemini_native, openai_v1_chat_complete
 
 AUTH_HEADERS = {"Authorization": "Bearer webchat2api"}
@@ -44,6 +45,12 @@ def _tool() -> dict[str, Any]:
 
 
 class GeminiNativeProtocolTests(unittest.TestCase):
+    def setUp(self) -> None:
+        gemini_models.clear_gemini_dynamic_model_cache()
+
+    def tearDown(self) -> None:
+        gemini_models.clear_gemini_dynamic_model_cache()
+
     def test_models_response_uses_native_shape(self) -> None:
         response = gemini_native.list_models()
 
@@ -51,6 +58,14 @@ class GeminiNativeProtocolTests(unittest.TestCase):
         self.assertTrue(first["name"].startswith("models/gemini-"))
         self.assertEqual(first["displayName"], first["name"].removeprefix("models/"))
         self.assertEqual(first["supportedGenerationMethods"], ["generateContent", "streamGenerateContent"])
+
+    def test_models_response_includes_dynamic_discovered_models(self) -> None:
+        with mock.patch("services.providers.gemini.client.fetch_authenticated_init_body", return_value="gemini-2.5-pro gemini-2.5-ultra"):
+            response = gemini_native.list_models()
+
+        models = {item["name"]: item for item in response["models"]}
+        self.assertEqual(models["models/gemini-2.5-ultra"]["displayName"], "gemini-2.5-ultra")
+        self.assertEqual(models["models/gemini-2.5-ultra"]["supportedGenerationMethods"], ["generateContent", "streamGenerateContent"])
 
     def test_generate_content_text_response(self) -> None:
         response = gemini_native.generate_content(
