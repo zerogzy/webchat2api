@@ -40,6 +40,8 @@ class GPTImageProviderTests(unittest.TestCase):
             "token_invalidated for alice@example.com",
             "Authorization: Bearer secret-token failed",
             "Traceback contains refresh_token=secret",
+            "Cloudflare CF-Ray blocked upstream ChatGPT backend",
+            "OpenAI-Sentinel-Chat-Requirements-Token leaked with X-Conduit-Token",
             "",
         ]
 

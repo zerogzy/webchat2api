@@ -14,12 +14,18 @@ _SENSITIVE_IMAGE_ERROR_MARKERS = (
     "access_token",
     "authorization",
     "bearer ",
+    "cf-ray",
+    "chatgpt backend",
+    "cloudflare",
     "id_token",
     "oauth",
+    "openai-sentinel",
     "refresh_token",
     "session token",
     "set-cookie",
     "traceback",
+    "x-conduit-token",
+    "x-oai-turn-trace-id",
 )
 _CONNECTION_IMAGE_ERROR_MARKERS = (
     "curl: (35)",
