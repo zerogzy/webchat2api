@@ -19,6 +19,7 @@ HTTPException = cast(type[Exception], getattr(sys.modules["fastapi"], "HTTPExcep
 from services.models import resolve_model
 from services.protocol import openai_v1_chat_complete
 from services.providers import gemini
+from services.providers.gemini import models as gemini_models
 
 
 class GeminiProviderTests(unittest.TestCase):
@@ -54,11 +55,15 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(header, "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
 
     def test_cookie_header_helpers_preserve_extra_cookies_and_redact_secrets(self) -> None:
-        header = "NID=nid; __Secure-1PSID=psid; SNlM0e=token; __Secure-1PSIDTS=psidts"
+        header = 'NID="nid"; __Secure-1PSID="psid"; SNlM0e=token; __Secure-1PSIDTS=psidts;'
 
         parsed = gemini.parse_cookie_header(header)
         self.assertEqual(parsed["NID"], "nid")
-        self.assertEqual(gemini.cookie_header_from_mapping(parsed), header)
+        self.assertEqual(parsed["__Secure-1PSID"], "psid")
+        self.assertEqual(
+            gemini.cookie_header_from_mapping(parsed),
+            "NID=nid; __Secure-1PSID=psid; SNlM0e=token; __Secure-1PSIDTS=psidts",
+        )
         self.assertEqual(
             gemini.sanitize_cookie_header(header),
             "NID=nid; __Secure-1PSID=[redacted]; SNlM0e=[redacted]; __Secure-1PSIDTS=[redacted]",
@@ -84,21 +89,79 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(outer[0], None)
         self.assertEqual(inner, [["hello"], None, None, "gemini-2.5-pro"])
         self.assertEqual(data["at"], "at-token")
-        self.assertTrue(gemini.stream_generate_url("a b").endswith("?at=a%20b"))
+        self.assertEqual(
+            gemini.stream_generate_url(),
+            "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
+        )
+        self.assertEqual(
+            gemini.stream_generate_url("a b"),
+            "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?at=a%20b",
+        )
 
-    def test_session_token_from_response_reads_primary_and_fallback_shapes(self) -> None:
+    def test_session_token_from_response_reads_primary_fallback_and_nonce_shapes(self) -> None:
         self.assertEqual(gemini.session_token_from_response('{"SNlM0e":"primary"}'), "primary")
         self.assertEqual(gemini.session_token_from_response('["SNlM0e","fallback"]'), "fallback")
+        self.assertEqual(gemini.session_token_from_response('<html><body nonce="nonce-token"></body></html>'), "nonce-token")
+
+    def setUp(self) -> None:
+        gemini_models.clear_gemini_dynamic_model_cache()
+
+    def tearDown(self) -> None:
+        gemini_models.clear_gemini_dynamic_model_cache()
+
+    def test_extract_gemini_model_ids_filters_internal_and_duplicates(self) -> None:
+        body = " ".join([
+            "gemini-2.5-pro",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash-preview-05-20",
+            "gemini-advanced",
+            "gemini-u-foo",
+            "gemini-apps-bar",
+            "gemini-pro",
+            "other-model-2.0",
+        ])
+
+        self.assertEqual(
+            gemini_models.extract_gemini_model_ids(body),
+            ["gemini-2.5-pro", "gemini-2.5-flash-preview-05-20", "gemini-advanced"],
+        )
 
     def test_list_model_metadata_returns_safe_static_models(self) -> None:
-        metadata = gemini.list_model_metadata()
+        with mock.patch("services.providers.gemini.client.fetch_authenticated_init_body", side_effect=RuntimeError("network")):
+            metadata = gemini.list_model_metadata()
 
         models = {item["id"]: item for item in metadata}
         self.assertEqual(models["gemini-2.5-pro"]["provider"], "gemini")
         self.assertEqual(models["gemini-2.5-flash"]["owned_by"], "google")
         self.assertEqual(models["gemini-pro"]["root"], "gemini-pro")
         metadata[0]["id"] = "mutated"
-        self.assertEqual(gemini.list_model_metadata()[0]["id"], "gemini-2.5-pro")
+        with mock.patch("services.providers.gemini.client.fetch_authenticated_init_body", side_effect=RuntimeError("network")):
+            self.assertEqual(gemini.list_model_metadata()[0]["id"], "gemini-2.5-pro")
+
+    def test_gemini_model_metadata_injects_dynamic_models_and_uses_cache(self) -> None:
+        calls = 0
+
+        def fetcher() -> str:
+            nonlocal calls
+            calls += 1
+            return "gemini-2.5-pro gemini-2.5-ultra gemini-u-hidden gemini-apps-docs"
+
+        first = gemini_models.gemini_model_metadata(fetcher, now=10.0)
+        second = gemini_models.gemini_model_metadata(lambda: "gemini-2.5-ignored", now=20.0)
+
+        first_models = {item["id"]: item for item in first}
+        second_models = {item["id"] for item in second}
+        self.assertEqual(calls, 1)
+        self.assertEqual(first_models["gemini-2.5-ultra"]["provider"], "gemini")
+        self.assertIn("gemini-2.5-ultra", second_models)
+        self.assertNotIn("gemini-u-hidden", second_models)
+
+    def test_gemini_model_metadata_refreshes_after_ttl(self) -> None:
+        first = gemini_models.gemini_model_metadata(lambda: "gemini-2.5-first", now=10.0)
+        second = gemini_models.gemini_model_metadata(lambda: "gemini-2.5-second", now=400.0)
+
+        self.assertIn("gemini-2.5-first", {item["id"] for item in first})
+        self.assertIn("gemini-2.5-second", {item["id"] for item in second})
 
     def test_extract_text_from_nested_gemini_payload(self) -> None:
         payload = [["unused"], [{"candidate": {"content": "Gemini response"}}]]
@@ -123,6 +186,67 @@ class GeminiProviderTests(unittest.TestCase):
         parsed = gemini.parse_web_response_text(")]}'\n\n123\n" + frame)
 
         self.assertEqual(gemini.extract_completion(parsed).content, "Gemini realistic response")
+
+    def test_parse_web_response_text_reads_canonical_wrb_stream_generate_candidate(self) -> None:
+        stream_payload = json.dumps([
+            None,
+            ["https://gemini.google.com/app/metadata-fragment"],
+            "7287830021314931269",
+            ["rc_abc123", "gemini-2.5-pro"],
+            [["candidate-id", [["你好！有什么可以帮你的吗？"]]]],
+        ])
+        frame = json.dumps([
+            ["wrb.fr", "assistant.lamda.BardFrontendService.StreamGenerate", stream_payload, None, None, None, "generic"],
+        ])
+        parsed = gemini.parse_web_response_text(")]}'\n\n123\n" + frame)
+
+        self.assertEqual(gemini.extract_completion(parsed).content, "你好！有什么可以帮你的吗？")
+
+    def test_parse_web_response_text_reads_full_answer_from_live_null_slot_wrb_frames(self) -> None:
+        partial_payload = json.dumps([
+            None,
+            ["https://gemini.google.com/app/metadata-fragment"],
+            "7287830021314931269",
+            ["rc_abc123", "gemini-2.5-pro"],
+            [["candidate-id", [["你好！"]]]],
+        ])
+        full_answer = "你好！很高兴和你交流。今天有什么我可以帮你的吗？"
+        full_payload = json.dumps([
+            None,
+            ["https://gemini.google.com/app/metadata-fragment"],
+            "7287830021314931269",
+            ["rc_abc123", "gemini-2.5-pro"],
+            [["candidate-id", [[full_answer]]]],
+        ])
+        frame = json.dumps([
+            ["wrb.fr", None, partial_payload, None, None, None, "generic"],
+            ["wrb.fr", None, full_payload, None, None, None, "generic"],
+        ])
+        parsed = gemini.parse_web_response_text(")]}'\n\n123\n" + frame)
+
+        self.assertEqual(gemini.extract_completion(parsed).content, full_answer)
+
+    def test_extract_completion_ignores_numeric_only_null_slot_wrb_metadata(self) -> None:
+        stream_payload = json.dumps([
+            None,
+            ["https://gemini.google.com/app/metadata-fragment"],
+            "7287830021314931269",
+            ["rc_abc123", "gemini-2.5-pro"],
+        ])
+        parsed = [["wrb.fr", None, stream_payload, None]]
+
+        self.assertEqual(gemini.extract_completion(parsed).content, "")
+
+    def test_extract_completion_ignores_numeric_only_stream_metadata(self) -> None:
+        stream_payload = json.dumps([
+            None,
+            ["https://gemini.google.com/app/metadata-fragment"],
+            "7287830021314931269",
+            ["rc_abc123", "gemini-2.5-pro"],
+        ])
+        parsed = [["wrb.fr", "assistant.lamda.BardFrontendService.StreamGenerate", stream_payload, None]]
+
+        self.assertEqual(gemini.extract_completion(parsed).content, "")
 
     def test_parse_web_response_text_prefers_wrb_candidate_over_incidental_strings(self) -> None:
         stream_payload = json.dumps(["rpc-id", "request-id", [["Candidate answer wins"]]])
@@ -159,6 +283,9 @@ class GeminiProviderTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls: list[dict[str, Any]] = []
 
+            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeResponse:
+                raise AssertionError("explicit session token should not bootstrap")
+
             def post(self, url: str, headers: dict[str, str], data: dict[str, str], timeout: int) -> FakeResponse:
                 self.calls.append({"url": url, "headers": headers, "data": data, "timeout": timeout})
                 return FakeResponse()
@@ -170,12 +297,72 @@ class GeminiProviderTests(unittest.TestCase):
 
         self.assertEqual(gemini.extract_completion(parsed).content, "ok")
         call = fake_session.calls[0]
-        self.assertIn("?at=at-token", call["url"])
+        self.assertEqual(
+            call["url"],
+            "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?at=at-token",
+        )
         self.assertEqual(call["headers"]["x-same-domain"], "1")
         self.assertEqual(call["headers"]["cookie"], "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
         self.assertEqual(call["data"]["at"], "at-token")
         inner = json.loads(json.loads(call["data"]["f.req"])[1])
         self.assertEqual(inner, [["hello"], None, None, "gemini-2.5-pro"])
+
+    def test_gemini_web_client_bootstraps_missing_session_token_before_post(self) -> None:
+        class FakeGetResponse:
+            status_code = 200
+            text = '<html><script nonce="boot-token"></script></html>'
+
+        class FakePostResponse:
+            status_code = 200
+            text = ")]}'\n\n[[\"content\", \"ok\"]]"
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, Any]] = []
+
+            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeGetResponse:
+                self.calls.append({"method": "GET", "url": url, "headers": headers, "timeout": timeout})
+                return FakeGetResponse()
+
+            def post(self, url: str, headers: dict[str, str], data: dict[str, str], timeout: int) -> FakePostResponse:
+                self.calls.append({"method": "POST", "url": url, "headers": headers, "data": data, "timeout": timeout})
+                return FakePostResponse()
+
+        fake_session = FakeSession()
+        with mock.patch("services.providers.gemini.client.create_session", return_value=fake_session):
+            client = gemini.GeminiWebClient("__Secure-1PSID=psid; __Secure-1PSIDTS=psidts", "Test-UA")
+            parsed = client.generate({"prompt": "hello", "model": "gemini-2.5-pro"})
+
+        self.assertEqual(gemini.extract_completion(parsed).content, "ok")
+        self.assertEqual([call["method"] for call in fake_session.calls], ["GET", "POST"])
+        get_call = fake_session.calls[0]
+        self.assertEqual(get_call["url"], "https://gemini.google.com/")
+        self.assertEqual(get_call["headers"]["cookie"], "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
+        self.assertEqual(get_call["headers"]["user-agent"], "Test-UA")
+        post_call = fake_session.calls[1]
+        self.assertEqual(
+            post_call["url"],
+            "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?at=boot-token",
+        )
+        self.assertEqual(post_call["data"]["at"], "boot-token")
+        self.assertEqual(post_call["headers"]["user-agent"], "Test-UA")
+
+    def test_gemini_web_client_bootstrap_rejects_login_page(self) -> None:
+        class FakeGetResponse:
+            status_code = 200
+            text = '<html><a href="https://accounts.google.com/ServiceLogin">Sign in</a></html>'
+
+        class FakeSession:
+            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeGetResponse:
+                return FakeGetResponse()
+
+        with mock.patch("services.providers.gemini.client.create_session", return_value=FakeSession()):
+            client = gemini.GeminiWebClient("__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
+            with self.assertRaises(gemini.GeminiWebError) as raised:
+                client.bootstrap_session_token()
+
+        self.assertEqual(raised.exception.status_code, 401)
+        self.assertEqual(raised.exception.code, "gemini_auth_failed")
 
     def test_gemini_image_chat_request_is_rejected(self) -> None:
         with self.assertRaises(HTTPException) as raised:

@@ -13,7 +13,7 @@ from services.providers.gemini.models import gemini_model_metadata
 from services.network.client import create_session
 
 GEMINI_WEB_BASE_URL = "https://gemini.google.com"
-GEMINI_WEB_GENERATE_URL = f"{GEMINI_WEB_BASE_URL}/app/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+GEMINI_WEB_GENERATE_URL = f"{GEMINI_WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
 GEMINI_REQUIRED_COOKIES = ("__Secure-1PSID", "__Secure-1PSIDTS")
 GEMINI_SENSITIVE_COOKIE_NAMES = ("__Secure-1PSID", "__Secure-1PSIDTS", "SNlM0e")
 GEMINI_NON_COOKIE_FIELDS = ("SNlM0e", "session_token", "at")
@@ -49,7 +49,7 @@ def parse_cookie_header(cookie_header: str) -> dict[str, str]:
             continue
         name, value = part.split("=", 1)
         name = name.strip()
-        value = value.strip()
+        value = value.strip().strip('"').strip("'")
         if name:
             cookies[name] = value
     return cookies
@@ -74,7 +74,11 @@ def sanitize_cookie_header(cookie_header: str) -> str:
 
 
 def session_token_from_response(raw_text: str) -> str:
-    for pattern in (r'"SNlM0e"\s*:\s*"([^"]+)"', r'\[\s*"SNlM0e"\s*,\s*"([^"]+)"\s*\]'):
+    for pattern in (
+        r'"SNlM0e"\s*:\s*"([^"]+)"',
+        r'\[\s*"SNlM0e"\s*,\s*"([^"]+)"\s*\]',
+        r'\bnonce\s*=\s*"([^"]+)"',
+    ):
         match = re.search(pattern, raw_text)
         if match:
             return match.group(1)
@@ -224,12 +228,14 @@ def _parse_nested_json(value: object) -> object:
 def _wrb_payload_from_entry(entry: object) -> object | None:
     if not isinstance(entry, list) or len(entry) < 3:
         return None
-    if entry[0] != "wrb.fr" or entry[1] != GEMINI_WEB_RPC_ID:
+    if entry[0] != "wrb.fr":
         return None
-    payload = entry[2]
-    if isinstance(payload, str):
-        return _parse_nested_json(payload)
-    return payload
+    payload = _parse_nested_json(entry[2])
+    if not isinstance(payload, list):
+        return None
+    if entry[1] == GEMINI_WEB_RPC_ID or _canonical_stream_generate_text(payload):
+        return payload
+    return None
 
 
 def _wrb_payloads(value: object) -> Iterator[object]:
@@ -242,12 +248,22 @@ def _wrb_payloads(value: object) -> Iterator[object]:
             yield from _wrb_payloads(item)
 
 
+def _has_wrb_frame(value: object) -> bool:
+    if isinstance(value, list):
+        if len(value) >= 3 and value[0] == "wrb.fr" and isinstance(_parse_nested_json(value[2]), list):
+            return True
+        return any(_has_wrb_frame(item) for item in value)
+    return False
+
+
 def _is_incidental_stream_string(value: str) -> bool:
     text = value.strip()
     lowered = text.lower()
     if not text:
         return True
-    if lowered.startswith(("rc_", "wrb.fr", "assistant.lamda.")):
+    if text.isdigit():
+        return True
+    if lowered.startswith(("rc_", "wrb.fr", "assistant.lamda.", "http://", "https://")):
         return True
     if lowered in {"snlm0e", "at"}:
         return True
@@ -258,6 +274,28 @@ def _is_incidental_stream_string(value: str) -> bool:
     if lowered.endswith("-id"):
         return True
     return False
+
+
+def _canonical_stream_generate_text(payload: object) -> str:
+    payload = _parse_nested_json(payload)
+    if not isinstance(payload, list) or len(payload) <= 4:
+        return ""
+    candidates = payload[4]
+    if not isinstance(candidates, list) or not candidates:
+        return ""
+    first_candidate = candidates[0]
+    if not isinstance(first_candidate, list) or len(first_candidate) <= 1:
+        return ""
+    candidate_body = first_candidate[1]
+    if not isinstance(candidate_body, list) or not candidate_body:
+        return ""
+    content_parts = candidate_body[0]
+    if not isinstance(content_parts, list) or not content_parts:
+        return ""
+    text = content_parts[0]
+    if isinstance(text, str) and text.strip() and not _is_incidental_stream_string(text):
+        return text.strip()
+    return ""
 
 
 def _response_candidates_from_stream_generate(value: object) -> Iterator[str]:
@@ -284,7 +322,15 @@ def _response_candidates_from_stream_generate(value: object) -> Iterator[str]:
 
 
 def extract_stream_generate_text(payload: object) -> str:
-    for wrb_payload in _wrb_payloads(payload):
+    wrb_payloads = list(_wrb_payloads(payload))
+    canonical_texts = [
+        canonical_text
+        for wrb_payload in wrb_payloads
+        if (canonical_text := _canonical_stream_generate_text(wrb_payload))
+    ]
+    if canonical_texts:
+        return max(canonical_texts, key=len).strip()
+    for wrb_payload in wrb_payloads:
         candidates = [candidate for candidate in _response_candidates_from_stream_generate(wrb_payload) if candidate]
         if candidates:
             return max(candidates, key=len).strip()
@@ -322,6 +368,8 @@ def extract_text(payload: object) -> str:
     targeted = extract_stream_generate_text(payload)
     if targeted:
         return targeted
+    if any(True for _ in _wrb_payloads(payload)) or _has_wrb_frame(payload):
+        return ""
     if isinstance(payload, dict):
         for key in ("content", "text", "output", "answer", "response"):
             value = payload.get(key)
@@ -370,6 +418,28 @@ class GeminiWebClient:
         if callable(close):
             close()
 
+    def fetch_init_body(self) -> str:
+        headers = {
+            "cookie": self.cookie_header,
+            "user-agent": self.user_agent,
+            "referer": GEMINI_WEB_BASE_URL,
+        }
+        response = self.session.get(f"{GEMINI_WEB_BASE_URL}/", headers=headers, timeout=30)
+        status_code = int(getattr(response, "status_code", getattr(response, "status", 0)) or 0)
+        raw_text = str(getattr(response, "text", "") or "")
+        if status_code >= 400:
+            raise classify_upstream_error(status_code, raw_text)
+        return raw_text
+
+    def bootstrap_session_token(self) -> str:
+        raw_text = self.fetch_init_body()
+        if "signin" in raw_text.lower() or "accounts.google.com" in raw_text.lower():
+            raise GeminiWebError("Gemini upstream authentication failed", status_code=401, upstream_status=None, code="gemini_auth_failed")
+        session_token = session_token_from_response(raw_text)
+        if not session_token:
+            raise GeminiWebError("Gemini session token bootstrap failed", status_code=401, upstream_status=None, code="gemini_session_token_missing")
+        return session_token
+
     def generate(self, payload: dict[str, Any]) -> object:
         headers = {
             "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
@@ -380,6 +450,8 @@ class GeminiWebClient:
             "x-same-domain": "1",
         }
         session_token = str(payload.get("session_token") or "").strip()
+        if not session_token:
+            session_token = self.bootstrap_session_token()
         response = self.session.post(
             stream_generate_url(session_token),
             headers=headers,
@@ -391,6 +463,18 @@ class GeminiWebClient:
         if status_code >= 400:
             raise classify_upstream_error(status_code, raw_text)
         return parse_web_response_text(raw_text)
+
+
+def fetch_authenticated_init_body() -> str:
+    from services.account_service import account_service
+
+    access_token = account_service.get_text_access_token(provider="gemini")
+    if not access_token:
+        return ""
+    account = account_service.get_account(access_token) or {"access_token": access_token, "provider": "gemini"}
+    cookie_header = account_cookie_header(account)
+    with GeminiWebClient(cookie_header, account.get("user_agent")) as client:
+        return client.fetch_init_body()
 
 
 def list_model_metadata() -> list[dict[str, Any]]:
