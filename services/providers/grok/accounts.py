@@ -9,8 +9,12 @@ TIER_ALIASES = {
     "free": "basic",
     "basic": "basic",
     "fast": "basic",
+    "sso-basic": "basic",
+    "ssobasic": "basic",
     "premium": "super",
     "super": "super",
+    "sso-super": "super",
+    "ssosuper": "super",
     "supergrok": "super",
     "super-grok": "super",
     "premium-plus": "super",
@@ -18,6 +22,23 @@ TIER_ALIASES = {
     "heavy": "heavy",
     "max": "heavy",
 }
+TOKEN_CHAR_REPLACEMENTS = str.maketrans(
+    {
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u00a0": " ",
+        "\u2007": " ",
+        "\u202f": " ",
+        "\u200b": "",
+        "\u200c": "",
+        "\u200d": "",
+        "\ufeff": "",
+    }
+)
 CAPABILITY_ALIASES = {
     "": "",
     "app-chat": "chat",
@@ -32,6 +53,13 @@ CAPABILITY_ALIASES = {
     "edit-image": "image_edit",
 }
 STATUS_ALIASES = {
+    "active": "正常",
+    "available": "正常",
+    "enabled": "正常",
+    "enable": "正常",
+    "normal": "正常",
+    "ok": "正常",
+    "usable": "正常",
     "disabled": "禁用",
     "disable": "禁用",
     "inactive": "禁用",
@@ -48,6 +76,9 @@ STATUS_ALIASES = {
     "token-expired": "异常",
     "invalid_token": "异常",
     "invalid-token": "异常",
+    "cooling": "限流",
+    "cooldown": "限流",
+    "cool-down": "限流",
     "limited": "限流",
     "rate_limited": "限流",
     "rate-limited": "限流",
@@ -56,9 +87,41 @@ STATUS_ALIASES = {
     "quota_exhausted": "限流",
     "quota-exhausted": "限流",
 }
-UNAVAILABLE_STATUSES = {"禁用", "异常", "限流", "disabled", "abnormal", "limited", "rate_limited", "rate-limited"}
+UNAVAILABLE_STATUSES = {
+    "禁用",
+    "异常",
+    "限流",
+    "disabled",
+    "disable",
+    "inactive",
+    "abnormal",
+    "auth_failed",
+    "auth-failed",
+    "authentication_failed",
+    "authentication-failed",
+    "unauthenticated",
+    "unauthorized",
+    "forbidden",
+    "expired",
+    "token_expired",
+    "token-expired",
+    "invalid_token",
+    "invalid-token",
+    "cooling",
+    "cooldown",
+    "cool-down",
+    "limited",
+    "rate_limited",
+    "rate-limited",
+    "rate_limit_exceeded",
+    "rate-limit-exceeded",
+    "quota_exhausted",
+    "quota-exhausted",
+}
 CONSOLE_QUOTA_TOTAL = 30
 CONSOLE_QUOTA_WINDOW_SECONDS = 900
+APP_CHAT_BASIC_WINDOW_SECONDS = 86400
+APP_CHAT_SUPER_WINDOW_SECONDS = 7200
 EXPORT_FILENAME = "webchat2api_grok.txt"
 
 
@@ -68,8 +131,12 @@ def clean_string(value: Any) -> str:
     return str(value).strip()
 
 
+def _normalized_lookup_key(value: Any) -> str:
+    return str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+
+
 def normalize_tier(value: Any) -> str:
-    return TIER_ALIASES.get(str(value or "").strip().lower().replace("_", "-"), "")
+    return TIER_ALIASES.get(_normalized_lookup_key(value), "")
 
 
 def normalize_capability(value: Any) -> str:
@@ -83,7 +150,7 @@ def normalize_status(value: Any) -> Any:
     text = clean_string(value)
     if not text:
         return value
-    return STATUS_ALIASES.get(text.lower().replace(" ", "-"), text)
+    return STATUS_ALIASES.get(_normalized_lookup_key(text), text)
 
 
 def normalize_string_list(value: Any) -> list[str]:
@@ -102,24 +169,62 @@ def _looks_like_existing_normalized_account(item: dict[str, Any], token: str) ->
     return any(key in item for key in ("quota_console", "success", "fail", "last_used_at", "app_chat"))
 
 
+def _cookie_value(cookies: Any, cookie_name: str) -> str:
+    if not isinstance(cookies, dict):
+        return ""
+    for name, value in cookies.items():
+        if clean_string(name).lower() == cookie_name:
+            return clean_string(value)
+    return ""
+
+
 def _token_candidates(item: dict[str, Any]) -> list[str]:
-    candidates = [item.get("access_token"), item.get("accessToken"), item.get("cookie")]
+    candidates = [
+        item.get("access_token"),
+        item.get("accessToken"),
+        item.get("cookie"),
+        item.get("token"),
+    ]
     cookies = item.get("cookies")
     if isinstance(cookies, str):
         candidates.append(cookies)
+    else:
+        candidates.append(_cookie_value(cookies, "sso"))
     return [candidate for candidate in (clean_string(value) for value in candidates) if candidate]
+
+
+def _explicit_sso_candidates(item: dict[str, Any]) -> list[str]:
+    candidates = [
+        item.get("sso"),
+        item.get("raw_sso"),
+        item.get("rawSso"),
+        item.get("sso_token"),
+        item.get("ssoToken"),
+        _cookie_value(item.get("cookies"), "sso"),
+    ]
+    return [candidate for candidate in (clean_string(value) for value in candidates) if candidate]
+
+
+def _normalize_bare_sso_token(candidate: str) -> str:
+    token = candidate.translate(TOKEN_CHAR_REPLACEMENTS)
+    simple_sso = re.fullmatch(r"sso\s*=\s*(.+)", token, flags=re.IGNORECASE)
+    if simple_sso:
+        token = simple_sso.group(1)
+    token = "".join(token.split())
+    return token.encode("ascii", errors="ignore").decode("ascii")
 
 
 def _normalize_sso_candidate(candidate: str, *, allow_bare: bool) -> str:
     if not candidate:
         return ""
-    simple_sso = re.fullmatch(r"sso\s*=\s*(.+)", candidate, flags=re.IGNORECASE)
-    if simple_sso and ";" not in candidate:
-        return simple_sso.group(1).strip()
+    translated = candidate.translate(TOKEN_CHAR_REPLACEMENTS)
+    simple_sso = re.fullmatch(r"sso\s*=\s*(.+)", translated, flags=re.IGNORECASE)
+    if simple_sso and ";" not in translated:
+        return _normalize_bare_sso_token(translated)
     if any(name.lower() == "sso" for name, _ in _cookie_items(candidate)):
         return candidate
-    if allow_bare and "=" not in candidate:
-        return candidate
+    if allow_bare and "=" not in translated:
+        return _normalize_bare_sso_token(translated)
     return ""
 
 
@@ -129,10 +234,11 @@ def normalize_access_token(item: dict[str, Any]) -> str:
         return token
     if _looks_like_existing_normalized_account(item, token):
         return token
-    explicit_sso = _normalize_sso_candidate(clean_string(item.get("sso")), allow_bare=True)
-    if explicit_sso:
-        item["_grok_sso_import"] = True
-        return explicit_sso
+    for candidate in _explicit_sso_candidates(item):
+        explicit_sso = _normalize_sso_candidate(candidate, allow_bare=True)
+        if explicit_sso:
+            item["_grok_sso_import"] = True
+            return explicit_sso
     for candidate in _token_candidates(item):
         normalized = _normalize_sso_candidate(candidate, allow_bare=False)
         if normalized:
@@ -165,9 +271,75 @@ def _normalize_cookie_header(value: Any) -> str:
     return "; ".join(f"{name}={cookie_value}" for name, cookie_value in cookies)
 
 
+def _coerce_int(value: Any, default: int | None = None) -> int | None:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _first_present(raw: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in raw:
+            return raw.get(key)
+    return None
+
+
+def _iter_app_chat_limit_payloads(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        items: list[dict[str, Any]] = [payload]
+        for key in ("limits", "rateLimits", "rate_limits"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                items.extend(_iter_app_chat_limit_payloads(nested))
+            elif isinstance(nested, (list, tuple)):
+                for item in nested:
+                    items.extend(_iter_app_chat_limit_payloads(item))
+        return items
+    return []
+
+
+def infer_app_chat_tier_from_window_size(window_seconds: Any) -> str:
+    window_value = _coerce_int(window_seconds)
+    if window_value is None or window_value <= 0:
+        return ""
+    return "basic" if window_value > APP_CHAT_SUPER_WINDOW_SECONDS else "super"
+
+
+def normalize_app_chat_rate_limit_payload(payload: Any) -> dict[str, Any]:
+    quota: dict[str, Any] = {}
+    for raw in _iter_app_chat_limit_payloads(payload):
+        total = _first_present(raw, ("totalTokens", "total_tokens", "totalQueries", "total_queries", "total"))
+        remaining = _first_present(raw, ("remainingTokens", "remaining_tokens", "remainingQueries", "remaining_queries", "remaining"))
+        window_seconds = _first_present(raw, ("windowSizeSeconds", "window_size_seconds", "windowSeconds", "window_seconds"))
+        tier = normalize_tier(_first_present(raw, ("tier", "category", "pool", "accountTier", "accountCategory")))
+        if total is not None:
+            quota["total"] = max(0, _coerce_int(total, 0) or 0)
+        if remaining is not None:
+            quota["remaining"] = max(0, _coerce_int(remaining, 0) or 0)
+        if window_seconds is not None:
+            quota["window_seconds"] = max(0, _coerce_int(window_seconds, 0) or 0)
+        if tier:
+            quota["tier"] = tier
+        if "total" in quota and "remaining" in quota and "window_seconds" in quota and "tier" in quota:
+            break
+    if "total" in quota and "remaining" in quota:
+        quota["remaining"] = min(quota["remaining"], quota["total"])
+    if "window_seconds" in quota and "tier" not in quota:
+        inferred_tier = infer_app_chat_tier_from_window_size(quota["window_seconds"])
+        if inferred_tier:
+            quota["tier"] = inferred_tier
+    return quota
+
+
 def normalize_console_quota(value: Any) -> dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
+    app_chat_quota = normalize_app_chat_rate_limit_payload(raw)
     total = raw.get("total")
+    if total is None:
+        total = app_chat_quota.get("total")
     try:
         total_value = int(total if total is not None else CONSOLE_QUOTA_TOTAL)
     except (TypeError, ValueError):
@@ -175,6 +347,8 @@ def normalize_console_quota(value: Any) -> dict[str, Any]:
     total_value = max(0, total_value)
 
     window_seconds = raw.get("window_seconds")
+    if window_seconds is None:
+        window_seconds = app_chat_quota.get("window_seconds")
     try:
         window_value = int(window_seconds if window_seconds is not None else CONSOLE_QUOTA_WINDOW_SECONDS)
     except (TypeError, ValueError):
@@ -182,6 +356,8 @@ def normalize_console_quota(value: Any) -> dict[str, Any]:
     window_value = max(0, window_value)
 
     remaining = raw.get("remaining")
+    if remaining is None:
+        remaining = app_chat_quota.get("remaining")
     try:
         remaining_value = int(remaining if remaining is not None else total_value)
     except (TypeError, ValueError):
@@ -204,14 +380,17 @@ def normalize_console_quota(value: Any) -> dict[str, Any]:
 
 def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
     account.pop("_grok_sso_import", None)
-    raw_tier = account.get("tier") or account.get("model_tier")
-    normalized_tier = normalize_tier(raw_tier) or clean_string(raw_tier) or None
+    app_chat_quota = normalize_app_chat_rate_limit_payload(account)
+    raw_tier = account.get("tier") or account.get("model_tier") or account.get("category") or account.get("pool")
+    normalized_tier = normalize_tier(raw_tier) or app_chat_quota.get("tier") or clean_string(raw_tier) or None
     account["tier"] = normalized_tier
     if "model_tier" in account:
         account["model_tier"] = normalized_tier
     account["status"] = normalize_status(account.get("status")) or account.get("status")
     account["app_chat"] = bool(account.get("app_chat"))
-    account["quota_console"] = normalize_console_quota(account.get("quota_console"))
+    quota_source = dict(account.get("quota_console") or {}) if isinstance(account.get("quota_console"), dict) else {}
+    quota_source.update(app_chat_quota)
+    account["quota_console"] = normalize_console_quota(quota_source)
     account["capabilities"] = normalize_string_list(account.get("capabilities"))
     cf_cookies = account.get("cf_cookies") or account.get("cfCookies") or account.get("cloudflare_cookies")
     account["cf_cookies"] = cf_cookies if isinstance(cf_cookies, dict) else _normalize_cookie_header(cf_cookies)
