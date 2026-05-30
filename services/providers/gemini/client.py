@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+import time
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from curl_cffi import requests
@@ -13,9 +15,15 @@ from services.providers.gemini.models import gemini_model_metadata
 from services.network.client import create_session
 
 GEMINI_WEB_BASE_URL = "https://gemini.google.com"
+GEMINI_GOOGLE_BASE_URL = "https://www.google.com"
+GEMINI_ROTATE_COOKIES_URL = "https://accounts.google.com/RotateCookies"
 GEMINI_WEB_GENERATE_URL = f"{GEMINI_WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+GEMINI_ROTATE_COOKIES_BODY = '[000,"-0000000000000000000"]'
+GEMINI_BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+GEMINI_GENERATE_MAX_ATTEMPTS = 3
+GEMINI_RETRY_BACKOFF_SECONDS = 0.25
 GEMINI_REQUIRED_COOKIES = ("__Secure-1PSID", "__Secure-1PSIDTS")
-GEMINI_SENSITIVE_COOKIE_NAMES = ("__Secure-1PSID", "__Secure-1PSIDTS", "SNlM0e")
+GEMINI_SENSITIVE_COOKIE_NAMES = ("__Secure-1PSID", "__Secure-1PSIDTS", "SNlM0e", "at", "session_token")
 GEMINI_NON_COOKIE_FIELDS = ("SNlM0e", "session_token", "at")
 GEMINI_WEB_RPC_ID = "assistant.lamda.BardFrontendService.StreamGenerate"
 
@@ -24,6 +32,7 @@ GEMINI_WEB_RPC_ID = "assistant.lamda.BardFrontendService.StreamGenerate"
 class GeminiCompletion:
     content: str
     raw_response: object = None
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 class GeminiWebError(RuntimeError):
@@ -43,7 +52,7 @@ class GeminiWebError(RuntimeError):
 
 
 def clean_cookie_value(value: Any) -> str:
-    return str(value or "").strip().strip('"').strip("'")
+    return str(value or "").strip().strip(";").strip('"').strip("'").strip(";")
 
 
 def parse_cookie_header(cookie_header: str) -> dict[str, str]:
@@ -75,6 +84,43 @@ def sanitize_cookie_header(cookie_header: str) -> str:
         if name in GEMINI_SENSITIVE_COOKIE_NAMES:
             cookies[name] = "[redacted]"
     return cookie_header_from_mapping(cookies)
+
+
+def merge_cookie_headers(*cookie_headers: str) -> str:
+    cookies: dict[str, str] = {}
+    for cookie_header in cookie_headers:
+        for name, value in parse_cookie_header(cookie_header).items():
+            if value:
+                cookies[name] = value
+    return cookie_header_from_mapping(cookies)
+
+
+def cookie_header_from_response(response: object) -> str:
+    cookies_attr = getattr(response, "cookies", None)
+    response_cookies = cookies_attr() if callable(cookies_attr) else cookies_attr
+    parts: list[str] = []
+    if isinstance(response_cookies, dict):
+        parts.extend(f"{name}={clean_cookie_value(value)}" for name, value in response_cookies.items())
+    elif isinstance(response_cookies, Iterable) and not isinstance(response_cookies, (str, bytes)):
+        for cookie in response_cookies:
+            name = getattr(cookie, "name", None)
+            value = getattr(cookie, "value", None)
+            if name is not None and value is not None:
+                parts.append(f"{name}={clean_cookie_value(value)}")
+    headers = getattr(response, "headers", None)
+    raw_set_cookie = ""
+    if isinstance(headers, dict):
+        raw_set_cookie = str(headers.get("set-cookie") or headers.get("Set-Cookie") or "")
+    if raw_set_cookie:
+        for item in re.split(r",\s*(?=[^;,\s]+=)", raw_set_cookie):
+            first = item.split(";", 1)[0]
+            if "=" in first:
+                parts.append(first)
+    return merge_cookie_headers(*parts)
+
+
+def merge_response_cookies(cookie_header: str, response: object) -> str:
+    return merge_cookie_headers(cookie_header, cookie_header_from_response(response))
 
 
 def session_token_from_response(raw_text: str) -> str:
@@ -162,7 +208,28 @@ def account_cookie_header(account: dict[str, Any]) -> str:
             status_code=400,
             detail={"error": f"Gemini account is missing required cookie(s): {', '.join(missing)}"},
         )
-    return "; ".join(f"{name}={value}" for name, value in cookies.items())
+    return cookie_header_from_mapping(cookies)
+
+
+def rotate_psidts_cookie(session: object, cookie_header: str, user_agent: str | None = None) -> str:
+    headers = {
+        "content-type": "application/json",
+        "cookie": cookie_header,
+        "user-agent": user_agent or GEMINI_BROWSER_USER_AGENT,
+    }
+    post = getattr(session, "post")
+    response = post(GEMINI_ROTATE_COOKIES_URL, headers=headers, data=GEMINI_ROTATE_COOKIES_BODY, timeout=30)
+    status_code = int(getattr(response, "status_code", getattr(response, "status", 0)) or 0)
+    raw_text = str(getattr(response, "text", "") or "")
+    if status_code in {401, 403}:
+        raise classify_upstream_error(status_code, raw_text)
+    if status_code >= 400:
+        raise classify_upstream_error(status_code, raw_text)
+    merged = merge_response_cookies(cookie_header, response)
+    merged_cookies = parse_cookie_header(merged)
+    if not merged_cookies.get("__Secure-1PSIDTS"):
+        raise GeminiWebError("Gemini cookie rotation did not issue __Secure-1PSIDTS", status_code=401, upstream_status=status_code, code="gemini_session_cookie_missing")
+    return merged
 
 
 def message_text(content: object) -> str:
@@ -343,6 +410,30 @@ def extract_stream_generate_text(payload: object) -> str:
     return ""
 
 
+def extract_stream_generate_metadata(payload: object) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for wrb_payload in _wrb_payloads(payload):
+        parsed = _parse_nested_json(wrb_payload)
+        if not isinstance(parsed, list):
+            continue
+        if len(parsed) > 1 and isinstance(parsed[1], str) and parsed[1].strip():
+            metadata.setdefault("cid", parsed[1].strip())
+        if len(parsed) > 2 and isinstance(parsed[2], str) and parsed[2].strip():
+            metadata.setdefault("rid", parsed[2].strip())
+        if len(parsed) > 4 and isinstance(parsed[4], list) and parsed[4]:
+            first_candidate = parsed[4][0]
+            if isinstance(first_candidate, list) and first_candidate:
+                choice_id = first_candidate[0]
+                if isinstance(choice_id, str) and choice_id.strip():
+                    metadata.setdefault("rcid", choice_id.strip())
+        for item in parsed:
+            if isinstance(item, list) and item:
+                first = item[0]
+                if isinstance(first, str) and first.startswith("rc_"):
+                    metadata.setdefault("rcid", first)
+    return metadata
+
+
 def _string_candidates(value: object) -> Iterator[str]:
     if isinstance(value, str):
         text = value.strip()
@@ -413,7 +504,7 @@ def parse_web_response_text(raw_text: str) -> object:
 class GeminiWebClient:
     def __init__(self, cookie_header: str, user_agent: str | None = None) -> None:
         self.cookie_header = cookie_header
-        self.user_agent = user_agent or "Mozilla/5.0"
+        self.user_agent = user_agent or GEMINI_BROWSER_USER_AGENT
         self.session = create_session()
 
     def __enter__(self) -> "GeminiWebClient":
@@ -425,14 +516,26 @@ class GeminiWebClient:
             close()
 
     def fetch_init_body(self) -> str:
+        google_headers = {
+            "user-agent": self.user_agent,
+        }
+        try:
+            google_response = self.session.get(f"{GEMINI_GOOGLE_BASE_URL}/", headers=google_headers, timeout=30)
+        except Exception:
+            google_response = None
+        if google_response is not None:
+            self.cookie_header = merge_response_cookies(self.cookie_header, google_response)
         headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "cookie": self.cookie_header,
             "user-agent": self.user_agent,
             "referer": GEMINI_WEB_BASE_URL,
+            "x-same-domain": "1",
         }
         response = self.session.get(f"{GEMINI_WEB_BASE_URL}/", headers=headers, timeout=30)
         status_code = int(getattr(response, "status_code", getattr(response, "status", 0)) or 0)
         raw_text = str(getattr(response, "text", "") or "")
+        self.cookie_header = merge_response_cookies(self.cookie_header, response)
         if status_code >= 400:
             raise classify_upstream_error(status_code, raw_text)
         return raw_text
@@ -446,7 +549,11 @@ class GeminiWebClient:
             raise GeminiWebError("Gemini session token bootstrap failed", status_code=401, upstream_status=None, code="gemini_session_token_missing")
         return session_token
 
-    def generate(self, payload: dict[str, Any]) -> object:
+    def rotate_psidts(self) -> str:
+        self.cookie_header = rotate_psidts_cookie(self.session, self.cookie_header, self.user_agent)
+        return self.cookie_header
+
+    def _request_generate_once(self, payload: dict[str, Any], session_token: str) -> object:
         headers = {
             "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
             "cookie": self.cookie_header,
@@ -455,9 +562,6 @@ class GeminiWebClient:
             "referer": f"{GEMINI_WEB_BASE_URL}/app",
             "x-same-domain": "1",
         }
-        session_token = str(payload.get("session_token") or "").strip()
-        if not session_token:
-            session_token = self.bootstrap_session_token()
         response = self.session.post(
             stream_generate_url(session_token),
             headers=headers,
@@ -468,7 +572,32 @@ class GeminiWebClient:
         raw_text = str(getattr(response, "text", "") or "")
         if status_code >= 400:
             raise classify_upstream_error(status_code, raw_text)
-        return parse_web_response_text(raw_text)
+        parsed = parse_web_response_text(raw_text)
+        if not raw_text.strip() or not extract_text(parsed):
+            raise GeminiWebError("Gemini upstream response did not contain text", status_code=502, upstream_status=status_code, code="gemini_empty_response")
+        return parsed
+
+    def generate(self, payload: dict[str, Any]) -> object:
+        session_token = str(payload.get("session_token") or "").strip()
+        if not session_token:
+            session_token = self.bootstrap_session_token()
+        last_error: GeminiWebError | Exception | None = None
+        for attempt in range(GEMINI_GENERATE_MAX_ATTEMPTS):
+            if attempt:
+                time.sleep(GEMINI_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+            try:
+                return self._request_generate_once(payload, session_token)
+            except GeminiWebError as exc:
+                last_error = exc
+                if exc.code in {"gemini_auth_failed", "gemini_rate_limited"}:
+                    raise
+                if exc.upstream_status is not None and exc.upstream_status < 500 and exc.code != "gemini_empty_response":
+                    raise
+            except Exception as exc:
+                last_error = exc
+        if isinstance(last_error, GeminiWebError):
+            raise last_error
+        raise GeminiWebError("Gemini upstream request failed", status_code=502, code="gemini_upstream_error") from last_error
 
 
 def fetch_authenticated_init_body() -> str:
@@ -488,7 +617,7 @@ def list_model_metadata() -> list[dict[str, Any]]:
 
 
 def extract_completion(payload: object) -> GeminiCompletion:
-    return GeminiCompletion(content=extract_text(payload), raw_response=payload)
+    return GeminiCompletion(content=extract_text(payload), raw_response=payload, metadata=extract_stream_generate_metadata(payload))
 
 
 def chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> GeminiCompletion:
@@ -507,7 +636,6 @@ def chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[s
         with GeminiWebClient(cookie_header, account.get("user_agent")) as client:
             response_payload = client.generate(payload)
     except GeminiWebError as exc:
-        account_service.mark_text_used(access_token)
         raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
     completion = extract_completion(response_payload)
     if not completion.content:
