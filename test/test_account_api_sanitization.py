@@ -38,6 +38,7 @@ class FakeAccountService:
             "__Secure-1PSID": "psid",
             "__Secure-1PSIDTS": "psidts",
         }
+        self.deleted: tuple[list[str], str | None] | None = None
 
     def list_accounts(self, provider: str | None = None) -> list[dict[str, Any]]:
         if provider and provider != self.account.get("provider"):
@@ -65,6 +66,7 @@ class FakeAccountService:
         return dict(self.account)
 
     def delete_accounts(self, tokens: list[str], provider: str | None = None) -> dict[str, Any]:
+        self.deleted = (tokens, provider)
         return {"removed": 0, "items": self.list_accounts(provider=provider)}
 
     def delete_limited_accounts(self, provider: str | None = None) -> dict[str, Any]:
@@ -163,6 +165,19 @@ class GeminiAccountApiSanitizationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+
+    def test_delete_accounts_forwards_provider_and_sanitizes_gemini_credentials(self) -> None:
+        response = self.client._request(
+            "DELETE",
+            "/api/accounts",
+            headers=AUTH_HEADERS,
+            json_data={"provider": "gemini", "tokens": [GEMINI_TOKEN]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.account_service.deleted, ([GEMINI_TOKEN], "gemini"))
+        body = cast(dict[str, Any], response.json())
+        self.assert_no_gemini_secrets(body["items"][0])
 
     def test_export_accounts_keeps_gemini_cookie_header(self) -> None:
         items = self.account_service.build_export_items(provider="gemini")

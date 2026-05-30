@@ -207,6 +207,44 @@ class AccountProviderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.get_text_access_token(provider="mystery")
 
+    def test_gemini_provider_delete_accepts_cookie_field_token_without_set_mutation(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": "gemini"},
+        ])
+
+        try:
+            result = service.delete_accounts(["__Secure-1PSID=psid"], provider=GEMINI_PROVIDER)
+        except RuntimeError as exc:
+            self.fail(f"Gemini delete mutated target token set while iterating: {exc}")
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
+
+    def test_gemini_provider_delete_accepts_normalized_access_token(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": "gemini"},
+        ])
+
+        result = service.delete_accounts(["__Secure-1PSID=psid; __Secure-1PSIDTS=psidts"], provider=GEMINI_PROVIDER)
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
+
+    def test_gemini_provider_delete_accepts_full_cookie_header(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": "gemini"},
+        ])
+
+        result = service.delete_accounts([
+            "SID=ignored; __Secure-1PSID=psid; __Secure-1PSIDTS=psidts; NID=ignored",
+        ], provider=GEMINI_PROVIDER)
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
+
     def test_grok_account_normalizes_simple_sso_cookie_token(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
@@ -246,6 +284,56 @@ class AccountProviderTests(unittest.TestCase):
         result = service.add_account_items([
             {"access_token": "grok-token", "provider": "grok"},
             {"access_token": "sso-rw=grok-token", "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(service.list_accounts(provider=GROK_PROVIDER), [])
+
+    def test_grok_account_imports_explicit_sso_payload(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"sso": "grok-sso-token", "provider": "grok", "tier": "premium"},
+            {"sso": "sso=grok-simple-cookie-token", "provider": "grok"},
+            {"sso": "sso=grok-cookie-header-token; other=value", "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 3)
+        accounts = service.list_accounts(provider=GROK_PROVIDER)
+        self.assertEqual([account["access_token"] for account in accounts], [
+            "grok-sso-token",
+            "grok-simple-cookie-token",
+            "sso=grok-cookie-header-token; other=value",
+        ])
+        self.assertEqual(accounts[0]["tier"], "super")
+
+    def test_grok_account_rejects_explicit_sso_cookie_like_payload_without_sso_pair(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"sso": "sso-rw=grok-token", "provider": "grok"},
+            {"sso": "not-sso=grok-token", "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(service.list_accounts(provider=GROK_PROVIDER), [])
+
+    def test_grok_account_imports_cookie_field_with_sso(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"cookie": "sso=grok-cookie-token; sso-rw=rw-token", "provider": "grok"},
+            {"cookies": "sso=grok-cookies-token; other=value", "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 2)
+        tokens = service.list_tokens(provider=GROK_PROVIDER)
+        self.assertEqual(tokens, [
+            "sso=grok-cookie-token; sso-rw=rw-token",
+            "sso=grok-cookies-token; other=value",
+        ])
+
+    def test_grok_account_rejects_cookie_field_without_sso(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"cookie": "sso-rw=grok-token", "provider": "grok"},
         ])
 
         self.assertEqual(result["added"], 0)
