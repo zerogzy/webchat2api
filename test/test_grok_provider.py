@@ -193,6 +193,11 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(account["sec_ch_ua_mobile"], "?0")
         self.assertEqual(account["sec_ch_ua_platform"], "\"Linux\"")
 
+    def test_grok_account_normalizes_new_error_status_aliases(self) -> None:
+        self.assertEqual(grok_accounts.normalize_status("unauthenticated"), "异常")
+        self.assertEqual(grok_accounts.normalize_status("token_expired"), "异常")
+        self.assertEqual(grok_accounts.normalize_status("rate_limit_exceeded"), "限流")
+
     def test_grok_account_normalizes_cookie_token_and_sso_fields(self) -> None:
         self.assertEqual(grok_accounts.normalize_access_token({"access_token": " SSO = cookie-token "}), "cookie-token")
         self.assertEqual(grok_accounts.normalize_access_token({"access_token": " SSO = cookie-token ; other=value "}), "SSO = cookie-token ; other=value")
@@ -393,6 +398,28 @@ class GrokProviderTests(unittest.TestCase):
 
         self.assertEqual(events, [{"result": {"response": {"token": "split"}}}])
 
+    def test_app_chat_line_events_splits_embedded_data_frames_and_skips_bad_json(self) -> None:
+        events = list(grok.app_chat_line_events([
+            b'data: {"token":"first"}\n\ndata: not-json\n\ndata: {"token":"second","messageTag":"reasoning"}',
+            b'',
+        ]))
+
+        self.assertEqual(events, [{"token": "first"}, {"token": "second", "messageTag": "reasoning"}])
+
+    def test_collect_app_chat_response_handles_root_tokens_text_alias_reasoning_and_usage(self) -> None:
+        events = [
+            {"token": "plan ", "messageTag": "reasoning"},
+            {"response": {"text": "answer"}},
+            {"usage": {"total_tokens": 9}},
+            {"finalMetadata": {"usage": {"total_tokens": 9}}},
+        ]
+
+        response = grok.collect_app_chat_response(events)
+
+        self.assertEqual(response["content"], "answer")
+        self.assertEqual(response["reasoning_content"], "plan ")
+        self.assertEqual(response["search_sources"], [])
+
     def test_collect_app_chat_response_accumulates_final_tag_tokens(self) -> None:
         events = [
             {"result": {"response": {"token": "Hello", "messageTag": "final"}}},
@@ -520,6 +547,13 @@ class GrokProviderTests(unittest.TestCase):
         }
 
         self.assertEqual(grok.extract_app_chat_image_url(event), "https://assets.grok.com/generated/dog.png")
+
+    def test_extract_app_chat_image_url_accepts_final_url_aliases_and_snake_case_asset(self) -> None:
+        event = {"image": {"progress": 100, "finalUrl": "generated/final.png"}}
+        asset_event = {"media": {"progress": 100, "asset_id": "asset-1", "user_id": "user-1"}}
+
+        self.assertEqual(grok.extract_app_chat_image_url(event), "https://assets.grok.com/generated/final.png")
+        self.assertEqual(grok.extract_app_chat_image_url(asset_event), "https://assets.grok.com/users/user-1/asset-1/content")
 
     def test_extract_app_chat_image_url_from_card_media_and_metadata(self) -> None:
         event = {
@@ -1023,6 +1057,19 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(reference.content_url, "https://assets.grok.com/users/user-1/file-1/content")
         self.assertEqual(grok.replace_grok_image_placeholders("edit @IMAGE1 and @IMAGE2", [reference]), "edit @file-1 and @IMAGE2")
 
+    def test_grok_image_edit_upload_accepts_final_url_variants(self) -> None:
+        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client.access_token = "sso=token"
+
+        def fake_post(url, payload, *, context, referer=None):
+            return {"fileID": "file-1", "contentURL": "generated/uploaded.png"}
+
+        client._post_direct_json = fake_post
+        reference = client.upload_image_edit_reference(b"png", "input.png", "image/png")
+
+        self.assertEqual(reference.file_id, "file-1")
+        self.assertEqual(reference.content_url, "https://assets.grok.com/generated/uploaded.png")
+
     def test_grok_image_edit_extracts_stream_and_model_response_urls(self) -> None:
         stream_event = {
             "result": {
@@ -1045,12 +1092,22 @@ class GrokProviderTests(unittest.TestCase):
                 }
             }
         }
+        generated_event = {
+            "result": {
+                "response": {
+                    "modelResponse": {
+                        "generatedImages": [{"contentUrl": "generated/object.png"}],
+                    }
+                }
+            }
+        }
 
         self.assertEqual(grok.extract_grok_image_edit_final_urls(stream_event), {1: "https://assets.grok.com/generated/edit.png"})
         self.assertEqual(
             grok.extract_grok_image_edit_final_urls(model_event, "user-1"),
             {0: "https://assets.grok.com/users/user-1/asset-1/content"},
         )
+        self.assertEqual(grok.extract_grok_image_edit_final_urls(generated_event), {0: "https://assets.grok.com/generated/object.png"})
 
     def test_grok_image_edit_extracts_final_metadata_urls(self) -> None:
         event = {
@@ -1171,7 +1228,7 @@ class GrokProviderTests(unittest.TestCase):
     def test_app_chat_error_classification_is_specific(self) -> None:
         cases = {
             401: (401, "authentication failed"),
-            402: (429, "rate limit exceeded"),
+            402: (429, "rate limited"),
             403: (403, "forbidden"),
             429: (429, "rate limited"),
         }
@@ -1182,6 +1239,40 @@ class GrokProviderTests(unittest.TestCase):
                 self.assertEqual(error.status_code, openai_status)
                 self.assertEqual(error.upstream_status, upstream_status)
                 self.assertIn(message, str(error))
+
+    def test_app_chat_error_classification_distinguishes_auth_challenge_limit_and_transient(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+
+        class FakeResponse:
+            def __init__(self, status_code: int, text: str = "", payload: dict[str, Any] | None = None) -> None:
+                self.status_code = status_code
+                self.text = text
+                self._payload = payload
+
+            def json(self) -> dict[str, Any]:
+                if self._payload is None:
+                    raise ValueError("not json")
+                return self._payload
+
+        with mock.patch.dict(sys.modules, {"services.account_service": types.SimpleNamespace(account_service=account_service)}):
+            auth = grok.classify_app_chat_upstream_error(401, "sso=secret-token", FakeResponse(401, payload={"error": {"code": "unauthenticated"}}))
+            challenge = grok.classify_app_chat_upstream_error(401, "sso=secret-token", FakeResponse(401, "<html>Just a moment... Cloudflare sso=leaked</html>"))
+            limited = grok.classify_app_chat_upstream_error(400, "sso=secret-token", FakeResponse(400, payload={"error": {"code": "rate_limit_exceeded"}}))
+            transient = grok.classify_app_chat_upstream_error(500, "sso=secret-token", FakeResponse(500, "HTTP2 stream reset"))
+
+        self.assertEqual(auth.status_code, 401)
+        self.assertEqual(auth.code, "authentication_failed")
+        self.assertEqual(challenge.status_code, 502)
+        self.assertEqual(challenge.code, "cloudflare_challenge")
+        self.assertNotIn("secret-token", str(challenge))
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(limited.code, "rate_limit_exceeded")
+        self.assertEqual(transient.status_code, 502)
+        self.assertEqual(transient.code, "upstream_transient")
+        self.assertEqual(account_service.update_account.mock_calls, [
+            mock.call("sso=secret-token", {"status": "异常"}),
+            mock.call("sso=secret-token", {"status": "限流"}),
+        ])
 
     def test_app_chat_403_classification_does_not_say_unsupported_model(self) -> None:
         error = grok.classify_app_chat_upstream_error(403)
@@ -1822,6 +1913,18 @@ class GrokProviderTests(unittest.TestCase):
             mock.call("token-value", {"status": "限流"}),
         ])
 
+    def test_app_chat_request_exception_messages_redact_credentials(self) -> None:
+        message = "failed with Cookie: sso=secret-token; cf_clearance=secret-clearance; Authorization: Bearer secret-bearer"
+        error = grok.GrokConsoleError(f"Grok app-chat upstream request failed: {grok._safe_exception_message(RuntimeError(message))}", 502)
+
+        detail = error.to_http_detail()
+        self.assertIn("sso=[redacted]", detail["error"])
+        self.assertIn("cf_clearance=[redacted]", detail["error"])
+        self.assertIn("Authorization: Bearer [redacted]", detail["error"])
+        self.assertNotIn("secret-token", detail["error"])
+        self.assertNotIn("secret-clearance", detail["error"])
+        self.assertNotIn("secret-bearer", detail["error"])
+
     def test_grok_app_chat_uses_flaresolverr_on_403_then_retries(self) -> None:
         class FakeResponse:
             def __init__(self, status_code: int, lines: list[bytes] | None = None) -> None:
@@ -1880,7 +1983,8 @@ class GrokProviderTests(unittest.TestCase):
         self.assertIn("cf_clearance=solved-clearance", retry_headers["Cookie"])
         self.assertEqual(client.session.headers["User-Agent"], "Solved UA")
         self.assertEqual(events[0]["result"]["response"]["token"], "ok")
-        saved_profile = updates[0]["network_profiles"]["grok_app_chat"]
+        saved_profiles = cast(dict[str, Any], updates[0]["network_profiles"])
+        saved_profile = cast(dict[str, str], saved_profiles["grok_app_chat"])
         self.assertEqual(saved_profile["user-agent"], "Solved UA")
         self.assertEqual(saved_profile["cf_clearance"], "solved-clearance")
         self.assertEqual(saved_profile["cf_cookies"], "cf_clearance=solved-clearance; __cf_bm=solved-bm; x-challenge=solved-challenge")
@@ -1918,7 +2022,8 @@ class GrokProviderTests(unittest.TestCase):
             self.assertTrue(client._refresh_clearance())
             headers = grok.app_chat_headers("token-value")
 
-        saved_profile = updates[0]["network_profiles"]["grok_app_chat"]
+        saved_profiles = cast(dict[str, Any], updates[0]["network_profiles"])
+        saved_profile = cast(dict[str, str], saved_profiles["grok_app_chat"])
         self.assertEqual(saved_profile["browser"], "chrome141")
         self.assertEqual(saved_profile["impersonate"], "chrome141")
         self.assertEqual(headers["User-Agent"], clearance.user_agent)
