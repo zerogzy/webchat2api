@@ -28,6 +28,10 @@ def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
     return account
 
 
+def delete_token_matches_account(token: str, account: dict[str, Any]) -> bool:
+    return clean_string(token) == clean_string(account.get("access_token"))
+
+
 def normalize_console_quota(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 

@@ -91,23 +91,42 @@ def _looks_like_existing_normalized_account(item: dict[str, Any], token: str) ->
     return any(key in item for key in ("quota_console", "success", "fail", "last_used_at", "app_chat"))
 
 
+def _token_candidates(item: dict[str, Any]) -> list[str]:
+    candidates = [item.get("access_token"), item.get("accessToken"), item.get("cookie")]
+    cookies = item.get("cookies")
+    if isinstance(cookies, str):
+        candidates.append(cookies)
+    return [candidate for candidate in (clean_string(value) for value in candidates) if candidate]
+
+
+def _normalize_sso_candidate(candidate: str, *, allow_bare: bool) -> str:
+    if not candidate:
+        return ""
+    simple_sso = re.fullmatch(r"sso\s*=\s*(.+)", candidate, flags=re.IGNORECASE)
+    if simple_sso and ";" not in candidate:
+        return simple_sso.group(1).strip()
+    if any(name.lower() == "sso" for name, _ in _cookie_items(candidate)):
+        return candidate
+    if allow_bare and "=" not in candidate:
+        return candidate
+    return ""
+
+
 def normalize_access_token(item: dict[str, Any]) -> str:
     token = clean_string(item.get("access_token") or item.get("accessToken") or "")
     if item.get("_grok_sso_import") and token:
         return token
     if _looks_like_existing_normalized_account(item, token):
         return token
-    explicit_sso = clean_string(item.get("sso"))
+    explicit_sso = _normalize_sso_candidate(clean_string(item.get("sso")), allow_bare=True)
     if explicit_sso:
         item["_grok_sso_import"] = True
         return explicit_sso
-    simple_sso = re.fullmatch(r"sso\s*=\s*(.+)", token, flags=re.IGNORECASE)
-    if simple_sso and ";" not in token:
-        item["_grok_sso_import"] = True
-        return simple_sso.group(1).strip()
-    if any(name.lower() == "sso" for name, _ in _cookie_items(token)):
-        item["_grok_sso_import"] = True
-        return token
+    for candidate in _token_candidates(item):
+        normalized = _normalize_sso_candidate(candidate, allow_bare=False)
+        if normalized:
+            item["_grok_sso_import"] = True
+            return normalized
     return ""
 
 
@@ -192,6 +211,10 @@ def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
     account["sec_ch_ua_mobile"] = clean_string(account.get("sec_ch_ua_mobile") or account.get("sec-ch-ua-mobile")) or None
     account["sec_ch_ua_platform"] = clean_string(account.get("sec_ch_ua_platform") or account.get("sec-ch-ua-platform")) or None
     return account
+
+
+def delete_token_matches_account(token: str, account: dict[str, Any]) -> bool:
+    return clean_string(token) == clean_string(account.get("access_token"))
 
 
 def reset_console_quota_if_ready(account: dict[str, Any], current_time: float) -> dict[str, Any]:

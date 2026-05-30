@@ -71,6 +71,16 @@ def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
     return account
 
 
+def delete_token_matches_account(token: str, account: dict[str, Any]) -> bool:
+    token_access, token_psid, token_psidts = normalize_account_credentials({"access_token": token})
+    account_access, account_psid, account_psidts = normalize_account_credentials(dict(account))
+    return bool(
+        (token_access and token_access == account_access)
+        or (token_psid and token_psid == account_psid)
+        or (token_psidts and token_psidts == account_psidts)
+    )
+
+
 def supports_refresh(account: dict[str, Any]) -> bool:
     return False
 
