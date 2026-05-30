@@ -20,6 +20,7 @@ export type Account = {
   expired?: string | null;
   id_token?: string | null;
   account_id?: string | null;
+  row_id?: string | null;
   last_refresh?: string | null;
   refresh_token?: string | null;
   user_id?: string | null;
@@ -69,12 +70,23 @@ export type AccountImportPayload = {
   expired?: string;
   id_token?: string;
   account_id?: string;
+  row_id?: string;
   last_refresh?: string;
   refresh_token?: string;
   [key: string]: unknown;
 };
 
 export type AccountExportProvider = "gpt" | "grok" | "gemini";
+
+export type AccountDeleteIdentifier = {
+  account_id?: string | null;
+  row_id?: string | null;
+};
+
+export type AccountDeletePayload = {
+  tokens: string[];
+  identifiers: AccountDeleteIdentifier[];
+};
 
 export type SettingsConfig = {
   proxy: string;
@@ -312,10 +324,14 @@ export async function createAccounts(
   });
 }
 
-export async function deleteAccounts(tokens: string[], provider?: AccountExportProvider) {
+export async function deleteAccounts(payload: AccountDeletePayload, provider?: AccountExportProvider) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "DELETE",
-    body: { tokens, ...(provider ? { provider } : {}) },
+    body: {
+      tokens: payload.tokens,
+      ...(payload.identifiers.length > 0 ? { identifiers: payload.identifiers } : {}),
+      ...(provider ? { provider } : {}),
+    },
   });
 }
 

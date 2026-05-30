@@ -47,6 +47,8 @@ import {
   refreshAccounts,
   updateAccount,
   type Account,
+  type AccountDeleteIdentifier,
+  type AccountDeletePayload,
   type AccountExportProvider,
   type AccountStatus,
 } from "@/lib/api";
@@ -260,6 +262,26 @@ function accountTokens(accounts: Account[]) {
   return accounts.map(accountToken).filter(Boolean);
 }
 
+type AccountDeleteCandidate = AccountDeleteIdentifier;
+
+function accountDeleteIdentifier(account: Account): AccountDeleteCandidate | null {
+  const accountId = typeof account.account_id === "string" ? account.account_id.trim() : "";
+  if (accountId) return { account_id: accountId };
+  const rowId = typeof account.row_id === "string" ? account.row_id.trim() : "";
+  return rowId ? { row_id: rowId } : null;
+}
+
+function accountDeletePayloads(accounts: Account[]): AccountDeletePayload {
+  return {
+    tokens: accountTokens(accounts),
+    identifiers: accounts.map(accountDeleteIdentifier).filter((item): item is AccountDeleteCandidate => item !== null),
+  };
+}
+
+function accountHasDeleteIdentifier(account: Account) {
+  return Boolean(accountToken(account) || accountDeleteIdentifier(account));
+}
+
 function keepProviderSelection(selection: ProviderSelection, items: Account[]) {
   const keysByProvider = accountProviderDefinitions.reduce((acc, provider) => {
     acc[provider.id] = new Set<string>();
@@ -333,17 +355,17 @@ function ProviderAccountSection({
   onPageChange: (page: number) => void;
   onSelectChange: (ids: string[]) => void;
   onRefresh: (tokens: string[]) => void;
-  onDelete: (tokens: string[]) => void;
+  onDelete: (payload: AccountDeletePayload) => void;
   onDeleteLimited: () => void;
   onExport: (tokens: string[]) => void;
   onEdit: (account: Account) => void;
 }) {
   const selectedSet = new Set(selectedIds);
-  const selectedTokens = accounts
-    .filter((account, index) => selectedSet.has(accountRowKey(account, index)))
-    .map(accountToken)
-    .filter(Boolean);
+  const selectedRows = accounts.filter((account, index) => selectedSet.has(accountRowKey(account, index)));
+  const selectedPayloads = accountDeletePayloads(selectedRows);
+  const selectedTokens = selectedPayloads.tokens;
   const selectedRefreshTokens = provider.refresh.enabled ? selectedTokens : [];
+  const selectedDeleteCount = selectedPayloads.tokens.length + selectedPayloads.identifiers.length;
   const limitedTokens = accountTokens(accounts.filter((item) => item.status === "限流"));
   const typeOptions = [
     { label: "全部计划/池", value: "all" },
@@ -450,8 +472,8 @@ function ProviderAccountSection({
         <Button
           variant="ghost"
           className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-          onClick={() => onDelete(selectedTokens)}
-          disabled={selectedTokens.length === 0 || isDeleting}
+          onClick={() => onDelete(selectedPayloads)}
+          disabled={selectedDeleteCount === 0 || isDeleting}
         >
           {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
           删除本组所选
@@ -578,8 +600,8 @@ function ProviderAccountSection({
                       <button
                         type="button"
                         className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-600"
-                        onClick={() => onDelete([token])}
-                        disabled={isDeleting || !token}
+                        onClick={() => onDelete(accountDeletePayloads([account]))}
+                        disabled={isDeleting || !accountHasDeleteIdentifier(account)}
                       >
                         <Trash2 className="size-4" />
                       </button>
@@ -756,15 +778,15 @@ function AccountsPageContent() {
     setSelectedIds((prev) => keepProviderSelection(prev, nextAccounts));
   };
 
-  const handleDeleteTokens = async (provider: ProviderId, tokens: string[]) => {
-    if (tokens.length === 0) {
+  const handleDeleteTokens = async (provider: ProviderId, payload: AccountDeletePayload) => {
+    if (payload.tokens.length === 0 && payload.identifiers.length === 0) {
       toast.error(`请先选择要删除的 ${getAccountProviderLabel(provider)} 账户`);
       return;
     }
 
     setIsDeleting(true);
     try {
-      const data = await deleteAccounts(tokens, provider);
+      const data = await deleteAccounts(payload, provider);
       handleProviderMutationResult(provider, data.items);
       toast.success(`删除 ${data.removed ?? 0} 个 ${getAccountProviderLabel(provider)} 账户`);
     } catch (error) {
@@ -1043,7 +1065,7 @@ function AccountsPageContent() {
             onPageChange={(nextPage) => setProviderPage(activeProvider, nextPage)}
             onSelectChange={(ids) => setProviderSelection(activeProvider, ids)}
             onRefresh={(tokens) => void handleRefreshAccounts(activeProvider, tokens)}
-            onDelete={(tokens) => void handleDeleteTokens(activeProvider, tokens)}
+            onDelete={(payload) => void handleDeleteTokens(activeProvider, payload)}
             onDeleteLimited={() => void handleDeleteLimitedAccounts(activeProvider)}
             onExport={(tokens) => void handleExportAccounts(activeProvider, tokens)}
             onEdit={openEditDialog}
