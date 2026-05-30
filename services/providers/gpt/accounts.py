@@ -30,6 +30,7 @@ TIER_ALIASES = {
     "prolite": "pro",
     "pro-lite": "pro",
 }
+CODEX_SOURCE_TYPES = {"codex", "chatgpt-codex", "chatgpt_codex"}
 CAPABILITY_ALIASES = {
     "": "",
     "app-chat": "chat",
@@ -128,12 +129,46 @@ def normalize_console_quota(value: Any) -> dict[str, Any]:
     }
 
 
+def _source_type_value(value: Any) -> str:
+    key = _alias_key(value)
+    if key in CODEX_SOURCE_TYPES:
+        return "codex"
+    return clean_string(value).lower() or "web"
+
+
+def _is_codex_metadata(account: dict[str, Any]) -> bool:
+    return any(_source_type_value(account.get(key)) == "codex" for key in ("source_type", "export_type", "type"))
+
+
+def _tier_input(account: dict[str, Any]) -> Any:
+    for key in ("tier", "model_tier", "account_type", "plan_type", "plan"):
+        value = account.get(key)
+        if clean_string(value):
+            return value
+    account_type = account.get("type")
+    if _source_type_value(account_type) == "codex":
+        return None
+    return account_type
+
+
 def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
-    raw_tier = account.get("tier") or account.get("model_tier") or account.get("type")
+    raw_tier = _tier_input(account)
     normalized_tier = normalize_tier(raw_tier) or clean_string(raw_tier) or None
+    if _is_codex_metadata(account):
+        account["source_type"] = "codex"
+        account["export_type"] = "codex"
+        if _source_type_value(account.get("type")) == "codex":
+            account.pop("type", None)
+    else:
+        account["source_type"] = _source_type_value(account.get("source_type"))
+        export_type = clean_string(account.get("export_type"))
+        if export_type:
+            account["export_type"] = _source_type_value(export_type)
     account["tier"] = normalized_tier
     if "model_tier" in account:
         account["model_tier"] = normalized_tier
+    if "type" in account and normalize_tier(account.get("type")):
+        account["type"] = normalize_tier(account.get("type"))
     account["status"] = normalize_status(account.get("status")) or account.get("status")
     quota = account.get("quota_console")
     if quota is not None or "quota_console" in account:
@@ -296,8 +331,15 @@ def build_export_item(account: dict[str, Any]) -> dict[str, str] | None:
         or _format_timestamp(access_claims.get("nbf"))
     )
 
+    export_type = clean_string(account.get("export_type"))
+    source_type = clean_string(account.get("source_type"))
+    if _is_codex_metadata(account) or (not export_type and not source_type):
+        export_type = "codex"
+    else:
+        export_type = _source_type_value(export_type or source_type)
+
     return {
-        "type": clean_string(account.get("export_type")) or "codex",
+        "type": export_type,
         "email": email,
         "expired": expired,
         "id_token": id_token,

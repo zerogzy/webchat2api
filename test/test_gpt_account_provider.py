@@ -20,7 +20,43 @@ class GPTAccountProviderTests(unittest.TestCase):
         self.assertEqual(account["tier"], "plus")
         self.assertEqual(account["status"], "限流")
         self.assertEqual(account["capabilities"], ["chat", "image", "image_edit"])
+        self.assertEqual(account["source_type"], "web")
         self.assertEqual(account["quota_console"], {"remaining": 5, "total": 10, "window_seconds": 60, "reset_at": 123})
+
+    def test_codex_type_is_source_metadata_not_account_tier(self) -> None:
+        account = gpt_accounts.normalize_account({
+            "access_token": "token-value",
+            "type": "codex",
+            "plan_type": "Business",
+            "source_type": "web",
+        })
+
+        self.assertEqual(account["tier"], "team")
+        self.assertNotIn("type", account)
+        self.assertEqual(account["source_type"], "codex")
+        self.assertEqual(account["export_type"], "codex")
+
+    def test_source_and_tier_aliases_follow_upstream_plan_names(self) -> None:
+        aliases = {
+            "free": "free",
+            "Plus": "plus",
+            "Pro": "pro",
+            "ProLite": "pro",
+            "Team": "team",
+            "business": "team",
+            "Enterprise": "enterprise",
+        }
+
+        for raw_tier, tier in aliases.items():
+            with self.subTest(raw_tier=raw_tier):
+                account = gpt_accounts.normalize_account({"access_token": "token", "type": raw_tier})
+                self.assertEqual(account["tier"], tier)
+                self.assertEqual(account["type"], tier)
+                self.assertEqual(account["source_type"], "web")
+
+        codex = gpt_accounts.normalize_account({"access_token": "token", "source_type": "chatgpt_codex"})
+        self.assertEqual(codex["source_type"], "codex")
+        self.assertEqual(codex["export_type"], "codex")
 
     def test_sanitize_hides_refresh_credentials_but_keeps_public_token_identifier(self) -> None:
         account = gpt_accounts.sanitize_account({
@@ -60,6 +96,27 @@ class GPTAccountProviderTests(unittest.TestCase):
         self.assertEqual(item["email"], "user@example.com")
         self.assertEqual(item["account_id"], "account-id")
         self.assertEqual(item["sso"], "sso-token")
+        self.assertEqual(item["type"], "codex")
+
+    def test_export_item_preserves_explicit_web_export_metadata(self) -> None:
+        item = gpt_accounts.build_export_item({
+            "access_token": "access-token",
+            "source_type": "web",
+        })
+
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item["type"], "web")
+
+    def test_export_item_preserves_codex_export_metadata(self) -> None:
+        item = gpt_accounts.build_export_item({
+            "access_token": "access-token",
+            "source_type": "chatgpt_codex",
+        })
+
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item["type"], "codex")
 
     def test_image_availability_accepts_unknown_quota_and_rejects_unavailable_status(self) -> None:
         self.assertTrue(gpt_accounts.is_image_account_available({
