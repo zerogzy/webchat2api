@@ -42,6 +42,10 @@ class GeminiWebError(RuntimeError):
         return detail
 
 
+def clean_cookie_value(value: Any) -> str:
+    return str(value or "").strip().strip('"').strip("'")
+
+
 def parse_cookie_header(cookie_header: str) -> dict[str, str]:
     cookies: dict[str, str] = {}
     for part in str(cookie_header or "").split(";"):
@@ -49,7 +53,7 @@ def parse_cookie_header(cookie_header: str) -> dict[str, str]:
             continue
         name, value = part.split("=", 1)
         name = name.strip()
-        value = value.strip().strip('"').strip("'")
+        value = clean_cookie_value(value)
         if name:
             cookies[name] = value
     return cookies
@@ -59,7 +63,7 @@ def cookie_header_from_mapping(cookies: dict[str, Any]) -> str:
     parts: list[str] = []
     for name, value in cookies.items():
         name_text = str(name or "").strip()
-        value_text = str(value or "").strip()
+        value_text = clean_cookie_value(value)
         if name_text and value_text:
             parts.append(f"{name_text}={value_text}")
     return "; ".join(parts)
@@ -77,6 +81,8 @@ def session_token_from_response(raw_text: str) -> str:
     for pattern in (
         r'"SNlM0e"\s*:\s*"([^"]+)"',
         r'\[\s*"SNlM0e"\s*,\s*"([^"]+)"\s*\]',
+        r'\[\s*"at"\s*,\s*"([^"]+)"\s*\]',
+        r'\bat\s*[:=]\s*"([^"]+)"',
         r'\bnonce\s*=\s*"([^"]+)"',
     ):
         match = re.search(pattern, raw_text)
@@ -87,9 +93,9 @@ def session_token_from_response(raw_text: str) -> str:
 
 def classify_upstream_error(status_code: int, raw_text: str = "") -> GeminiWebError:
     text = raw_text.lower()
-    if status_code in {401, 403}:
+    if status_code in {401, 403} or any(marker in text for marker in ("snlm0e", "secure-1psid", "secure-1psidts", "sign in", "accounts.google.com")):
         message = "Gemini upstream authentication failed"
-        if "snlm0e" in text or "secure-1psidts" in text:
+        if "snlm0e" in text or "secure-1psidts" in text or "secure-1psid" in text:
             message = "Gemini upstream authentication failed; refresh Gemini session cookies"
         return GeminiWebError(message, status_code=401, upstream_status=status_code, code="gemini_auth_failed")
     if status_code == 429:
@@ -118,18 +124,18 @@ def stream_generate_url(session_token: str = "") -> str:
 
 def account_session_token(account: dict[str, Any]) -> str:
     for key in ("session_token", "SNlM0e", "at"):
-        value = str(account.get(key) or "").strip()
+        value = clean_cookie_value(account.get(key))
         if value:
             return value
     direct = parse_cookie_header(str(account.get("access_token") or ""))
     for key in ("SNlM0e", "at"):
-        value = str(direct.get(key) or "").strip()
+        value = clean_cookie_value(direct.get(key))
         if value:
             return value
     stored_cookies = account.get("cookies")
     if isinstance(stored_cookies, dict):
         for key in ("SNlM0e", "at"):
-            value = str(stored_cookies.get(key) or "").strip()
+            value = clean_cookie_value(stored_cookies.get(key))
             if value:
                 return value
     return ""
@@ -141,11 +147,11 @@ def account_cookie_header(account: dict[str, Any]) -> str:
     stored_cookies = account.get("cookies")
     if isinstance(stored_cookies, dict):
         for name, value in stored_cookies.items():
-            value_text = str(value or "").strip()
+            value_text = clean_cookie_value(value)
             if value_text:
                 cookies[str(name)] = value_text
     for name in GEMINI_REQUIRED_COOKIES:
-        value = str(account.get(name) or "").strip()
+        value = clean_cookie_value(account.get(name))
         if value:
             cookies[name] = value
     for name in GEMINI_NON_COOKIE_FIELDS:

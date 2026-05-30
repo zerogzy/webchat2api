@@ -13,7 +13,7 @@ GEMINI_MODEL_SPECS = (
     ModelSpec("gemini-pro", GEMINI_PROVIDER, "google", "gemini-2.5-pro"),
 )
 
-_GEMINI_MODEL_PATTERN = re.compile(r"gemini-[a-zA-Z0-9.-]+")
+_GEMINI_MODEL_PATTERN = re.compile(r"gemini-[a-zA-Z0-9][a-zA-Z0-9.-]*")
 _GEMINI_REAL_MODEL_PATTERN = re.compile(r"^gemini-(?:\d|advanced)")
 _GEMINI_DYNAMIC_MODEL_TTL_SECONDS = 300.0
 _GEMINI_DYNAMIC_MODEL_CACHE: tuple[float, tuple[str, ...]] | None = None
@@ -32,7 +32,7 @@ def extract_gemini_model_ids(text: str) -> list[str]:
     seen: set[str] = set()
     models: list[str] = []
     for match in _GEMINI_MODEL_PATTERN.finditer(str(text or "")):
-        model_id = match.group(0)
+        model_id = match.group(0).rstrip(".,;:)]}>'\"")
         if not is_discoverable_gemini_model_id(model_id) or model_id in seen:
             continue
         seen.add(model_id)

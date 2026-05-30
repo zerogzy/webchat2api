@@ -54,6 +54,13 @@ class GeminiProviderTests(unittest.TestCase):
 
         self.assertEqual(header, "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
 
+    def test_account_cookie_header_unquotes_stored_cookie_fields(self) -> None:
+        header = gemini.account_cookie_header({
+            "cookies": {"__Secure-1PSID": "'psid'", "__Secure-1PSIDTS": '"psidts"', "NID": '"nid"'},
+        })
+
+        self.assertEqual(header, "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts; NID=nid")
+
     def test_cookie_header_helpers_preserve_extra_cookies_and_redact_secrets(self) -> None:
         header = 'NID="nid"; __Secure-1PSID="psid"; SNlM0e=token; __Secure-1PSIDTS=psidts;'
 
@@ -80,6 +87,7 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(gemini.account_session_token({"session_token": "direct"}), "direct")
         self.assertEqual(gemini.account_session_token({"access_token": "__Secure-1PSID=psid; SNlM0e=token"}), "token")
         self.assertEqual(gemini.account_session_token({"cookies": {"at": "cookie-token"}}), "cookie-token")
+        self.assertEqual(gemini.account_session_token({"cookies": {"SNlM0e": '"quoted-token"'}}), "quoted-token")
 
     def test_stream_generate_payload_uses_web_rpc_envelope_and_session_token(self) -> None:
         data = gemini.build_stream_generate_form_payload("hello", "gemini-2.5-pro", "at-token")
@@ -101,6 +109,8 @@ class GeminiProviderTests(unittest.TestCase):
     def test_session_token_from_response_reads_primary_fallback_and_nonce_shapes(self) -> None:
         self.assertEqual(gemini.session_token_from_response('{"SNlM0e":"primary"}'), "primary")
         self.assertEqual(gemini.session_token_from_response('["SNlM0e","fallback"]'), "fallback")
+        self.assertEqual(gemini.session_token_from_response('["at","at-token"]'), "at-token")
+        self.assertEqual(gemini.session_token_from_response('<script>var at="assignment-token";</script>'), "assignment-token")
         self.assertEqual(gemini.session_token_from_response('<html><body nonce="nonce-token"></body></html>'), "nonce-token")
 
     def setUp(self) -> None:
@@ -112,9 +122,9 @@ class GeminiProviderTests(unittest.TestCase):
     def test_extract_gemini_model_ids_filters_internal_and_duplicates(self) -> None:
         body = " ".join([
             "gemini-2.5-pro",
-            "gemini-2.5-pro",
-            "gemini-2.5-flash-preview-05-20",
-            "gemini-advanced",
+            "gemini-2.5-pro.",
+            "gemini-2.5-flash-preview-05-20,",
+            "gemini-advanced)",
             "gemini-u-foo",
             "gemini-apps-bar",
             "gemini-pro",
@@ -264,11 +274,14 @@ class GeminiProviderTests(unittest.TestCase):
 
     def test_classify_upstream_error_maps_auth_rate_limit_and_server_failures(self) -> None:
         auth = gemini.classify_upstream_error(403, "SNlM0e not found")
+        stale = gemini.classify_upstream_error(500, "SNlM0e expired")
         rate = gemini.classify_upstream_error(429, "quota")
         server = gemini.classify_upstream_error(503, "unavailable")
 
         self.assertEqual(auth.status_code, 401)
         self.assertEqual(auth.code, "gemini_auth_failed")
+        self.assertEqual(stale.status_code, 401)
+        self.assertEqual(stale.code, "gemini_auth_failed")
         self.assertEqual(rate.status_code, 429)
         self.assertEqual(rate.code, "gemini_rate_limited")
         self.assertEqual(server.status_code, 502)
