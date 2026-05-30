@@ -27,6 +27,7 @@ from services.models import resolve_model
 from services.protocol.conversation import ConversationRequest, ImageOutput, conversation_events
 from services.openai_backend_api import OpenAIBackendAPI
 from services.protocol import openai_v1_models
+from services.providers.gemini import models as gemini_models
 from services.providers.gpt import images as gpt_images
 
 
@@ -76,6 +77,10 @@ class ProviderModelListTests(unittest.TestCase):
         FakeBackend.calls = []
         FakeBackend.fail_authenticated = False
         FakeBackend.fail_anonymous = False
+        gemini_models.clear_gemini_dynamic_model_cache()
+
+    def tearDown(self) -> None:
+        gemini_models.clear_gemini_dynamic_model_cache()
 
     def test_list_models_includes_gpt_and_grok_metadata_when_chatgpt_unavailable(self) -> None:
         with mock.patch.dict(sys.modules, {"services.openai_backend_api": None}):
@@ -90,6 +95,42 @@ class ProviderModelListTests(unittest.TestCase):
         for model_id in ["gpt-5-1", "gpt-5-2", "gpt-5-3", "gpt-5-3-mini", "gpt-5-mini"]:
             self.assertEqual(models[model_id]["provider"], "gpt")
             self.assertEqual(models[model_id]["owned_by"], "chatgpt")
+
+    def test_list_models_includes_dynamic_gemini_metadata(self) -> None:
+        with mock.patch.dict(sys.modules, {"services.openai_backend_api": None}), \
+             mock.patch("services.providers.gemini.client.fetch_authenticated_init_body", return_value="gemini-2.5-pro gemini-2.5-ultra"):
+            result = openai_v1_models.list_models()
+
+        models = {item["id"]: item for item in result["data"]}
+        self.assertEqual(models["gemini-2.5-ultra"]["provider"], "gemini")
+        self.assertEqual(models["gemini-2.5-ultra"]["owned_by"], "google")
+        self.assertEqual(models["gemini-2.5-pro"]["root"], "gemini-2.5-pro")
+
+    def test_dynamic_gemini_cache_does_not_store_empty_or_failed_discovery(self) -> None:
+        calls: list[str] = []
+
+        def empty_then_dynamic() -> str:
+            calls.append("fetch")
+            return "" if len(calls) == 1 else "gemini-2.5-ultra"
+
+        first = {spec.id for spec in gemini_models.gemini_model_specs(empty_then_dynamic, now=10)}
+        second = {spec.id for spec in gemini_models.gemini_model_specs(empty_then_dynamic, now=11)}
+
+        self.assertNotIn("gemini-2.5-ultra", first)
+        self.assertIn("gemini-2.5-ultra", second)
+        self.assertEqual(calls, ["fetch", "fetch"])
+
+        def failed_fetch() -> str:
+            calls.append("failed")
+            raise RuntimeError("boom")
+
+        gemini_models.clear_gemini_dynamic_model_cache()
+        fallback = {spec.id for spec in gemini_models.gemini_model_specs(failed_fetch, now=20)}
+        recovered = {spec.id for spec in gemini_models.gemini_model_specs(lambda: "gemini-2.5-later", now=21)}
+
+        self.assertIn("gemini-2.5-pro", fallback)
+        self.assertNotIn("gemini-2.5-later", fallback)
+        self.assertIn("gemini-2.5-later", recovered)
 
     def test_list_models_tries_gpt_account_token_before_anonymous(self) -> None:
         account_service = FakeAccountService("stored-token")
