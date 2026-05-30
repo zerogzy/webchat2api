@@ -76,6 +76,25 @@ class GeminiProviderTests(unittest.TestCase):
             "NID=nid; __Secure-1PSID=[redacted]; SNlM0e=[redacted]; __Secure-1PSIDTS=[redacted]",
         )
 
+    def test_merge_cookie_headers_deduplicates_and_redacts_debug_output(self) -> None:
+        merged = gemini.merge_cookie_headers(
+            "NID=old; __Secure-1PSID=psid; __Secure-1PSIDTS=old-ts",
+            "NID=new; SID=sid; __Secure-1PSIDTS=new-ts",
+        )
+
+        self.assertEqual(merged, "NID=new; __Secure-1PSID=psid; __Secure-1PSIDTS=new-ts; SID=sid")
+        self.assertEqual(
+            gemini.sanitize_cookie_header(merged),
+            "NID=new; __Secure-1PSID=[redacted]; __Secure-1PSIDTS=[redacted]; SID=sid",
+        )
+
+    def test_cookie_header_from_response_reads_set_cookie_headers(self) -> None:
+        class FakeResponse:
+            headers = {"Set-Cookie": "NID=nid; Path=/, __Secure-1PSIDTS=new-ts; Path=/; Secure"}
+            cookies = None
+
+        self.assertEqual(gemini.cookie_header_from_response(FakeResponse()), "NID=nid; __Secure-1PSIDTS=new-ts")
+
     def test_account_cookie_header_strips_session_token_fields(self) -> None:
         header = gemini.account_cookie_header({
             "access_token": "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts; SNlM0e=token; at=token",
@@ -272,6 +291,21 @@ class GeminiProviderTests(unittest.TestCase):
 
         self.assertEqual(gemini.extract_completion(parsed).content, "Gemini answer")
 
+    def test_extract_completion_exposes_stream_generate_metadata(self) -> None:
+        stream_payload = json.dumps([
+            "rpc-id",
+            "conversation-id",
+            "response-id",
+            None,
+            [["rc_abc123", [["Gemini response with metadata"]]]],
+        ])
+        parsed = [["wrb.fr", "assistant.lamda.BardFrontendService.StreamGenerate", stream_payload, None]]
+
+        completion = gemini.extract_completion(parsed)
+
+        self.assertEqual(completion.content, "Gemini response with metadata")
+        self.assertEqual(completion.metadata, {"cid": "conversation-id", "rid": "response-id", "rcid": "rc_abc123"})
+
     def test_classify_upstream_error_maps_auth_rate_limit_and_server_failures(self) -> None:
         auth = gemini.classify_upstream_error(403, "SNlM0e not found")
         stale = gemini.classify_upstream_error(500, "SNlM0e expired")
@@ -324,17 +358,29 @@ class GeminiProviderTests(unittest.TestCase):
         class FakeGetResponse:
             status_code = 200
             text = '<html><script nonce="boot-token"></script></html>'
+            headers = {"Set-Cookie": "INIT=init; Path=/"}
+            cookies = None
+
+        class FakeGoogleResponse:
+            status_code = 200
+            text = ""
+            headers = {"Set-Cookie": "NID=nid; Path=/"}
+            cookies = None
 
         class FakePostResponse:
             status_code = 200
             text = ")]}'\n\n[[\"content\", \"ok\"]]"
+            headers: dict[str, str] = {}
+            cookies = None
 
         class FakeSession:
             def __init__(self) -> None:
                 self.calls: list[dict[str, Any]] = []
 
-            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeGetResponse:
+            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeGetResponse | FakeGoogleResponse:
                 self.calls.append({"method": "GET", "url": url, "headers": headers, "timeout": timeout})
+                if url == "https://www.google.com/":
+                    return FakeGoogleResponse()
                 return FakeGetResponse()
 
             def post(self, url: str, headers: dict[str, str], data: dict[str, str], timeout: int) -> FakePostResponse:
@@ -347,26 +393,40 @@ class GeminiProviderTests(unittest.TestCase):
             parsed = client.generate({"prompt": "hello", "model": "gemini-2.5-pro"})
 
         self.assertEqual(gemini.extract_completion(parsed).content, "ok")
-        self.assertEqual([call["method"] for call in fake_session.calls], ["GET", "POST"])
-        get_call = fake_session.calls[0]
+        self.assertEqual([call["method"] for call in fake_session.calls], ["GET", "GET", "POST"])
+        google_call = fake_session.calls[0]
+        self.assertEqual(google_call["url"], "https://www.google.com/")
+        self.assertNotIn("cookie", google_call["headers"])
+        get_call = fake_session.calls[1]
         self.assertEqual(get_call["url"], "https://gemini.google.com/")
-        self.assertEqual(get_call["headers"]["cookie"], "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
+        self.assertEqual(get_call["headers"]["cookie"], "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts; NID=nid")
         self.assertEqual(get_call["headers"]["user-agent"], "Test-UA")
-        post_call = fake_session.calls[1]
+        post_call = fake_session.calls[2]
         self.assertEqual(
             post_call["url"],
             "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?at=boot-token",
         )
+        self.assertEqual(post_call["headers"]["cookie"], "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts; NID=nid; INIT=init")
         self.assertEqual(post_call["data"]["at"], "boot-token")
         self.assertEqual(post_call["headers"]["user-agent"], "Test-UA")
 
     def test_gemini_web_client_bootstrap_rejects_login_page(self) -> None:
+        class FakeGoogleResponse:
+            status_code = 200
+            text = ""
+            headers: dict[str, str] = {}
+            cookies = None
+
         class FakeGetResponse:
             status_code = 200
             text = '<html><a href="https://accounts.google.com/ServiceLogin">Sign in</a></html>'
+            headers: dict[str, str] = {}
+            cookies = None
 
         class FakeSession:
-            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeGetResponse:
+            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeGetResponse | FakeGoogleResponse:
+                if url == "https://www.google.com/":
+                    return FakeGoogleResponse()
                 return FakeGetResponse()
 
         with mock.patch("services.providers.gemini.client.create_session", return_value=FakeSession()):
@@ -376,6 +436,211 @@ class GeminiProviderTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 401)
         self.assertEqual(raised.exception.code, "gemini_auth_failed")
+
+    def test_rotate_psidts_cookie_posts_exact_payload_and_merges_new_cookie(self) -> None:
+        class FakeResponse:
+            status_code = 200
+            text = ""
+            headers = {"Set-Cookie": "__Secure-1PSIDTS=new-ts; Path=/; Secure, NID=nid; Path=/"}
+            cookies = None
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, Any]] = []
+
+            def post(self, url: str, headers: dict[str, str], data: str, timeout: int) -> FakeResponse:
+                self.calls.append({"url": url, "headers": headers, "data": data, "timeout": timeout})
+                return FakeResponse()
+
+        fake_session = FakeSession()
+        merged = gemini.rotate_psidts_cookie(fake_session, "__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts", "Test-UA")
+
+        self.assertEqual(merged, "__Secure-1PSID=psid; __Secure-1PSIDTS=new-ts; NID=nid")
+        call = fake_session.calls[0]
+        self.assertEqual(call["url"], "https://accounts.google.com/RotateCookies")
+        self.assertEqual(call["data"], '[000,"-0000000000000000000"]')
+        self.assertEqual(call["headers"]["cookie"], "__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts")
+        self.assertEqual(call["headers"]["user-agent"], "Test-UA")
+
+    def test_rotate_psidts_cookie_allows_200_without_new_cookie_when_existing_psidts_present(self) -> None:
+        class FakeResponse:
+            status_code = 200
+            text = ""
+            headers: dict[str, str] = {}
+            cookies = None
+
+        class FakeSession:
+            def post(self, url: str, headers: dict[str, str], data: str, timeout: int) -> FakeResponse:
+                return FakeResponse()
+
+        merged = gemini.rotate_psidts_cookie(FakeSession(), "__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts")
+
+        self.assertEqual(merged, "__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts")
+
+    def test_rotate_psidts_cookie_treats_forbidden_as_auth_failure(self) -> None:
+        class FakeResponse:
+            status_code = 403
+            text = "forbidden"
+            headers: dict[str, str] = {}
+            cookies = None
+
+        class FakeSession:
+            def post(self, url: str, headers: dict[str, str], data: str, timeout: int) -> FakeResponse:
+                return FakeResponse()
+
+        with self.assertRaises(gemini.GeminiWebError) as raised:
+            gemini.rotate_psidts_cookie(FakeSession(), "__Secure-1PSID=psid")
+
+        self.assertEqual(raised.exception.status_code, 401)
+        self.assertEqual(raised.exception.code, "gemini_auth_failed")
+
+    def test_gemini_web_client_retries_transient_server_and_empty_parse_responses(self) -> None:
+        class FakeResponse:
+            def __init__(self, status_code: int, text: str) -> None:
+                self.status_code = status_code
+                self.text = text
+                self.headers: dict[str, str] = {}
+                self.cookies = None
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, Any]] = []
+                self.responses = [
+                    FakeResponse(503, "unavailable"),
+                    FakeResponse(200, "   "),
+                    FakeResponse(200, ")]}'\n\n[[\"content\", \"ok after retry\"]]"),
+                ]
+
+            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeResponse:
+                raise AssertionError("explicit session token should not bootstrap")
+
+            def post(self, url: str, headers: dict[str, str], data: dict[str, str], timeout: int) -> FakeResponse:
+                self.calls.append({"url": url, "headers": headers, "data": data, "timeout": timeout})
+                return self.responses.pop(0)
+
+        fake_session = FakeSession()
+        with mock.patch("services.providers.gemini.client.create_session", return_value=fake_session), \
+             mock.patch("services.providers.gemini.client.time.sleep") as sleep:
+            client = gemini.GeminiWebClient("__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
+            parsed = client.generate({"prompt": "hello", "model": "gemini-2.5-pro", "session_token": "at-token"})
+
+        self.assertEqual(gemini.extract_completion(parsed).content, "ok after retry")
+        self.assertEqual(len(fake_session.calls), 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_gemini_web_client_does_not_retry_rate_limit(self) -> None:
+        class FakeResponse:
+            status_code = 429
+            text = "quota"
+            headers: dict[str, str] = {}
+            cookies = None
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def post(self, url: str, headers: dict[str, str], data: dict[str, str], timeout: int) -> FakeResponse:
+                self.calls += 1
+                return FakeResponse()
+
+        fake_session = FakeSession()
+        with mock.patch("services.providers.gemini.client.create_session", return_value=fake_session):
+            client = gemini.GeminiWebClient("__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
+            with self.assertRaises(gemini.GeminiWebError) as raised:
+                client.generate({"prompt": "hello", "model": "gemini-2.5-pro", "session_token": "at-token"})
+
+        self.assertEqual(raised.exception.code, "gemini_rate_limited")
+        self.assertEqual(fake_session.calls, 1)
+
+    def test_chat_completion_session_token_missing_does_not_mark_account_used_or_remove_token(self) -> None:
+        account_service = mock.Mock()
+        account_service.get_text_access_token.return_value = "gemini-token"
+        account_service.get_account.return_value = {
+            "access_token": "gemini-token",
+            "provider": "gemini",
+            "cookies": {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts"},
+        }
+        client = mock.Mock()
+        client.generate.side_effect = gemini.GeminiWebError(
+            "Gemini session token bootstrap failed",
+            status_code=401,
+            code="gemini_session_token_missing",
+        )
+        client_context = mock.Mock()
+        client_context.__enter__ = mock.Mock(return_value=client)
+        client_context.__exit__ = mock.Mock(return_value=None)
+
+        with mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
+             mock.patch("services.providers.gemini.client.GeminiWebClient", return_value=client_context):
+            with self.assertRaises(HTTPException) as raised:
+                gemini.chat_completion(
+                    {},
+                    resolve_model("gemini-2.5-pro"),
+                    [{"role": "user", "content": "Hello"}],
+                )
+
+        self.assertEqual(getattr(raised.exception, "status_code"), 401)
+        self.assertEqual(getattr(raised.exception, "detail")["code"], "gemini_session_token_missing")
+        account_service.mark_text_used.assert_not_called()
+        account_service.remove_invalid_token.assert_not_called()
+
+    def test_chat_completion_auth_failure_does_not_mark_account_used_on_first_failure(self) -> None:
+        account_service = mock.Mock()
+        account_service.get_text_access_token.return_value = "gemini-token"
+        account_service.get_account.return_value = {
+            "access_token": "gemini-token",
+            "provider": "gemini",
+            "cookies": {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts"},
+        }
+        client = mock.Mock()
+        client.generate.side_effect = gemini.GeminiWebError(
+            "Gemini upstream authentication failed",
+            status_code=401,
+            code="gemini_auth_failed",
+        )
+        client_context = mock.Mock()
+        client_context.__enter__ = mock.Mock(return_value=client)
+        client_context.__exit__ = mock.Mock(return_value=None)
+
+        with mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
+             mock.patch("services.providers.gemini.client.GeminiWebClient", return_value=client_context):
+            with self.assertRaises(HTTPException) as raised:
+                gemini.chat_completion(
+                    {},
+                    resolve_model("gemini-2.5-pro"),
+                    [{"role": "user", "content": "Hello"}],
+                )
+
+        self.assertEqual(getattr(raised.exception, "status_code"), 401)
+        self.assertEqual(getattr(raised.exception, "detail")["code"], "gemini_auth_failed")
+        account_service.mark_text_used.assert_not_called()
+        account_service.remove_invalid_token.assert_not_called()
+
+    def test_chat_completion_success_marks_account_used_once(self) -> None:
+        account_service = mock.Mock()
+        account_service.get_text_access_token.return_value = "gemini-token"
+        account_service.get_account.return_value = {
+            "access_token": "gemini-token",
+            "provider": "gemini",
+            "cookies": {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts"},
+        }
+        client = mock.Mock()
+        client.generate.return_value = [["content", "Gemini success"]]
+        client_context = mock.Mock()
+        client_context.__enter__ = mock.Mock(return_value=client)
+        client_context.__exit__ = mock.Mock(return_value=None)
+
+        with mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
+             mock.patch("services.providers.gemini.client.GeminiWebClient", return_value=client_context):
+            completion = gemini.chat_completion(
+                {},
+                resolve_model("gemini-2.5-pro"),
+                [{"role": "user", "content": "Hello"}],
+            )
+
+        self.assertEqual(completion.content, "Gemini success")
+        account_service.mark_text_used.assert_called_once_with("gemini-token")
+        account_service.remove_invalid_token.assert_not_called()
 
     def test_gemini_image_chat_request_is_rejected(self) -> None:
         with self.assertRaises(HTTPException) as raised:
