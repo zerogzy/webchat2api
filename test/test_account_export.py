@@ -132,6 +132,7 @@ class AccountExportTests(unittest.TestCase):
                         "access_token": access_token,
                         "id_token": id_token,
                         "refresh_token": "rt_test",
+                        "source_type": "codex",
                     }
                 ]
             )
