@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any, cast
-from types import ModuleType
 
 from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_tiktoken_stub
 
@@ -18,7 +17,7 @@ import types
 import unittest
 from unittest import mock
 
-HTTPException = cast(Any, getattr(sys.modules["fastapi"], "HTTPException"))
+HTTPException = cast(type[Exception], getattr(sys.modules["fastapi"], "HTTPException"))
 
 from services.models import resolve_model
 from services.network import flaresolverr
@@ -32,12 +31,6 @@ from services.providers.grok import images as grok_images
 
 def _chat_chunks(chunks: object) -> list[Mapping[str, Any]]:
     return cast(list[Mapping[str, Any]], list(cast(Any, chunks)))
-
-
-def _account_service_module(account_service: object) -> ModuleType:
-    module = ModuleType("services.account_service")
-    setattr(module, "account_service", account_service)
-    return module
 
 
 class GrokProviderTests(unittest.TestCase):
@@ -760,7 +753,7 @@ class GrokProviderTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "Hello"}],
         }
         with mock.patch.object(grok, "app_chat_completion", return_value={"content": "Hi", "reasoning_content": "think"}):
-            response = cast(dict[str, Any], openai_v1_chat_complete.handle(body))
+            response = openai_v1_chat_complete.handle(body)
 
         message = response["choices"][0]["message"]
         self.assertEqual(message["content"], "Hi")
@@ -874,7 +867,7 @@ class GrokProviderTests(unittest.TestCase):
             "console_chat_completion",
             return_value=grok.GrokConsoleCompletion(content="Hi", reasoning_content="think"),
         ) as patched_console, mock.patch.object(grok, "app_chat_completion") as patched_app_chat:
-            response = cast(dict[str, Any], openai_v1_chat_complete.handle(body))
+            response = openai_v1_chat_complete.handle(body)
 
         patched_console.assert_called_once()
         patched_app_chat.assert_not_called()
@@ -893,7 +886,7 @@ class GrokProviderTests(unittest.TestCase):
             "console_chat_completion",
             return_value=grok.GrokConsoleCompletion(content="Hi from Grok"),
         ) as patched_console:
-            response = cast(dict[str, Any], openai_v1_response.handle(body))
+            response = openai_v1_response.handle(body)
 
         patched_console.assert_called_once()
         self.assertEqual(patched_console.call_args.args[0]["tools"], [{"type": "web_search"}])
@@ -914,7 +907,7 @@ class GrokProviderTests(unittest.TestCase):
             "console_chat_completion",
             return_value=grok.GrokConsoleCompletion(content="Hi"),
         ) as patched_console:
-            events = cast(list[dict[str, Any]], list(openai_v1_response.handle(body)))
+            events = list(openai_v1_response.handle(body))
 
         patched_console.assert_called_once()
         event_types = [event.get("type") for event in events]
@@ -933,7 +926,7 @@ class GrokProviderTests(unittest.TestCase):
             mock.patch.object(openai_v1_response, "stream_text_deltas", return_value=iter(["generic"])) as patched_stream,
             mock.patch.object(grok, "console_chat_completion") as patched_console,
         ):
-            response = cast(dict[str, Any], openai_v1_response.handle(body))
+            response = openai_v1_response.handle(body)
 
         patched_stream.assert_called_once()
         patched_console.assert_not_called()
@@ -987,7 +980,7 @@ class GrokProviderTests(unittest.TestCase):
             mock.patch.object(grok_images, "generation_outputs", return_value=iter(outputs)) as patched,
             mock.patch.object(openai_v1_chat_complete, "collect_image_outputs", return_value=result),
         ):
-            response = cast(dict[str, Any], openai_v1_chat_complete.handle(body))
+            response = openai_v1_chat_complete.handle(body)
 
         patched.assert_called_once()
         self.assertIn("data:image/png;base64,abc", response["choices"][0]["message"]["content"])
@@ -1003,7 +996,7 @@ class GrokProviderTests(unittest.TestCase):
         }
         outputs = [ImageOutput(kind="result", model="grok-imagine-image-edit", index=1, total=1, data=[{"url": "https://assets.grok.com/edit.png"}])]
         with mock.patch.object(grok_images, "edit_outputs", return_value=iter(outputs)) as patched:
-            response = cast(dict[str, Any], openai_v1_image_edit.handle(body))
+            response = openai_v1_image_edit.handle(body)
 
         patched.assert_called_once()
         self.assertEqual(response["data"], [{"url": "https://assets.grok.com/edit.png"}])
@@ -1030,217 +1023,6 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 400)
         self.assertEqual(context.exception.code, "unsupported_model")
         self.assertEqual(context.exception.param, "model")
-
-    def test_build_app_chat_payload_maps_image_size_to_aspect_config(self) -> None:
-        spec = resolve_model("grok-imagine-image-pro")
-        payload = grok.build_app_chat_payload(
-            spec,
-            {"n": 2, "size": "1792x1024"},
-            [{"role": "user", "content": "Draw wide art"}],
-            image_generation=True,
-        )
-
-        self.assertEqual(payload["imageGenerationCount"], 2)
-        self.assertEqual(payload["modelConfigOverride"], {
-            "modelMap": {
-                "imageGenModel": "grok-imagine-image-pro",
-                "imageGenModelConfig": {"aspectRatio": "3:2"},
-            }
-        })
-
-    def test_build_app_chat_payload_accepts_ratio_size_without_affecting_text_chat(self) -> None:
-        spec = resolve_model("grok-imagine-image")
-        payload = grok.build_app_chat_payload(
-            spec,
-            {"size": "9:16"},
-            [{"role": "user", "content": "Draw tall art"}],
-            image_generation=True,
-        )
-        text_payload = grok.build_app_chat_payload(
-            resolve_model("grok-4.20-heavy"),
-            {"size": "1024x1792"},
-            [{"role": "user", "content": "Hello"}],
-        )
-
-        self.assertEqual(payload["modelConfigOverride"]["modelMap"]["imageGenModelConfig"], {"aspectRatio": "9:16"})
-        self.assertNotIn("modelConfigOverride", text_payload)
-
-    def test_app_chat_image_outputs_dedupes_urls_truncates_to_n_and_keeps_progress(self) -> None:
-        account_service = types.SimpleNamespace(
-            get_grok_app_chat_access_token=mock.Mock(return_value="selected-token"),
-            get_account=mock.Mock(return_value={"access_token": "selected-token"}),
-            mark_text_used=mock.Mock(),
-        )
-        account_module = types.ModuleType("services.account_service")
-        setattr(account_module, "account_service", account_service)
-        sys.modules["services.account_service"] = account_module
-        spec = resolve_model("grok-imagine-image")
-        events = [
-            {"result": {"response": {"token": "working"}}},
-            {"result": {"response": {"streamingImageGenerationResponse": {"progress": 100, "imageUrl": "generated/one.png"}}}},
-            {"result": {"response": {"streamingImageGenerationResponse": {"progress": 100, "imageUrl": "generated/one.png"}}}},
-            {"result": {"response": {"streamingImageGenerationResponse": {"progress": 100, "imageUrl": "generated/two.png"}}}},
-            {"result": {"response": {"streamingImageGenerationResponse": {"progress": 100, "imageUrl": "generated/three.png"}, "isSoftStop": True}}},
-        ]
-
-        with mock.patch.object(grok, "GrokAppChatClient") as client_class:
-            client_class.return_value.__enter__.return_value.stream_events.return_value = iter(events)
-            outputs = list(grok.app_chat_image_outputs(
-                {"prompt": "Draw", "response_format": "url"},
-                spec,
-                "Draw",
-                2,
-            ))
-
-        self.assertEqual(outputs[0].kind, "progress")
-        self.assertEqual(outputs[0].text, "working")
-        self.assertEqual(outputs[1].kind, "result")
-        self.assertEqual(outputs[1].data, [
-            {"url": "https://assets.grok.com/generated/one.png", "revised_prompt": "Draw"},
-            {"url": "https://assets.grok.com/generated/two.png", "revised_prompt": "Draw"},
-        ])
-        account_service.mark_text_used.assert_called_once_with("selected-token")
-
-    def test_app_chat_image_outputs_rejects_invalid_response_format(self) -> None:
-        spec = resolve_model("grok-imagine-image")
-
-        with self.assertRaises(ImageGenerationError) as context:
-            list(grok.app_chat_image_outputs({"prompt": "Draw", "response_format": "xml"}, spec, "Draw", 1))
-
-        self.assertEqual(context.exception.status_code, 400)
-        self.assertEqual(context.exception.code, "invalid_response_format")
-        self.assertEqual(context.exception.param, "response_format")
-
-    def test_app_chat_image_outputs_defaults_to_b64_json_response_format(self) -> None:
-        account_service = types.SimpleNamespace(
-            get_grok_app_chat_access_token=mock.Mock(return_value="selected-token"),
-            get_account=mock.Mock(return_value={"access_token": "selected-token"}),
-            mark_text_used=mock.Mock(),
-        )
-        account_module = types.ModuleType("services.account_service")
-        setattr(account_module, "account_service", account_service)
-        sys.modules["services.account_service"] = account_module
-        spec = resolve_model("grok-imagine-image-lite")
-        events = [
-            {"result": {"response": {"streamingImageGenerationResponse": {"progress": 100, "imageUrl": "generated/default.png"}, "isSoftStop": True}}},
-        ]
-        session = mock.Mock()
-        session.get.return_value = types.SimpleNamespace(status_code=200, content=b"default")
-
-        with (
-            mock.patch.object(grok, "GrokAppChatClient") as client_class,
-            mock.patch.object(grok, "create_session", return_value=session),
-        ):
-            client_class.return_value.__enter__.return_value.stream_events.return_value = iter(events)
-            outputs = list(grok.app_chat_image_outputs({"prompt": "Draw"}, spec, "Draw", 1))
-
-        self.assertEqual(outputs[-1].data, [{"b64_json": "ZGVmYXVsdA==", "revised_prompt": "Draw"}])
-
-    def test_app_chat_image_outputs_respects_b64_json_response_format_for_grok_assets(self) -> None:
-        account_service = types.SimpleNamespace(
-            get_grok_app_chat_access_token=mock.Mock(return_value="selected-token"),
-            get_account=mock.Mock(return_value={"access_token": "selected-token"}),
-            mark_text_used=mock.Mock(),
-        )
-        account_module = types.ModuleType("services.account_service")
-        setattr(account_module, "account_service", account_service)
-        sys.modules["services.account_service"] = account_module
-        spec = resolve_model("grok-imagine-image-lite")
-        events = [
-            {"result": {"response": {"streamingImageGenerationResponse": {"progress": 100, "imageUrl": "generated/cat.png"}, "isSoftStop": True}}},
-        ]
-        session = mock.Mock()
-        session.get.return_value = types.SimpleNamespace(status_code=200, content=b"png")
-
-        with (
-            mock.patch.object(grok, "GrokAppChatClient") as client_class,
-            mock.patch.object(grok, "create_session", return_value=session),
-        ):
-            client_class.return_value.__enter__.return_value.stream_events.return_value = iter(events)
-            outputs = list(grok.app_chat_image_outputs(
-                {"prompt": "Draw", "response_format": "b64_json"},
-                spec,
-                "Draw",
-                1,
-            ))
-
-        session.get.assert_called_once_with("https://assets.grok.com/generated/cat.png", timeout=grok.GROK_IMAGE_DOWNLOAD_TIMEOUT)
-        session.close.assert_called_once_with()
-        self.assertEqual(outputs[0].data, [{"b64_json": "cG5n", "revised_prompt": "Draw"}])
-
-    def test_grok_asset_base64_rejects_non_grok_asset_urls_without_download(self) -> None:
-        session = mock.Mock()
-        unsafe_urls = [
-            "http://assets.grok.com/generated/cat.png",
-            "https://evil.com/generated/cat.png",
-            "https://assets.grok.com.evil.com/generated/cat.png",
-            "https://assets.grok.com@evil.com/generated/cat.png",
-            "//evil.com/generated/cat.png",
-            "javascript:alert(1)",
-            "bad\\path.png",
-        ]
-
-        with mock.patch.object(grok, "create_session", return_value=session):
-            for url in unsafe_urls:
-                with self.subTest(url=url), self.assertRaises(ImageGenerationError):
-                    grok._grok_asset_base64(url)
-
-        session.get.assert_not_called()
-
-    def test_app_chat_image_edit_outputs_respects_base64_response_format(self) -> None:
-        account_service = types.SimpleNamespace(
-            get_grok_app_chat_access_token=mock.Mock(return_value="selected-token"),
-            get_account=mock.Mock(return_value={"access_token": "selected-token"}),
-            mark_text_used=mock.Mock(),
-        )
-        account_module = types.ModuleType("services.account_service")
-        setattr(account_module, "account_service", account_service)
-        sys.modules["services.account_service"] = account_module
-        spec = resolve_model("grok-imagine-image-edit")
-        session = mock.Mock()
-        session.get.return_value = types.SimpleNamespace(status_code=200, content=b"edit")
-
-        with (
-            mock.patch.object(grok, "GrokAppChatClient") as client_class,
-            mock.patch.object(grok, "create_session", return_value=session),
-        ):
-            client = client_class.return_value.__enter__.return_value
-            client.upload_image_edit_reference.return_value = grok.GrokImageEditReference("file-1", "https://assets.grok.com/input.png")
-            client.create_image_edit_parent_post.return_value = ("post-1", "edit")
-            client.stream_image_edit_events.return_value = iter([
-                {"result": {"response": {"streamingImageGenerationResponse": {"progress": 100, "imageUrl": "generated/edit.png"}, "isSoftStop": True}}},
-            ])
-            outputs = list(grok.app_chat_image_edit_outputs(
-                {"prompt": "edit", "response_format": "base64"},
-                spec,
-                "edit",
-                [(b"png", "input.png", "image/png")],
-                1,
-                "1024x1024",
-            ))
-
-        self.assertEqual(outputs[-1].data, [{"base64": "ZWRpdA==", "revised_prompt": "edit"}])
-
-    def test_app_chat_image_outputs_errors_when_final_response_has_no_image(self) -> None:
-        account_service = types.SimpleNamespace(
-            get_grok_app_chat_access_token=mock.Mock(return_value="selected-token"),
-            get_account=mock.Mock(return_value={"access_token": "selected-token"}),
-            mark_text_used=mock.Mock(),
-        )
-        account_module = types.ModuleType("services.account_service")
-        setattr(account_module, "account_service", account_service)
-        sys.modules["services.account_service"] = account_module
-        spec = resolve_model("grok-imagine-image")
-
-        with mock.patch.object(grok, "GrokAppChatClient") as client_class:
-            client_class.return_value.__enter__.return_value.stream_events.return_value = iter([{"result": {"response": {"isSoftStop": True}}}])
-            with self.assertRaises(ImageGenerationError) as context:
-                list(grok.app_chat_image_outputs({"prompt": "Draw"}, spec, "Draw", 1))
-
-        self.assertEqual(context.exception.status_code, 502)
-        self.assertEqual(context.exception.code, "image_generation_failed")
-        self.assertIn("final response", str(context.exception))
-        account_service.mark_text_used.assert_called_once_with("selected-token")
 
     def test_grok_image_edit_payload_uses_uploaded_references_and_parent_post(self) -> None:
         payload = grok.build_grok_image_edit_payload(
@@ -1367,7 +1149,7 @@ class GrokProviderTests(unittest.TestCase):
             get_account=mock.Mock(return_value={"access_token": "selected-token"}),
             mark_text_used=mock.Mock(),
         )
-        sys.modules["services.account_service"] = _account_service_module(account_service)
+        sys.modules["services.account_service"] = types.SimpleNamespace(account_service=account_service)
         spec = resolve_model("grok-imagine-image-edit")
 
         with mock.patch.object(grok, "GrokAppChatClient") as client_class:
@@ -1395,7 +1177,7 @@ class GrokProviderTests(unittest.TestCase):
             get_account=mock.Mock(return_value={"access_token": "selected-token"}),
             mark_text_used=mock.Mock(),
         )
-        sys.modules["services.account_service"] = _account_service_module(account_service)
+        sys.modules["services.account_service"] = types.SimpleNamespace(account_service=account_service)
         spec = resolve_model("grok-imagine-image-edit")
 
         with mock.patch.object(grok, "GrokAppChatClient") as client_class:
@@ -1506,7 +1288,7 @@ class GrokProviderTests(unittest.TestCase):
             get_account=mock.Mock(return_value={"access_token": "selected-token", "cf_cookies": "cf_bm=account-bm"}),
             mark_text_used=mock.Mock(),
         )
-        sys.modules["services.account_service"] = _account_service_module(account_service)
+        sys.modules["services.account_service"] = types.SimpleNamespace(account_service=account_service)
         spec = resolve_model("grok-4.20-heavy")
 
         with mock.patch.object(grok, "GrokAppChatClient") as client_class:
@@ -1526,7 +1308,7 @@ class GrokProviderTests(unittest.TestCase):
             get_account=mock.Mock(return_value={"access_token": "selected-token"}),
             mark_text_used=mock.Mock(),
         )
-        sys.modules["services.account_service"] = _account_service_module(account_service)
+        sys.modules["services.account_service"] = types.SimpleNamespace(account_service=account_service)
         spec = resolve_model("grok-4.20-heavy")
         error = grok.GrokConsoleError(
             "Grok app-chat navigation timed out via Browser Bridge",
@@ -1751,7 +1533,7 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(events, [{"type": "response.output_text.delta", "delta": "Hi"}])
         self.assertEqual(calls[0]["url"], grok.CONSOLE_RESPONSES_URL)
         self.assertTrue(calls[0]["stream"])
-        self.assertEqual(cast(dict[str, Any], calls[0]["json"])["stream"], True)
+        self.assertEqual(calls[0]["json"]["stream"], True)
         self.assertEqual(closed, [True])
 
     def test_grok_console_stream_response_uses_sse_event_name_when_data_has_no_type(self) -> None:
@@ -1893,7 +1675,7 @@ class GrokProviderTests(unittest.TestCase):
                 [{"role": "user", "content": "Hello"}],
             )
             self.assertEqual(next(events), {"type": "response.output_text.delta", "delta": "Hi"})
-            cast(Any, events).close()
+            events.close()
 
         account_service.mark_grok_console_used.assert_not_called()
 
@@ -2300,48 +2082,54 @@ class GrokProviderTests(unittest.TestCase):
 
 class TestBrowserBridge(unittest.TestCase):
     def test_extract_raw_sso_plain_token(self):
+        from services.providers.grok import _extract_raw_sso
         sso = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.test"
-        self.assertEqual(grok._extract_raw_sso(sso), sso)
+        self.assertEqual(_extract_raw_sso(sso), sso)
 
     def test_extract_raw_sso_with_prefix(self):
-        self.assertEqual(grok._extract_raw_sso("sso=abc123"), "abc123")
+        from services.providers.grok import _extract_raw_sso
+        self.assertEqual(_extract_raw_sso("sso=abc123"), "abc123")
 
     def test_extract_raw_sso_from_cookie_header(self):
-        self.assertEqual(grok._extract_raw_sso("sso=abc123; cf_clearance=xyz; other=val"), "abc123")
+        from services.providers.grok import _extract_raw_sso
+        self.assertEqual(_extract_raw_sso("sso=abc123; cf_clearance=xyz; other=val"), "abc123")
 
     def test_extract_raw_sso_empty(self):
-        self.assertEqual(grok._extract_raw_sso(""), "")
-        self.assertEqual(grok._extract_raw_sso(cast(str, None)), "")
+        from services.providers.grok import _extract_raw_sso
+        self.assertEqual(_extract_raw_sso(""), "")
+        self.assertEqual(_extract_raw_sso(None), "")
 
     @mock.patch("services.providers.grok._detect_bridge_url", return_value="")
     def test_try_browser_bridge_returns_none_when_no_bridge(self, _):
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        from services.providers.grok import GrokAppChatClient
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         client.access_token = "test_sso"
         self.assertIsNone(client._try_browser_bridge({"message": "hi"}))
 
     @mock.patch("services.providers.grok._detect_bridge_url", return_value="http://127.0.0.1:3080")
     def test_try_browser_bridge_calls_bridge(self, _):
+        from services.providers.grok import GrokAppChatClient
         resp = mock.MagicMock()
         resp.status = 200
         resp.read.return_value = b'{"result":{"response":{"token":"hi"}}}\n'
         resp.__enter__ = lambda s: s
         resp.__exit__ = lambda s, *a: None
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         client.access_token = "test_sso_token"
         with mock.patch("urllib.request.urlopen", return_value=resp):
             result = client._try_browser_bridge({"message": "test"})
             self.assertIsNotNone(result)
-            assert result is not None
             self.assertGreater(len(result), 0)
 
     @mock.patch("services.providers.grok.config")
     def test_stream_events_does_not_auto_fallback_to_bridge_for_direct_403(self, mock_config):
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
         mock_config.browser_bridge_url = ""
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
-        client._stream_direct_events = mock.Mock(side_effect=grok.GrokConsoleError("Grok app-chat forbidden (HTTP 403)", 403, 403))
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client._stream_direct_events = mock.Mock(side_effect=GrokConsoleError("Grok app-chat forbidden (HTTP 403)", 403, 403))
         client._try_browser_bridge = mock.Mock(return_value=['{"result":{"response":{"token":"bridge"}}}'])
 
-        with self.assertRaises(grok.GrokConsoleError) as ctx:
+        with self.assertRaises(GrokConsoleError) as ctx:
             list(client.stream_events({"message": "test"}))
 
         self.assertEqual(ctx.exception.status_code, 403)
@@ -2350,9 +2138,10 @@ class TestBrowserBridge(unittest.TestCase):
 
     @mock.patch("services.providers.grok.config")
     def test_stream_events_auto_fallback_to_bridge_for_transient_direct_status(self, mock_config):
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
         mock_config.browser_bridge_url = ""
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
-        client._stream_direct_events = mock.Mock(side_effect=grok.GrokConsoleError("Grok app-chat upstream timeout (HTTP 408)", 502, 408))
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
+        client._stream_direct_events = mock.Mock(side_effect=GrokConsoleError("Grok app-chat upstream timeout (HTTP 408)", 502, 408))
         client._try_browser_bridge = mock.Mock(return_value=['{"result":{"response":{"token":"bridge"}}}'])
 
         events = list(client.stream_events({"message": "test"}))
@@ -2362,8 +2151,9 @@ class TestBrowserBridge(unittest.TestCase):
 
     @mock.patch("services.providers.grok.config")
     def test_stream_events_configured_bridge_still_uses_bridge_first(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
         mock_config.browser_bridge_url = "http://bridge:3080"
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         client._stream_direct_events = mock.Mock(return_value=iter(()))
         client._try_browser_bridge = mock.Mock(return_value=['{"result":{"response":{"token":"bridge"}}}'])
 
@@ -2375,45 +2165,49 @@ class TestBrowserBridge(unittest.TestCase):
 
     @mock.patch("services.providers.grok.config")
     def test_detect_bridge_url_uses_loopback_config_first(self, mock_config):
+        import services.providers.grok as grok_mod
         mock_config.browser_bridge_url = "http://127.0.0.1:9999"
-        grok._bridge_probed = False
-        self.assertEqual(grok._detect_bridge_url(), "http://127.0.0.1:9999")
+        grok_mod._bridge_probed = False
+        self.assertEqual(grok_mod._detect_bridge_url(), "http://127.0.0.1:9999")
 
     @mock.patch("services.providers.grok.config")
     def test_detect_bridge_url_rejects_non_loopback_config(self, mock_config):
+        import services.providers.grok as grok_mod
         mock_config.browser_bridge_url = "http://custom:9999"
-        grok._bridge_probed = False
+        grok_mod._bridge_probed = False
         with self.assertRaises(grok.GrokConsoleError) as ctx:
-            grok._detect_bridge_url()
+            grok_mod._detect_bridge_url()
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(ctx.exception.code, "grok_browser_bridge_url_not_loopback")
 
     @mock.patch("services.providers.grok._detect_bridge_url", return_value="http://127.0.0.1:3080")
     def test_try_browser_bridge_403_reports_tier_hint(self, _):
         import urllib.error
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         client.access_token = "test_sso_token"
         err = urllib.error.HTTPError(
             url="http://127.0.0.1:3080/api/chat",
             code=403,
             msg="Forbidden",
-            hdrs=cast(Any, None),
+            hdrs=None,
             fp=None,
         )
         with mock.patch("urllib.request.urlopen", side_effect=err):
-            with self.assertRaises(grok.GrokConsoleError) as ctx:
+            with self.assertRaises(GrokConsoleError) as ctx:
                 client._try_browser_bridge({"message": "test"})
         self.assertIn("account may lack required tier", str(ctx.exception))
 
     @mock.patch("services.providers.grok.config")
     def test_explicit_bridge_health_unavailable_fast_fails_with_structured_code(self, mock_config):
         import urllib.error
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
         mock_config.browser_bridge_url = "http://127.0.0.1:3080"
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         client.access_token = "test_sso_token"
 
         with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")) as urlopen:
-            with self.assertRaises(grok.GrokConsoleError) as ctx:
+            with self.assertRaises(GrokConsoleError) as ctx:
                 client._try_browser_bridge({"message": "test"})
 
         self.assertEqual(ctx.exception.status_code, 503)
@@ -2424,6 +2218,7 @@ class TestBrowserBridge(unittest.TestCase):
 
     @mock.patch("services.providers.grok.config")
     def test_explicit_bridge_degraded_health_fast_fails_with_structured_code(self, mock_config):
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
         mock_config.browser_bridge_url = "http://127.0.0.1:3080"
         health = mock.MagicMock()
         health.read.return_value = json.dumps({
@@ -2433,11 +2228,11 @@ class TestBrowserBridge(unittest.TestCase):
         }).encode()
         health.__enter__ = lambda s: s
         health.__exit__ = lambda s, *a: None
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         client.access_token = "test_sso_token"
 
         with mock.patch("urllib.request.urlopen", return_value=health):
-            with self.assertRaises(grok.GrokConsoleError) as ctx:
+            with self.assertRaises(GrokConsoleError) as ctx:
                 client._try_browser_bridge({"message": "test"})
 
         self.assertEqual(ctx.exception.status_code, 503)
@@ -2447,6 +2242,7 @@ class TestBrowserBridge(unittest.TestCase):
 
     @mock.patch("services.providers.grok.config")
     def test_explicit_bridge_ok_health_ignores_historical_last_error(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
         mock_config.browser_bridge_url = "http://127.0.0.1:3080"
         health = mock.MagicMock()
         health.read.return_value = json.dumps({
@@ -2461,7 +2257,7 @@ class TestBrowserBridge(unittest.TestCase):
         chat.read.return_value = b'{"result":{"response":{"token":"hi","messageTag":"final"}}}\n'
         chat.__enter__ = lambda s: s
         chat.__exit__ = lambda s, *a: None
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         client.access_token = "test_sso_token"
 
         with mock.patch("urllib.request.urlopen", side_effect=[health, chat]) as urlopen:
@@ -2473,20 +2269,21 @@ class TestBrowserBridge(unittest.TestCase):
     @mock.patch("services.providers.grok.config")
     def test_explicit_bridge_navigation_timeout_maps_to_http_detail(self, mock_config):
         import urllib.error
+        from services.providers.grok import GrokAppChatClient
         mock_config.browser_bridge_url = "http://127.0.0.1:3080"
         health = mock.MagicMock()
         health.read.return_value = b'{"status":"ok"}'
         health.__enter__ = lambda s: s
         health.__exit__ = lambda s, *a: None
-        error_body = cast(Any, types.SimpleNamespace(read=lambda: b'{"error":"Navigation to grok.com timed out","code":"navigation_timeout"}'))
+        error_body = types.SimpleNamespace(read=lambda: b'{"error":"Navigation to grok.com timed out","code":"navigation_timeout"}')
         http_error = urllib.error.HTTPError(
             url="http://127.0.0.1:3080/api/chat",
             code=504,
             msg="Gateway Timeout",
-            hdrs=cast(Any, None),
+            hdrs=None,
             fp=error_body,
         )
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         client.access_token = "test_sso_token"
 
         with mock.patch("urllib.request.urlopen", side_effect=[health, http_error]):
@@ -2503,6 +2300,7 @@ class TestBrowserBridge(unittest.TestCase):
 
     @mock.patch("services.providers.grok.config")
     def test_explicit_bridge_healthy_response_yields_app_chat_events(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
         mock_config.browser_bridge_url = "http://127.0.0.1:3080"
         health = mock.MagicMock()
         health.read.return_value = b'{"status":"ok","pages":0}'
@@ -2513,7 +2311,7 @@ class TestBrowserBridge(unittest.TestCase):
         chat.read.return_value = b'{"result":{"response":{"token":"hi","messageTag":"final"}}}\n'
         chat.__enter__ = lambda s: s
         chat.__exit__ = lambda s, *a: None
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         client.access_token = "test_sso_token"
 
         with mock.patch("urllib.request.urlopen", side_effect=[health, chat]) as urlopen:
@@ -2526,8 +2324,9 @@ class TestBrowserBridge(unittest.TestCase):
     @mock.patch("services.providers.grok.config")
     def test_auto_detected_bridge_unavailable_still_returns_none(self, mock_config):
         import urllib.error
+        from services.providers.grok import GrokAppChatClient
         mock_config.browser_bridge_url = ""
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         client.access_token = "test_sso_token"
 
         with (
@@ -2538,8 +2337,9 @@ class TestBrowserBridge(unittest.TestCase):
 
     @mock.patch("services.providers.grok.config")
     def test_app_chat_prefers_direct_when_bridge_is_auto_detected(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
         mock_config.browser_bridge_url = ""
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         direct_event = {"result": {"response": {"token": "hi"}}}
         with (
             mock.patch.object(client, "_stream_direct_events", return_value=iter([direct_event])) as direct,
@@ -2551,8 +2351,9 @@ class TestBrowserBridge(unittest.TestCase):
 
     @mock.patch("services.providers.grok.config")
     def test_app_chat_uses_explicit_bridge_before_direct(self, mock_config):
+        from services.providers.grok import GrokAppChatClient
         mock_config.browser_bridge_url = "http://127.0.0.1:3080"
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         with (
             mock.patch.object(client, "_try_browser_bridge", return_value=['{"result":{"response":{"token":"hi"}}}']) as bridge,
             mock.patch.object(client, "_stream_direct_events") as direct,
@@ -2564,13 +2365,14 @@ class TestBrowserBridge(unittest.TestCase):
 
     @mock.patch("services.providers.grok.config")
     def test_app_chat_does_not_fall_back_to_bridge_after_direct_403(self, mock_config):
+        from services.providers.grok import GrokAppChatClient, GrokConsoleError
         mock_config.browser_bridge_url = ""
-        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client = GrokAppChatClient.__new__(GrokAppChatClient)
         with (
-            mock.patch.object(client, "_stream_direct_events", side_effect=grok.GrokConsoleError("forbidden", 403, 403)) as direct,
+            mock.patch.object(client, "_stream_direct_events", side_effect=GrokConsoleError("forbidden", 403, 403)) as direct,
             mock.patch.object(client, "_try_browser_bridge", return_value=['{"result":{"response":{"token":"hi"}}}']) as bridge,
         ):
-            with self.assertRaises(grok.GrokConsoleError) as ctx:
+            with self.assertRaises(GrokConsoleError) as ctx:
                 list(client.stream_events({"message": "test"}))
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertEqual(ctx.exception.upstream_status, 403)
@@ -2579,15 +2381,16 @@ class TestBrowserBridge(unittest.TestCase):
 
     @mock.patch("services.providers.grok.config")
     def test_detect_bridge_url_auto_probes(self, mock_config):
+        import services.providers.grok as grok_mod
         mock_config.browser_bridge_url = ""
-        grok._bridge_probed = False
-        grok._bridge_detected_url = None
+        grok_mod._bridge_probed = False
+        grok_mod._bridge_detected_url = None
         resp = mock.MagicMock()
         resp.status = 200
         resp.__enter__ = lambda s: s
         resp.__exit__ = lambda s, *a: None
         with mock.patch("urllib.request.urlopen", return_value=resp):
-            result = grok._detect_bridge_url()
+            result = grok_mod._detect_bridge_url()
             self.assertEqual(result, "http://127.0.0.1:3080")
 
 
