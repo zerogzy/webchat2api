@@ -107,7 +107,19 @@ class OpenAICompleteProtocolTests(unittest.TestCase):
         self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
         self.assertTrue(all(chunk["object"] == "text_completion.chunk" for chunk in chunks))
 
-    def test_complete_rejects_non_gpt_model(self) -> None:
+    def test_v1_completions_route_uses_legacy_completion_handler(self) -> None:
+        client = _client()
+        with (
+            mock.patch.object(ai_api.LoggedCall, "log"),
+            mock.patch.object(openai_v1_complete, "handle", return_value={"object": "text_completion", "choices": []}) as handle,
+        ):
+            response = client.post("/v1/completions", headers=AUTH_HEADERS, json={"model": "gpt-4o", "prompt": "Say hi"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        handle.assert_called_once()
+        self.assertEqual(handle.call_args.args[0]["prompt"], "Say hi")
+
+    def test_v1_complete_alias_remains_supported(self) -> None:
         with self.assertRaises(HTTPException) as caught:
             openai_v1_complete.handle({"model": "gemini-2.5-pro", "prompt": "Say hi"})
 
