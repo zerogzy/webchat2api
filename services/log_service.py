@@ -181,7 +181,7 @@ class LoggedCall:
     request_text: str = ""
 
     async def run(self, handler, *args, sse: str = "openai"):
-        from services.protocol.conversation import ImageGenerationError
+        from services.providers.base import ImageGenerationError
 
         try:
             result = await run_in_threadpool(handler, *args)

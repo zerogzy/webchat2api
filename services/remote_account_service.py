@@ -13,7 +13,8 @@ from services.network.client import create_session
 
 from services.account_service import account_service as default_account_service
 from services.config import DATA_DIR
-from services.models import GPT_PROVIDER, normalize_provider
+from services.providers.base import GPT_PROVIDER
+from services.providers.registry import normalize_provider
 
 
 REMOTE_ACCOUNT_CONFIG_FILE = DATA_DIR / "remote_account_sources.json"
@@ -66,10 +67,12 @@ def _normalize_provider_default(value: object) -> str:
 
 
 def _normalize_interval(value: object) -> int | None:
-    if value in {None, ""}:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
         return None
     try:
-        interval = int(value)
+        interval = int(str(value))
     except (TypeError, ValueError) as exc:
         raise ValueError("interval_seconds must be an integer") from exc
     if interval <= 0:
@@ -83,7 +86,8 @@ def _normalize_import_job(raw: object, *, fail_unfinished: bool) -> dict | None:
     status = _clean(raw.get("status")) or "failed"
     if fail_unfinished and status in {"pending", "running"}:
         status = "failed"
-    errors = raw.get("errors") if isinstance(raw.get("errors"), list) else []
+    errors_value = raw.get("errors")
+    errors = errors_value if isinstance(errors_value, list) else []
     return {
         "job_id": _clean(raw.get("job_id")) or uuid.uuid4().hex,
         "status": status,

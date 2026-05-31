@@ -19,7 +19,8 @@ from api.support import (
     sanitize_sub2api_servers,
 )
 from services.account_service import account_service
-from services.models import GROK_PROVIDER, normalize_account_provider, normalize_provider
+from services.providers.base import GROK_PROVIDER
+from services.providers.registry import normalize_account_provider, normalize_provider
 from services.providers.registry import account_strategy
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.remote_account_service import REMOTE_ACCOUNT_SYNC_FAILED, remote_account_config, remote_account_import_service

@@ -21,7 +21,7 @@ from services.network.client import create_session
 from services.network.flaresolverr import FlareSolverrClearanceProvider
 from services.network.headers import build_grok_console_headers
 from services.network.profiles import build_grok_app_chat_profile, build_grok_console_profile, infer_chromium_impersonate
-from services.protocol.conversation import ImageGenerationError, ImageOutput
+from services.providers.base import ImageGenerationError, ImageOutput
 from utils.log import logger
 
 CONSOLE_BASE_URL = "https://console.x.ai"

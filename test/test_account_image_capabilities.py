@@ -18,7 +18,7 @@ from services.account_service import AccountService
 import services.account_service as account_service_module
 from services.auth_service import AuthService
 from services.storage.json_storage import JSONStorageBackend
-from utils.helper import anonymize_token
+from utils.helper import anonymize_token, anthropic_sse_stream, sse_json_stream
 
 
 class AccountCapabilityTests(unittest.TestCase):
@@ -116,6 +116,27 @@ class TokenLogTests(unittest.TestCase):
 
         self.assertTrue(token_ref.startswith("token:"))
         self.assertNotIn(token, token_ref)
+
+
+class SSEStreamErrorSanitizationTests(unittest.TestCase):
+    def _raising_items(self):
+        yield {"ok": True}
+        raise RuntimeError("authorization=Bearer secret-token cookie=session-secret")
+
+    def test_openai_sse_stream_sanitizes_exception_message(self) -> None:
+        payload = "".join(sse_json_stream(self._raising_items()))
+
+        self.assertIn('"message": "request failed"', payload)
+        self.assertIn("data: [DONE]", payload)
+        self.assertNotIn("secret-token", payload)
+        self.assertNotIn("session-secret", payload)
+
+    def test_anthropic_sse_stream_sanitizes_exception_message(self) -> None:
+        payload = "".join(anthropic_sse_stream(self._raising_items()))
+
+        self.assertIn('"message": "request failed"', payload)
+        self.assertNotIn("secret-token", payload)
+        self.assertNotIn("session-secret", payload)
 
 
 class AuthServiceTests(unittest.TestCase):

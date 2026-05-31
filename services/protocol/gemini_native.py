@@ -11,7 +11,9 @@ from typing import Any, Callable, Iterator
 
 from fastapi import HTTPException
 
-from services.models import gemini_model_specs, ModelSpec, resolve_model
+from services.providers.base import ModelSpec
+from services.providers.gemini.models import gemini_model_specs
+from services.providers.registry import resolve_model
 from services.providers import gemini
 from services.protocol import tool_calls
 

@@ -2,13 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from services.models import resolve_model
-from services.providers.registry import image_generation_outputs
-from services.protocol.conversation import (
-    ConversationRequest,
-    collect_image_outputs,
-    stream_image_chunks,
-)
+from services.providers.base import ConversationRequest
+from services.providers.registry import image_generation_outputs, resolve_model
+from services.protocol.conversation import collect_image_outputs, stream_image_chunks
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:

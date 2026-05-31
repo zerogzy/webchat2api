@@ -8,16 +8,10 @@ from fastapi import HTTPException
 
 from api.image_inputs import resolve_inline_image_reference
 
-from services.models import GEMINI_PROVIDER, GROK_PROVIDER, resolve_model
-from services.providers.registry import chat_adapter, response_image_outputs
+from services.providers.base import ConversationRequest, GEMINI_PROVIDER, GROK_PROVIDER, ImageOutput
+from services.providers.registry import chat_adapter, resolve_model, response_image_outputs
 import services.protocol.tool_calls as tool_calls
-from services.protocol.conversation import (
-    ConversationRequest,
-    ImageOutput,
-    encode_images,
-    stream_text_deltas,
-    text_backend,
-)
+from services.protocol.conversation import encode_images, stream_text_deltas, text_backend
 from utils.helper import extract_image_from_message_content, extract_response_prompt, has_image_message_content, has_response_image_generation_tool
 
 
@@ -347,7 +341,6 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     spec = resolve_model(model)
     if spec.provider == GROK_PROVIDER:
         if images:
-            from services.protocol.conversation import ImageGenerationError
             raise ImageGenerationError("Grok response image generation does not support image input", status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model")
     image_outputs = response_image_outputs(spec, request, body=body, prompt=prompt, n=1)
     yield from stream_image_response(image_outputs, prompt, model)

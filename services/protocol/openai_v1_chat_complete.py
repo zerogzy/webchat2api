@@ -6,9 +6,8 @@ from typing import Any, Iterable, Iterator, cast
 
 from fastapi import HTTPException
 
-from services.models import GEMINI_PROVIDER, GROK_PROVIDER, resolve_model, is_grok_app_chat_model
-from services.providers import grok
-from services.providers.registry import chat_adapter, image_adapter, image_generation_outputs
+from services.providers.base import ConversationRequest, GEMINI_PROVIDER, GROK_PROVIDER, ImageGenerationError, ImageOutput
+from services.providers.registry import chat_adapter, image_adapter, image_generation_outputs, resolve_model
 from services.config import config
 import services.protocol.tool_calls as tool_calls
 from services.protocol.chat_completion_cache import (
@@ -18,8 +17,6 @@ from services.protocol.chat_completion_cache import (
     normalize_text_messages,
 )
 from services.protocol.conversation import (
-    ConversationRequest,
-    ImageOutput,
     collect_image_outputs,
     collect_text,
     count_message_tokens,
@@ -35,6 +32,10 @@ from utils.helper import build_chat_image_markdown_content, extract_chat_image, 
 gpt_chat = chat_adapter("gpt")
 grok_chat = chat_adapter("grok")
 gemini_chat = chat_adapter("gemini")
+
+
+def is_grok_app_chat_model(spec: Any) -> bool:
+    return grok_chat.is_app_chat_model(spec)
 
 
 def _unsupported_image_error(provider: str) -> HTTPException:
@@ -267,10 +268,10 @@ def stream_grok_app_chat_completion(body: dict[str, Any], spec, messages: list[d
     reasoning_parts: list[str] = []
     search_sources: list[dict[str, str]] = []
     for event in grok_chat.chat_completion_events(body, spec, messages):
-        search_sources.extend(grok.extract_app_chat_search_sources(event))
-        token, thinking = grok.extract_app_chat_token(event)
+        search_sources.extend(grok_chat.extract_app_chat_search_sources(event))
+        token, thinking = grok_chat.extract_app_chat_token(event)
         if not token:
-            if grok.is_app_chat_final_event(event):
+            if grok_chat.is_app_chat_final_event(event):
                 break
             continue
         if thinking:
@@ -295,7 +296,7 @@ def stream_grok_app_chat_completion(body: dict[str, Any], spec, messages: list[d
         chunk = completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
         yield stream_chunk(chunk, include_usage)
     final_delta: dict[str, Any] = {}
-    deduped_sources = grok.dedupe_search_sources(search_sources)
+    deduped_sources = grok_chat.dedupe_search_sources(search_sources)
     if deduped_sources:
         final_delta["search_sources"] = deduped_sources
         final_delta["annotations"] = url_citation_annotations(deduped_sources)
@@ -320,7 +321,7 @@ def stream_grok_chat_completion(body: dict[str, Any], spec, messages: list[dict[
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     for event in grok_chat.chat_completion_events(body, spec, messages):
-        delta = grok.extract_console_stream_delta(event)
+        delta = grok_chat.extract_console_stream_delta(event)
         if not delta.content and not delta.reasoning_content:
             continue
         if delta.reasoning_content:
@@ -397,7 +398,7 @@ def chat_messages_from_body(body: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def prepare_text_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    raw_messages = grok.strip_search_sources_from_messages(chat_messages_from_body(body))
+    raw_messages = grok_chat.strip_search_sources_from_messages(chat_messages_from_body(body))
     if tool_calls.has_function_tools(body):
         injected = tool_calls.inject_tool_prompt(
             raw_messages,
@@ -462,7 +463,6 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
     spec = resolve_model(model)
     if spec.provider == GROK_PROVIDER:
         if images:
-            from services.protocol.conversation import ImageGenerationError
             raise ImageGenerationError("Grok image chat does not support image input", status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model")
         result = collect_image_outputs(image_generation_outputs(spec, None, body=body, prompt=prompt, n=n))
         return completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
@@ -482,7 +482,6 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     spec = resolve_model(model)
     if spec.provider == GROK_PROVIDER:
         if images:
-            from services.protocol.conversation import ImageGenerationError
             raise ImageGenerationError("Grok image chat does not support image input", status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model")
         yield from stream_image_chat_completion(image_generation_outputs(spec, None, body=body, prompt=prompt, n=n), model)
         return
@@ -531,7 +530,7 @@ def non_stream_text_chat_response(body: dict[str, Any], model: str, messages: li
             search_sources = cast(list[dict[str, str]], raw_sources) if isinstance(raw_sources, list) else []
             content = str(response.get("content", ""))
             if config.show_search_sources:
-                content = grok.append_search_sources_suffix(content, search_sources)
+                content = grok_chat.append_search_sources_suffix(content, search_sources)
             tool_response = parsed_chat_tool_response(body, model, content, messages)
             if tool_response:
                 return tool_response

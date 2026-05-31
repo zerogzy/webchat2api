@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from services.protocol.conversation import ImageGenerationError, ImageOutput
-from services.providers.base import ModelSpec
-from services.providers import grok
+from services.providers.base import ImageGenerationError, ImageOutput, ModelSpec
+from services.providers.grok import client as grok_client
 
 
 def generation_outputs(body: dict[str, Any], spec: ModelSpec, prompt: str, n: int) -> Iterator[ImageOutput]:
-    yield from grok.app_chat_image_outputs(body, spec, prompt, n)
+    yield from grok_client.app_chat_image_outputs(body, spec, prompt, n)
 
 
 def edit_outputs(
@@ -27,4 +26,4 @@ def edit_outputs(
             code="unsupported_model",
             param="model",
         )
-    yield from grok.app_chat_image_edit_outputs(body, spec, prompt, images, n, size)
+    yield from grok_client.app_chat_image_edit_outputs(body, spec, prompt, images, n, size)

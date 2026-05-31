@@ -4,15 +4,15 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from threading import Condition, Lock
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from services.config import config
 from services.log_service import (
     LOG_TYPE_ACCOUNT,
     log_service,
 )
-from services.models import GEMINI_PROVIDER, GPT_PROVIDER, GROK_PROVIDER, ModelSpec, normalize_account_provider, normalize_provider
-from services.providers.registry import account_strategy
+from services.providers.base import GEMINI_PROVIDER, GPT_PROVIDER, GROK_PROVIDER, ModelSpec, RemoteAccountValidator
+from services.providers.registry import account_strategy, normalize_account_provider, normalize_provider
 from services.providers.gemini.accounts import account_row_id as gemini_account_row_id
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
@@ -756,18 +756,18 @@ class AccountService:
     def fetch_grok_remote_info(self, access_token: str, event: str = "fetch_grok_remote_info", provider: str | None = None) -> dict[str, Any] | None:
         provider_filter = provider or GROK_PROVIDER
         account = self.get_account(access_token, provider=provider_filter) or {}
-        from services.providers.grok import GrokConsoleError, validate_grok_access_token
+        strategy = cast(RemoteAccountValidator, account_strategy(GROK_PROVIDER))
 
         try:
-            payload = validate_grok_access_token(access_token, account)
-        except GrokConsoleError as exc:
-            status = exc.upstream_status or exc.status_code
+            payload = strategy.validate_remote_info(access_token, account)
+        except Exception as exc:
+            status = strategy.remote_error_status(exc)
             if status in {401, 403} or any(marker in str(exc).lower() for marker in ("auth", "login", "session", "token")):
                 self.remove_invalid_token(access_token, event)
             elif status in {402, 429}:
                 self.update_account(access_token, {"status": "限流"}, provider=provider_filter)
             raise
-        if account_strategy(GROK_PROVIDER).is_auth_failure_payload(payload):
+        if strategy.is_auth_failure_payload(payload):
             self.remove_invalid_token(access_token, event)
             raise RuntimeError("Grok app-chat authentication failed")
         return self.update_account(access_token, {"status": "正常", "app_chat": True}, provider=provider_filter)
