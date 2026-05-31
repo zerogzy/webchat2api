@@ -197,6 +197,31 @@ class AccountExportTests(unittest.TestCase):
         self.assertEqual(intersected_items[0]["id_token"], "grok-id")
         self.assertEqual(intersected_items[0]["refresh_token"], "grok-rt")
 
+    def test_build_export_items_with_requested_tokens_searches_all_providers(self) -> None:
+        service = AccountService(
+            MemoryStorage(
+                [
+                    {"access_token": "gpt-token", "provider": GPT_PROVIDER, "id_token": "gpt-id", "refresh_token": "gpt-rt"},
+                    {"access_token": "sso=grok-token", "provider": GROK_PROVIDER, "id_token": "grok-id", "refresh_token": "grok-rt"},
+                    {"access_token": "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts", "provider": GEMINI_PROVIDER},
+                ]
+            )
+        )
+
+        items = service.build_export_items([
+            "gpt-token",
+            "sso=grok-token",
+            "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts",
+        ])
+
+        self.assertEqual([item["access_token"] for item in items], [
+            "gpt-token",
+            "grok-token",
+            "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts",
+        ])
+        self.assertEqual(items[0]["id_token"], "gpt-id")
+        self.assertEqual(items[1]["id_token"], "grok-id")
+
     def test_build_export_items_filters_duplicate_tokens_by_provider(self) -> None:
         service = AccountService(
             MemoryStorage(

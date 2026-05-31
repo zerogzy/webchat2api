@@ -380,6 +380,8 @@ def normalize_console_quota(value: Any) -> dict[str, Any]:
 
 def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
     account.pop("_grok_sso_import", None)
+    for key in ("accessToken", "sso", "raw_sso", "rawSso", "sso_token", "ssoToken", "cookie", "token", "cookies"):
+        account.pop(key, None)
     app_chat_quota = normalize_app_chat_rate_limit_payload(account)
     raw_tier = account.get("tier") or account.get("model_tier") or account.get("category") or account.get("pool")
     normalized_tier = normalize_tier(raw_tier) or app_chat_quota.get("tier") or clean_string(raw_tier) or None
@@ -403,7 +405,27 @@ def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
     return account
 
 
+def _sso_match_values(value: Any) -> set[str]:
+    text = clean_string(value)
+    if not text:
+        return set()
+    values = {text}
+    normalized = _normalize_sso_candidate(text, allow_bare=True)
+    if normalized:
+        values.add(normalized)
+    for name, cookie_value in _cookie_items(text):
+        if name.lower() == "sso":
+            normalized_cookie_value = _normalize_bare_sso_token(cookie_value)
+            if normalized_cookie_value:
+                values.add(normalized_cookie_value)
+    return {candidate for candidate in values if candidate}
+
+
 def delete_token_matches_account(token: str, account: dict[str, Any]) -> bool:
+    token_values = _sso_match_values(token)
+    account_values = _sso_match_values(account.get("access_token"))
+    if token_values and account_values:
+        return bool(token_values & account_values)
     return clean_string(token) == clean_string(account.get("access_token"))
 
 
@@ -531,12 +553,24 @@ GROK_SECRET_KEYS = {
 }
 
 
+def _account_has_sso(item: dict[str, Any]) -> bool:
+    if _sso_match_values(item.get("access_token") or item.get("accessToken")):
+        return True
+    for candidate in _explicit_sso_candidates(item):
+        if _normalize_sso_candidate(candidate, allow_bare=True):
+            return True
+    for candidate in _token_candidates(item):
+        if _normalize_sso_candidate(candidate, allow_bare=False):
+            return True
+    return False
+
+
 def sanitize_account(item: dict[str, Any]) -> dict[str, Any]:
     account = dict(item)
     for key in GROK_SECRET_KEYS:
         account.pop(key, None)
     account["has_access_token"] = bool(clean_string(item.get("access_token") or item.get("accessToken")))
-    account["has_sso"] = bool(clean_string(item.get("sso") or item.get("sso_token")) or _cookie_value(item.get("cookies"), "sso"))
+    account["has_sso"] = _account_has_sso(item)
     account["has_id_token"] = bool(clean_string(item.get("id_token")))
     account["has_refresh_token"] = bool(clean_string(item.get("refresh_token")))
     return account

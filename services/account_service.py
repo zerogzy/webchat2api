@@ -496,6 +496,12 @@ class AccountService:
     def add_accounts(self, tokens: list[str], provider: str | None = None) -> dict:
         target_provider = self._provider_filter(provider) or GPT_PROVIDER
         tokens = list(dict.fromkeys(token for token in tokens if token))
+        if target_provider == GROK_PROVIDER:
+            tokens = list(dict.fromkeys(
+                normalized
+                for token in tokens
+                if (normalized := _normalize_access_token_for_provider({"access_token": token, "provider": target_provider}, target_provider))
+            ))
         if not tokens:
             return {"added": 0, "skipped": 0, "items": self.list_accounts()}
 
@@ -506,14 +512,15 @@ class AccountService:
             for access_token in tokens:
                 current = provider_accounts.get(access_token)
                 current_payload = current or {}
-                account = self._normalize_account(
-                    {
-                        **current_payload,
-                        "access_token": access_token,
-                        "type": str(current_payload.get("type") or "free"),
-                        "provider": target_provider,
-                    }
-                )
+                payload = {
+                    **current_payload,
+                    "access_token": access_token,
+                    "type": str(current_payload.get("type") or "free"),
+                    "provider": target_provider,
+                }
+                if target_provider == GROK_PROVIDER:
+                    payload["_grok_sso_import"] = True
+                account = self._normalize_account(payload)
                 if account is not None:
                     if current is None:
                         added += 1
@@ -840,6 +847,35 @@ class AccountService:
             "items": self.list_accounts(provider_filter),
         }
 
+    def _requested_export_accounts_locked(self, requested_tokens: list[str], provider_filter: str | None) -> list[dict]:
+        accounts: list[dict] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for token in requested_tokens:
+            account = self._get_account_locked(token, provider_filter)
+            if account is None:
+                candidate_providers = [provider_filter] if provider_filter else list(self._accounts.keys())
+                for candidate_provider in candidate_providers:
+                    if not candidate_provider:
+                        continue
+                    provider_strategy = _account_strategy(candidate_provider)
+                    for candidate in self._accounts.get(candidate_provider, {}).values():
+                        if provider_strategy.delete_token_matches_account(token, candidate):
+                            account = candidate
+                            break
+                    if account is not None:
+                        break
+            if account is None:
+                continue
+            provider = normalize_provider(account.get("provider"))
+            access_token = _clean_string(account.get("access_token"))
+            account_key = (provider, access_token)
+            if access_token and account_key in seen_keys:
+                continue
+            accounts.append(dict(account))
+            if access_token:
+                seen_keys.add(account_key)
+        return accounts
+
     def build_export_items(self, access_tokens: list[str] | None = None, provider: str | None = None) -> list[dict[str, str]]:
         requested_tokens = [token for token in dict.fromkeys(access_tokens or []) if token]
         provider_filter = normalize_provider(provider) if provider else None
@@ -847,11 +883,7 @@ class AccountService:
             return []
         with self._lock:
             if requested_tokens:
-                accounts = [
-                    dict(account)
-                    for token in requested_tokens
-                    if (account := self._get_account_locked(token, provider_filter)) is not None
-                ]
+                accounts = self._requested_export_accounts_locked(requested_tokens, provider_filter)
             else:
                 accounts = self._list_account_items_locked(provider_filter)
 
