@@ -39,6 +39,78 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], 64)
         self.assertEqual(payload["prompt"], "System: Be brief.\n\nUser: Hello\n\nAssistant: Hi")
 
+    def test_build_web_payload_rejects_image_url_part(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            gemini.build_web_payload(
+                resolve_model("gemini-2.5-pro"),
+                {},
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "What is in this image?"},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+                        ],
+                    }
+                ],
+            )
+
+        self.assertEqual(getattr(raised.exception, "status_code"), 400)
+        detail = cast(dict[str, Any], getattr(raised.exception, "detail"))
+        self.assertEqual(detail["error"], "Gemini Web image input is not supported by this upstream adapter")
+
+    def test_build_web_payload_rejects_responses_input_image_part(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            gemini.build_web_payload(
+                resolve_model("gemini-2.5-pro"),
+                {},
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Describe it"},
+                            {"type": "input_image", "image_url": "data:image/png;base64,AA=="},
+                        ],
+                    }
+                ],
+            )
+
+        self.assertEqual(getattr(raised.exception, "status_code"), 400)
+        self.assertIn("Gemini Web image input", str(getattr(raised.exception, "detail")))
+
+    def test_build_web_payload_rejects_native_inline_data_part(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            gemini.build_web_payload(
+                resolve_model("gemini-2.5-pro"),
+                {},
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Describe it"},
+                            {"inlineData": {"mimeType": "image/png", "data": "AA=="}},
+                        ],
+                    }
+                ],
+            )
+
+        self.assertEqual(getattr(raised.exception, "status_code"), 400)
+        self.assertIn("Gemini Web image input", str(getattr(raised.exception, "detail")))
+
+    def test_chat_completion_rejects_image_message_before_account_lookup(self) -> None:
+        account_service = mock.Mock()
+        with mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
+             self.assertRaises(HTTPException) as raised:
+            gemini.chat_completion(
+                {},
+                resolve_model("gemini-2.5-pro"),
+                [{"role": "user", "content": [{"type": "image", "data": b"image-bytes", "mime": "image/png"}]}],
+            )
+
+        self.assertEqual(getattr(raised.exception, "status_code"), 400)
+        self.assertIn("Gemini Web image input", str(getattr(raised.exception, "detail")))
+        account_service.get_text_access_token.assert_not_called()
+
     def test_account_cookie_header_requires_both_session_cookies(self) -> None:
         with self.assertRaises(HTTPException) as raised:
             gemini.account_cookie_header({"access_token": "__Secure-1PSID=psid"})
@@ -642,6 +714,34 @@ class GeminiProviderTests(unittest.TestCase):
         account_service.mark_text_used.assert_called_once_with("gemini-token")
         account_service.remove_invalid_token.assert_not_called()
 
+    def test_gemini_chat_image_without_modalities_is_not_silently_stripped(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            openai_v1_chat_complete.handle({
+                "model": "gemini-2.5-pro",
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "Describe this"},
+                    {"type": "image_url", "image_url": {"url": "https://example.test/cat.png"}},
+                ]}],
+            })
+
+        detail = cast(dict[str, Any], getattr(raised.exception, "detail"))
+        self.assertEqual(detail["error"], "Gemini Web image input is not supported by this upstream adapter")
+
+    def test_gemini_stream_chat_image_without_modalities_is_not_silently_stripped(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            result = openai_v1_chat_complete.handle({
+                "model": "gemini-2.5-pro",
+                "stream": True,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "Describe this"},
+                    {"type": "image_url", "image_url": {"url": "https://example.test/cat.png"}},
+                ]}],
+            })
+            list(cast(Any, result))
+
+        detail = cast(dict[str, Any], getattr(raised.exception, "detail"))
+        self.assertEqual(detail["error"], "Gemini Web image input is not supported by this upstream adapter")
+
     def test_gemini_image_chat_request_is_rejected(self) -> None:
         with self.assertRaises(HTTPException) as raised:
             openai_v1_chat_complete.handle({
@@ -666,6 +766,44 @@ class GeminiProviderTests(unittest.TestCase):
             list(cast(Any, result))
 
         self.assertEqual(getattr(raised.exception, "status_code"), 400)
+
+    def test_gemini_image_input_chat_routes_to_text_provider_error(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            openai_v1_chat_complete.handle({
+                "model": "gemini-2.5-pro",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is in this image?"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+                    ],
+                }],
+                "modalities": ["image"],
+            })
+
+        detail = cast(dict[str, Any], getattr(raised.exception, "detail"))
+        self.assertEqual(getattr(raised.exception, "status_code"), 400)
+        self.assertEqual(detail["error"], "Gemini Web image input is not supported by this upstream adapter")
+
+    def test_gemini_streaming_image_input_chat_routes_to_text_provider_error(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            result = openai_v1_chat_complete.handle({
+                "model": "gemini-2.5-pro",
+                "stream": True,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is in this image?"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+                    ],
+                }],
+                "modalities": ["image"],
+            })
+            list(cast(Any, result))
+
+        detail = cast(dict[str, Any], getattr(raised.exception, "detail"))
+        self.assertEqual(getattr(raised.exception, "status_code"), 400)
+        self.assertEqual(detail["error"], "Gemini Web image input is not supported by this upstream adapter")
 
     def test_non_streaming_chat_dispatch_uses_gemini_provider(self) -> None:
         with mock.patch.object(gemini, "chat_completion", return_value=gemini.GeminiCompletion("Hello from Gemini")) as chat_completion:
