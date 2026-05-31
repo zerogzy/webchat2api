@@ -117,10 +117,36 @@ def account_cookie_header(account: dict[str, Any]) -> str:
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
 
+def gemini_session_writeback(account: dict[str, Any], cookie_header: str, session_token: str = "") -> dict[str, Any]:
+    cookies = parse_cookie_header(cookie_header)
+    updates: dict[str, Any] = {}
+    if cookies:
+        updates["cookies"] = cookies
+    for name in ("__Secure-1PSID", "__Secure-1PSIDTS"):
+        if cookies.get(name):
+            updates[name] = cookies[name]
+    token = session_token or gemini_session_token(account)
+    if token:
+        updates["session_token"] = token
+        updates["SNlM0e"] = token
+        updates["at"] = token
+    return updates
+
+
+def persist_gemini_session(account_service: object, access_token: str, account: dict[str, Any], cookie_header: str, session_token: str = "") -> None:
+    update_account = getattr(account_service, "update_account", None)
+    if not callable(update_account):
+        return
+    updates = gemini_session_writeback(account, cookie_header, session_token)
+    if updates:
+        update_account(access_token, updates, provider="gemini")
+
+
 def rotate_psidts_cookie(session: object, cookie_header: str, user_agent: str | None = None) -> str:
     headers = {
         "content-type": "application/json",
         "cookie": cookie_header,
+        "origin": "https://accounts.google.com",
         "user-agent": user_agent or GEMINI_BROWSER_USER_AGENT,
     }
     post = getattr(session, "post")
@@ -133,7 +159,7 @@ def rotate_psidts_cookie(session: object, cookie_header: str, user_agent: str | 
         raise classify_upstream_error(status_code, raw_text)
     rotation = gemini_rotate_cookies_result(cookie_header, response)
     if not rotation.psidts:
-        raise GeminiWebError("Gemini cookie rotation did not issue __Secure-1PSIDTS", status_code=401, upstream_status=status_code, code="gemini_session_cookie_missing")
+        raise GeminiWebError("Gemini cookie rotation did not retain __Secure-1PSIDTS", status_code=401, upstream_status=status_code, code="gemini_session_cookie_missing")
     return rotation.cookie_header
 
 
@@ -284,14 +310,14 @@ def _canonical_stream_generate_text(payload: object) -> str:
     if not isinstance(first_candidate, list) or len(first_candidate) <= 1:
         return ""
     candidate_body = first_candidate[1]
-    if not isinstance(candidate_body, list) or not candidate_body:
-        return ""
-    content_parts = candidate_body[0]
-    if not isinstance(content_parts, list) or not content_parts:
-        return ""
-    text = content_parts[0]
-    if isinstance(text, str) and text.strip() and not _is_incidental_stream_string(text):
-        return text.strip()
+    if isinstance(candidate_body, list) and candidate_body:
+        direct_text = candidate_body[0]
+        if isinstance(direct_text, str) and direct_text.strip() and not _is_incidental_stream_string(direct_text):
+            return direct_text.strip()
+        if isinstance(direct_text, list) and direct_text:
+            nested_text = direct_text[0]
+            if isinstance(nested_text, str) and nested_text.strip() and not _is_incidental_stream_string(nested_text):
+                return nested_text.strip()
     return ""
 
 
@@ -340,8 +366,15 @@ def extract_stream_generate_metadata(payload: object) -> dict[str, str]:
         parsed = _parse_nested_json(wrb_payload)
         if not isinstance(parsed, list):
             continue
-        if len(parsed) > 1 and isinstance(parsed[1], str) and parsed[1].strip():
-            metadata.setdefault("cid", parsed[1].strip())
+        if len(parsed) > 1:
+            ids = parsed[1]
+            if isinstance(ids, list):
+                if len(ids) > 0 and isinstance(ids[0], str) and ids[0].strip():
+                    metadata.setdefault("cid", ids[0].strip())
+                if len(ids) > 1 and isinstance(ids[1], str) and ids[1].strip():
+                    metadata.setdefault("rid", ids[1].strip())
+            elif isinstance(ids, str) and ids.strip():
+                metadata.setdefault("cid", ids.strip())
         if len(parsed) > 2 and isinstance(parsed[2], str) and parsed[2].strip():
             metadata.setdefault("rid", parsed[2].strip())
         if len(parsed) > 4 and isinstance(parsed[4], list) and parsed[4]:
@@ -429,6 +462,7 @@ class GeminiWebClient:
     def __init__(self, cookie_header: str, user_agent: str | None = None) -> None:
         self.cookie_header = cookie_header
         self.user_agent = user_agent or GEMINI_BROWSER_USER_AGENT
+        self.session_token = ""
         self.session = create_session()
 
     def __enter__(self) -> "GeminiWebClient":
@@ -450,13 +484,20 @@ class GeminiWebClient:
         if google_response is not None:
             self.cookie_header = merge_response_cookies(self.cookie_header, google_response)
         headers = {
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "accept-language": "en-US,en;q=0.9",
+            "cache-control": "max-age=0",
             "cookie": self.cookie_header,
+            "origin": GEMINI_WEB_BASE_URL,
+            "referer": f"{GEMINI_WEB_BASE_URL}/",
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "same-origin",
+            "upgrade-insecure-requests": "1",
             "user-agent": self.user_agent,
-            "referer": GEMINI_WEB_BASE_URL,
             "x-same-domain": "1",
         }
-        response = self.session.get(f"{GEMINI_WEB_BASE_URL}/", headers=headers, timeout=30)
+        response = self.session.get(f"{GEMINI_WEB_BASE_URL}/app?hl=en", headers=headers, timeout=30)
         status_code = int(getattr(response, "status_code", getattr(response, "status", 0)) or 0)
         raw_text = str(getattr(response, "text", "") or "")
         self.cookie_header = merge_response_cookies(self.cookie_header, response)
@@ -466,12 +507,24 @@ class GeminiWebClient:
 
     def bootstrap_session_token(self) -> str:
         raw_text = self.fetch_init_body()
-        if "signin" in raw_text.lower() or "accounts.google.com" in raw_text.lower():
-            raise GeminiWebError("Gemini upstream authentication failed", status_code=401, upstream_status=None, code="gemini_auth_failed")
         session_token = session_token_from_response(raw_text)
-        if not session_token:
-            raise GeminiWebError("Gemini session token bootstrap failed", status_code=401, upstream_status=None, code="gemini_session_token_missing")
-        return session_token
+        if session_token:
+            self.session_token = session_token
+            return session_token
+        try:
+            self.rotate_psidts()
+            raw_text = self.fetch_init_body()
+            session_token = session_token_from_response(raw_text)
+            if session_token:
+                self.session_token = session_token
+                return session_token
+        except GeminiWebError:
+            raise
+        except Exception:
+            pass
+        if "signin" in raw_text.lower() or "sign in" in raw_text.lower() or "accounts.google.com" in raw_text.lower():
+            raise GeminiWebError("Gemini upstream authentication failed", status_code=401, upstream_status=None, code="gemini_auth_failed")
+        raise GeminiWebError("Gemini session token bootstrap failed", status_code=401, upstream_status=None, code="gemini_session_token_missing")
 
     def rotate_psidts(self) -> str:
         self.cookie_header = rotate_psidts_cookie(self.session, self.cookie_header, self.user_agent)
@@ -483,7 +536,7 @@ class GeminiWebClient:
             "cookie": self.cookie_header,
             "user-agent": self.user_agent,
             "origin": GEMINI_WEB_BASE_URL,
-            "referer": f"{GEMINI_WEB_BASE_URL}/app",
+            "referer": f"{GEMINI_WEB_BASE_URL}/",
             "x-same-domain": "1",
         }
         response = self.session.post(
@@ -499,10 +552,12 @@ class GeminiWebClient:
         parsed = parse_web_response_text(raw_text)
         if not raw_text.strip() or not extract_text(parsed):
             raise GeminiWebError("Gemini upstream response did not contain text", status_code=502, upstream_status=status_code, code="gemini_empty_response")
+        self.cookie_header = merge_response_cookies(self.cookie_header, response)
         return parsed
 
     def generate(self, payload: dict[str, Any]) -> object:
         session_token = str(payload.get("session_token") or "").strip()
+        self.session_token = session_token
         if not session_token:
             session_token = self.bootstrap_session_token()
         last_error: GeminiWebError | Exception | None = None
@@ -533,7 +588,9 @@ def fetch_authenticated_init_body() -> str:
     account = account_service.get_account(access_token) or {"access_token": access_token, "provider": "gemini"}
     cookie_header = account_cookie_header(account)
     with GeminiWebClient(cookie_header, account.get("user_agent")) as client:
-        return client.fetch_init_body()
+        init_body = client.fetch_init_body()
+        persist_gemini_session(account_service, access_token, account, client.cookie_header)
+        return init_body
 
 
 def list_model_metadata() -> list[dict[str, Any]]:
@@ -559,6 +616,7 @@ def chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[s
     try:
         with GeminiWebClient(cookie_header, account.get("user_agent")) as client:
             response_payload = client.generate(payload)
+            persist_gemini_session(account_service, access_token, account, client.cookie_header, client.session_token)
     except GeminiWebError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
     completion = extract_completion(response_payload)
