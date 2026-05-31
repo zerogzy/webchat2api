@@ -14,17 +14,17 @@
 
 ## 功能概览
 
-- OpenAI 风格 API：将 GPT/ChatGPT Web、Grok/xAI Web 与 Gemini Web 能力包装为 `/v1/models`、`/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`、`/v1/responses`、`/v1/messages` 等接口；兼容上游前缀 `/openai/v1/models`、`/openai/v1/chat/completions` 和 `/claude/v1/messages`
+- OpenAI 风格 API：将 GPT/ChatGPT Web、Grok/xAI Web 与 Gemini Web 能力包装为 `/v1/models`、`/v1/chat/completions`、`/v1/completions`、`/v1/complete`、`/v1/images/generations`、`/v1/images/edits`、`/v1/responses`、`/v1/messages` 等接口；兼容上游前缀 `/openai/v1/models`、`/openai/v1/chat/completions` 和 `/claude/v1/messages`
 - 公共接口：提供 `/health`、`/version`、`/auth/login`，AI 接口统一使用 Bearer Token 鉴权
 - GPT/Grok/Gemini 文本模型：`/v1/models` 优先通过 `provider=gpt` 账号动态拉取 GPT 模型，并合并静态 Grok 与 Gemini 模型；`/v1/chat/completions` 按 `model` 自动分发到 GPT、Grok 或 Gemini 服务商账号
 - Grok app-chat：支持通过 grok.com app-chat 路径访问带 `mode_id` 的 Grok 模型，并可走 Browser Bridge 用真实 Chromium 代理请求
-- Grok 图片生成与编辑：`grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro` 通过 app-chat 图片能力生成图片；`grok-imagine-image-edit` 支持 app-chat 图片编辑；`grok-imagine-video` 已列出但暂未实现
+- Grok 图片生成与编辑：`grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro` 通过 app-chat 图片能力生成图片；`grok-imagine-image-edit` 支持 app-chat 图片编辑；`grok-imagine-video` 已列出但暂未实现，Grok files 和 voice 仍未接入
 - Gemini native API：提供 `/gemini/v1beta/models`、`generateContent`、`streamGenerateContent`、`deepresearch`、`deepresearch/stream`、`interactions` 和 `interactions/{id}`；支持 Gemini native contents/parts/tools/toolConfig/generationConfig 与 functionCall/functionResponse 转换
 - tier 感知账号选择：Grok app-chat 会按模型所需 `basic`、`super`、`heavy` tier 和账号 `capabilities` 优先选择匹配账号，未匹配时再回退到普通 Grok 轮换
 - Web 管理后台：账号池、用户 API Key、代理、日志、图片任务、图片文件、备份、图片存储和系统配置管理
 - 管理接口：提供 `/api/settings`、`/api/auth/users`、`/api/accounts`、`/api/cpa/*`、`/api/sub2api/*`、`/api/remote-account/*`、`/api/image-tasks/*`、`/api/images*`、`/api/logs`、`/api/proxy/test`、`/api/storage/info`、`/api/backups*`、`/api/backup/test`、`/api/image-storage/*` 等后台能力
 - 远程账号注入：管理员可配置远程账号来源、手动同步来源，或通过 `/api/remote-account/inject` 注入账号；响应会隐藏来源鉴权 Token 和账号凭据
-- 账号服务商：账号 `provider` 选择 `gpt`、`grok` 或 `gemini`，账号 `type` 仍表示套餐或订阅类型；账号导入、刷新、导出和脱敏逻辑按服务商模块处理
+- 账号服务商：账号 `provider` 选择 `gpt`、`grok` 或 `gemini`，账号 `type` 仍表示套餐或订阅类型；账号导入、刷新、导出和脱敏逻辑按服务商模块处理。Gemini `account_status` 中的 `psid_psidts`、`missing_psid`、`usable_gemini_session` 等值是派生诊断标签，不包含实际 cookie 值。
 - 试验页：`/`、`/image`、`/image-manager`、`/accounts`、`/logs`、`/settings`、`/login` 覆盖文生文聊天、文本模型批量可用性测试、文生图/图生图切换、图片队列、图片历史、图片管理、账号导入导出和系统设置；`/image` 的文本和图片测试可按 GPT/Grok/Gemini provider 过滤模型与账号
 - 文生文聊天历史：保存在浏览器本地，刷新页面后仍保留
 - 图片账号轮换：图片生成/编辑遇到失效账号时，会跳过该账号并尝试下一个可用账号
@@ -73,7 +73,7 @@ git clone https://github.com/zqbxdev/webchat2api
 cd webchat2api
 ```
 
-构建本地镜像并运行：
+构建本地镜像并运行本地示例容器：
 
 ```bash
 docker build -t webchat2api:latest .
@@ -85,7 +85,7 @@ docker run -d \
   -v $(pwd)/data:/app/data \
   -e PORT=83 \
   -e HOST=0.0.0.0 \
-  -e LOGIN_SECRET=admin \
+  -e LOGIN_SECRET=your-strong-secret \
   webchat2api:latest
 ```
 
@@ -100,17 +100,34 @@ docker run -d \
   -v $(pwd)/data:/app/data \
   -e PORT=83 \
   -e HOST=0.0.0.0 \
-  -e LOGIN_SECRET=admin \
+  -e LOGIN_SECRET=your-strong-secret \
   -e PROXY_URL=http://host.docker.internal:7890 \
   webchat2api:latest
 ```
 
-部署后访问：
+本地开发或 smoke 测试时，如果宿主机 `83` 端口已有生产容器，不要复用 `webchat2api` 容器名或 `83:83` 映射。建议使用独立开发容器和 `8083:83` 端口，例如：
+
+```bash
+docker build -t webchat2api:dev .
+
+docker run --rm -d \
+  --name webchat2api-dev \
+  -p 8083:83 \
+  -v $(pwd)/data-dev:/app/data \
+  -e PORT=83 \
+  -e HOST=0.0.0.0 \
+  -e LOGIN_SECRET=admin \
+  webchat2api:dev
+
+curl http://localhost:8083/health
+```
+
+生产部署后访问：
 
 - 服务地址：`http://localhost:83`
 - 管理后台：`http://localhost:83`
 - API Base URL：`http://localhost:83/v1`
-- 默认登录密钥：`admin`
+- 登录密钥：使用启动时配置的 `LOGIN_SECRET` 或 `WEBCHAT2API_AUTH_KEY`，不要在生产环境使用默认 `admin`
 
 Docker 镜像内置 Chromium、Node.js、npm 和 Grok Browser Bridge。容器启动时，`scripts/entrypoint.sh` 会先在 `BRIDGE_PORT` 上启动 `services/browser_bridge/server.js`，默认端口为 `3080`，并短暂探测 `/health`；即使 Bridge 未就绪，也会继续启动 FastAPI。
 
@@ -208,7 +225,7 @@ Grok app-chat 模型会按所需账号层级选号：`basic` 可跑 lite 和 fas
 Authorization: Bearer <LOGIN_SECRET 或用户 API Key>
 ```
 
-OpenAI 兼容文本接口也接受 `x-api-key: <LOGIN_SECRET 或用户 API Key>`。当前包括 `/v1/models`、`/v1/chat/completions`、`/v1/responses`、`/v1/messages`，以及兼容别名 `/openai/v1/models`、`/openai/v1/chat/completions`、`/claude/v1/messages`。图片生成与图片编辑接口请继续使用 Bearer Token。
+OpenAI 兼容文本接口也接受 `x-api-key: <LOGIN_SECRET 或用户 API Key>`。当前包括 `/v1/models`、`/v1/chat/completions`、`/v1/completions`、`/v1/complete`、`/v1/responses`、`/v1/messages`，以及兼容别名 `/openai/v1/models`、`/openai/v1/chat/completions`、`/claude/v1/messages`。图片生成与图片编辑接口请继续使用 Bearer Token。
 
 健康检查：
 
@@ -229,7 +246,9 @@ curl http://localhost:83/v1/models \
   -H "Authorization: Bearer admin"
 ```
 
-`/v1/models` 会优先使用已导入的 `provider=gpt` 账号动态拉取 GPT 模型；如果没有可用 GPT 账号或拉取失败，会回退到匿名/内置 GPT 文本模型：`auto`、`gpt-5`、`gpt-5-thinking`、`gpt-4o`、`gpt-4o-mini`。GPT 图片模型包括 `gpt-image-2`、`codex-gpt-image-2`。Grok 当前使用内置模型列表，因为现有 Grok token/cookie 无法访问 `console.x.ai` 或 `api.x.ai` 的模型列表端点。Gemini 当前使用内置模型列表，包括 `gemini-2.5-pro`、`gemini-2.5-flash`、`gemini-pro`。Grok Console 文本模型包括 `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent`；app-chat 文本模型包括 `grok-4.20-0309` 系列、`grok-4.20-fast`、`grok-4.20-auto`、`grok-4.20-expert`、`grok-4.20-heavy`、`grok-4.3-beta`；图片模型包括 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`、`grok-imagine-image-edit`，`grok-imagine-video` 仅声明为未支持的视频能力。
+`/v1/models` 会优先使用已导入的 `provider=gpt` 账号动态拉取 GPT 模型；如果没有可用 GPT 账号或拉取失败，会回退到匿名/内置 GPT 文本模型：`auto`、`gpt-5`、`gpt-5-thinking`、`gpt-4o`、`gpt-4o-mini`。GPT 图片模型包括 `gpt-image-2`、`codex-gpt-image-2`。Grok 当前使用内置模型列表，因为现有 Grok token/cookie 无法访问 `console.x.ai` 或 `api.x.ai` 的模型列表端点。Gemini 当前使用内置模型列表，包括 `gemini-2.5-pro`、`gemini-2.5-flash`、`gemini-pro`。Grok Console 文本模型包括 `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent`；app-chat 文本模型包括 `grok-4.20-0309` 系列、`grok-4.20-fast`、`grok-4.20-auto`、`grok-4.20-expert`、`grok-4.20-heavy`、`grok-4.3-beta`；图片模型包括 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`、`grok-imagine-image-edit`，`grok-imagine-video` 仅声明为未支持的视频能力。Grok files 和 voice 仍未接入，请不要把上游网页能力理解为本项目已启用。
+
+`/v1/completions` 是标准文本补全入口，`/v1/complete` 保留为兼容别名。两者都需要已配置可用账号；没有真实凭据时，不应把示例请求视为上游成功证明。
 
 聊天接口：
 
@@ -289,7 +308,7 @@ curl http://localhost:83/v1/images/generations \
   }'
 ```
 
-当前 GPT 图片模型包括 `gpt-image-2` 和 `codex-gpt-image-2`，图片生成/编辑仍使用 GPT 服务商账号。GPT 图片编辑接受 JSON 或表单中的图片输入，可传 URL、data URI 或上传文件，支持多参考图；当前不支持 `file_id`。每张参考图上限为 50MiB。当前 Grok app-chat 图片生成支持 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`；Grok 图片编辑支持 `grok-imagine-image-edit`，限制为 `size=1024x1024`、最多 7 张参考图、`n<=2`。`grok-imagine-video` 暂未支持，请不要把它当成可用的视频接口。
+当前 GPT 图片模型包括 `gpt-image-2` 和 `codex-gpt-image-2`，图片生成/编辑仍使用 GPT 服务商账号。GPT 图片编辑接受 JSON 或表单中的图片输入，可传 URL、data URI 或上传文件，支持多参考图；当前不支持 `file_id`。每张参考图上限为 50MiB。当前 Grok app-chat 图片生成支持 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`；Grok 图片编辑支持 `grok-imagine-image-edit`，限制为 `size=1024x1024`、最多 7 张参考图、`n<=2`。`grok-imagine-video` 暂未支持，Grok files 和 voice 也未接入，请不要把它们当成可用的视频、文件或语音接口。
 
 账号导入说明：
 
