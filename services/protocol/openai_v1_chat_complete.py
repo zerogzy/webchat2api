@@ -23,7 +23,7 @@ from services.protocol.conversation import (
     stream_text_deltas,
     text_backend,
 )
-from utils.helper import build_chat_image_markdown_content, extract_chat_image, extract_chat_prompt, is_image_chat_request, parse_image_count
+from utils.helper import build_chat_image_markdown_content, extract_chat_image, extract_chat_prompt, has_image_message_content, is_image_chat_request, parse_image_count
 
 
 gpt_chat = chat_adapter("gpt")
@@ -440,8 +440,15 @@ def image_result_content(result: dict[str, Any]) -> str:
     return str(result.get("message") or "Image generation completed.")
 
 
+def has_chat_image_input(body: dict[str, Any]) -> bool:
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(isinstance(message, dict) and has_image_message_content(message.get("content")) for message in messages)
+
+
 def gemini_image_chat_unsupported() -> HTTPException:
-    return _unsupported_image_error(GEMINI_PROVIDER)
+    return HTTPException(status_code=400, detail={"error": "Gemini Web image input is not supported by this upstream adapter"})
 
 
 def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
@@ -512,10 +519,12 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     if body.get("stream"):
-        if is_image_chat_request(body):
-            return image_chat_events(body)
         model, messages, _ = text_chat_parts(body)
         spec = resolve_model(model)
+        if spec.provider == GEMINI_PROVIDER and has_chat_image_input(body):
+            raise gemini_image_chat_unsupported()
+        if is_image_chat_request(body):
+            return image_chat_events(body)
         if tool_calls.has_function_tools(body):
             if spec.provider == GROK_PROVIDER:
                 if grok_chat.is_app_chat_model(spec):
@@ -553,10 +562,12 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         if spec.provider == GEMINI_PROVIDER:
             return stream_gemini_chat_completion(body, spec, messages, model)
         return stream_text_chat_completion(text_backend(), messages, model, stream_include_usage(body))
-    if is_image_chat_request(body):
-        return image_chat_response(body)
     model, messages, original_messages = text_chat_parts(body)
     spec = resolve_model(model)
+    if spec.provider == GEMINI_PROVIDER and has_chat_image_input(body):
+        raise gemini_image_chat_unsupported()
+    if is_image_chat_request(body):
+        return image_chat_response(body)
     if spec.provider == GROK_PROVIDER:
         if grok_chat.is_app_chat_model(spec):
             response = grok_chat.chat_completion(body, spec, messages)
