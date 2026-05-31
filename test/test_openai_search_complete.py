@@ -22,6 +22,7 @@ HTTPException = cast(Any, getattr(sys.modules["fastapi"], "HTTPException"))
 from api import ai as ai_api
 from services.openai_backend_api import OpenAIBackendAPI
 from services.protocol import openai_search, openai_v1_complete
+from services.providers import gemini as gemini_provider
 
 AUTH_HEADERS = {"Authorization": "Bearer webchat2api"}
 API_KEY_HEADERS = {"x-api-key": "webchat2api"}
@@ -120,10 +121,41 @@ class OpenAICompleteProtocolTests(unittest.TestCase):
         self.assertEqual(handle.call_args.args[0]["prompt"], "Say hi")
 
     def test_v1_complete_alias_remains_supported(self) -> None:
-        with self.assertRaises(HTTPException) as caught:
+        backend = object()
+        with (
+            mock.patch.object(openai_v1_complete, "text_backend", return_value=backend),
+            mock.patch.object(openai_v1_complete, "collect_text", return_value="Alias completed") as collect_text,
+        ):
+            result = openai_v1_complete.handle({"model": "gpt-4o", "prompt": "Say hi"})
+
+        collect_text.assert_called_once()
+        request = collect_text.call_args.args[1]
+        self.assertEqual(request.messages, [{"role": "user", "content": "Say hi"}])
+        self.assertEqual(result["object"], "text_completion")
+        self.assertEqual(result["model"], "gpt-4o")
+        self.assertEqual(result["choices"][0]["text"], "Alias completed")
+
+    def test_complete_gemini_model_uses_gemini_provider_no_account_path(self) -> None:
+        account_service = mock.Mock()
+        account_service.get_text_access_token.return_value = ""
+        with mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
+             self.assertRaises(HTTPException) as caught:
             openai_v1_complete.handle({"model": "gemini-2.5-pro", "prompt": "Say hi"})
 
-        self.assertEqual(caught.exception.status_code, 400)
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(caught.exception.detail, {"error": "no available Gemini account"})
+        account_service.get_text_access_token.assert_called_once_with(provider="gemini")
+
+    def test_complete_gemini_model_can_be_mocked_without_gpt_backend(self) -> None:
+        with mock.patch.object(gemini_provider, "chat_completion", return_value=gemini_provider.GeminiCompletion("Gemini complete")) as chat_completion:
+            result = openai_v1_complete.handle({"model": "gemini-2.5-pro", "prompt": "Say hi"})
+
+        called_body, called_spec, called_messages = chat_completion.call_args.args
+        self.assertEqual(called_body["model"], "gemini-2.5-pro")
+        self.assertEqual(called_spec.provider, "gemini")
+        self.assertEqual(called_messages, [{"role": "user", "content": "Say hi"}])
+        self.assertEqual(result["object"], "text_completion")
+        self.assertEqual(result["choices"][0]["text"], "Gemini complete")
 
 
 class OpenAISearchCompleteRouteTests(unittest.TestCase):
