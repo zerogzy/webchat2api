@@ -459,6 +459,22 @@ def account_has_capability(account: dict[str, Any], spec: ModelSpec) -> bool:
     return bool(capabilities & requested)
 
 
+def validate_remote_info(access_token: str, account: dict[str, Any] | None = None) -> dict[str, Any]:
+    from services.providers.grok.client import validate_grok_access_token
+
+    return validate_grok_access_token(access_token, account)
+
+
+def remote_error_status(exc: Exception) -> int | None:
+    status = getattr(exc, "upstream_status", None) or getattr(exc, "status_code", None)
+    if status is None:
+        return None
+    try:
+        return int(str(status))
+    except (TypeError, ValueError):
+        return None
+
+
 def is_auth_failure_payload(payload: Any) -> bool:
     if isinstance(payload, dict):
         for key in ("error", "message", "detail", "code", "reason"):
@@ -500,5 +516,15 @@ def build_export_item(account: dict[str, Any]) -> dict[str, str] | None:
     }
 
 
+GROK_SECRET_KEYS = {"access_token", "accessToken", "sso", "sso_token", "id_token", "refresh_token", "cookies"}
+
+
 def sanitize_account(item: dict[str, Any]) -> dict[str, Any]:
-    return dict(item)
+    account = dict(item)
+    for key in GROK_SECRET_KEYS:
+        account.pop(key, None)
+    account["has_access_token"] = bool(clean_string(item.get("access_token") or item.get("accessToken")))
+    account["has_sso"] = bool(clean_string(item.get("sso") or item.get("sso_token")) or _cookie_value(item.get("cookies"), "sso"))
+    account["has_id_token"] = bool(clean_string(item.get("id_token")))
+    account["has_refresh_token"] = bool(clean_string(item.get("refresh_token")))
+    return account

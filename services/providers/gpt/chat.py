@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from services.protocol.conversation import ConversationRequest, collect_text, stream_text_deltas, text_backend
+from services.providers.base import ConversationRequest
+from services.providers.gpt.runtime import collect_text, stream_text_deltas, text_backend
 
 
 def _conversation_request(messages: list[dict[str, Any]], model: str) -> ConversationRequest:

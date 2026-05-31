@@ -6,8 +6,9 @@ from typing import Any, Iterator
 
 from fastapi import HTTPException
 
-from services.models import resolve_model
-from services.protocol.conversation import ConversationRequest, collect_text, count_text_tokens, text_backend
+from services.providers.base import ConversationRequest
+from services.providers.registry import resolve_model
+from services.protocol.conversation import collect_text, count_text_tokens, text_backend
 from services.protocol.openai_v1_chat_complete import stream_text_chat_completion
 
 

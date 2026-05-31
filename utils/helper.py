@@ -7,11 +7,12 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 
 from curl_cffi import requests
 from fastapi import HTTPException
-from services.models import IMAGE_MODEL_IDS
+from services.providers.registry import IMAGE_MODEL_IDS
+from services.protocol.error_response import sanitize_openai_error_payload, sanitize_public_error_message
 from utils.log import logger
 
 IMAGE_MODELS = IMAGE_MODEL_IDS
@@ -179,11 +180,16 @@ def sse_json_stream(items) -> Iterator[str]:
         logger.warning({
             "event": "sse_stream_error",
             "error_type": exc.__class__.__name__,
-            "error": str(exc),
+            "error": sanitize_public_error_message(str(exc)),
         })
-        error = exc.to_openai_error() if hasattr(exc, "to_openai_error") else {
-            "error": {"message": str(exc), "type": exc.__class__.__name__}
-        }
+        if hasattr(exc, "to_openai_error"):
+            error = cast(Any, exc).to_openai_error()
+        else:
+            error = {"error": {"message": str(exc), "type": exc.__class__.__name__}}
+        if isinstance(error, dict):
+            error = sanitize_openai_error_payload(error)
+        else:
+            error = sanitize_openai_error_payload({"error": {"message": str(error), "type": exc.__class__.__name__}})
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"
 
@@ -198,9 +204,14 @@ def anthropic_sse_stream(items) -> Iterator[str]:
         logger.warning({
             "event": "anthropic_sse_stream_error",
             "error_type": exc.__class__.__name__,
-            "error": str(exc),
+            "error": sanitize_public_error_message(str(exc)),
         })
-        error = {"type": "error", "error": {"type": exc.__class__.__name__, "message": str(exc)}}
+        openai_error = sanitize_openai_error_payload({
+            "error": {"message": str(exc), "type": exc.__class__.__name__}
+        })
+        error_message = str(openai_error.get("error", {}).get("message") or sanitize_public_error_message(str(exc)))
+        error_type = str(openai_error.get("error", {}).get("type") or exc.__class__.__name__)
+        error = {"type": "error", "error": {"type": error_type, "message": error_message}}
         yield "event: error\n"
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
@@ -359,7 +370,7 @@ def extract_chat_prompt(body: dict[str, object]) -> str:
 
 def parse_image_count(raw_value: object) -> int:
     try:
-        value = int(raw_value or 1)
+        value = int(str(raw_value)) if raw_value is not None and raw_value != "" else 1
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail={"error": "n must be an integer"}) from exc
     if value < 1 or value > 4:
@@ -368,7 +379,8 @@ def parse_image_count(raw_value: object) -> int:
 
 
 def build_chat_image_markdown_content(image_result: dict[str, object]) -> str:
-    image_items = image_result.get("data") if isinstance(image_result.get("data"), list) else []
+    raw_image_items = image_result.get("data")
+    image_items = raw_image_items if isinstance(raw_image_items, list) else []
     markdown_images: list[str] = []
     for index, item in enumerate(image_items, start=1):
         if not isinstance(item, dict):
