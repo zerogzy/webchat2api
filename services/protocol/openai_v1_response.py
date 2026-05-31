@@ -17,7 +17,7 @@ from services.protocol.conversation import (
     stream_text_deltas,
     text_backend,
 )
-from utils.helper import extract_image_from_message_content, extract_response_prompt, has_response_image_generation_tool
+from utils.helper import extract_image_from_message_content, extract_response_prompt, has_image_message_content, has_response_image_generation_tool
 
 
 gpt_chat = chat_adapter("gpt")
@@ -49,6 +49,12 @@ def extract_response_image(input_value: object) -> tuple[bytes, str] | None:
     return None
 
 
+def _typed_response_content(items: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+    if any(has_image_message_content([item]) for item in items):
+        return [dict(item) for item in items]
+    return extract_response_prompt(items)
+
+
 def messages_from_input(input_value: object, instructions: object = None) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     system_text = str(instructions or "").strip()
@@ -63,9 +69,9 @@ def messages_from_input(input_value: object, instructions: object = None) -> lis
         return messages
     if isinstance(input_value, list):
         if all(isinstance(item, dict) and item.get("type") for item in input_value):
-            text = extract_response_prompt(input_value)
-            if text:
-                messages.append({"role": "user", "content": text})
+            content = _typed_response_content(input_value)
+            if content:
+                messages.append({"role": "user", "content": content})
             return messages
         for item in input_value:
             if isinstance(item, dict):
@@ -94,9 +100,16 @@ def _messages_from_response_item(item: dict[str, Any]) -> list[dict[str, Any]]:
             "tool_call_id": str(item.get("call_id") or item.get("tool_call_id") or ""),
             "content": str(item.get("output") or item.get("content") or ""),
         }]
+    content = item.get("content")
+    if has_image_message_content(content):
+        message_content = content
+    elif has_image_message_content([item]):
+        message_content = _typed_response_content([item])
+    else:
+        message_content = extract_response_prompt([item]) or content or ""
     return [{
         "role": str(item.get("role") or "user"),
-        "content": extract_response_prompt([item]) or item.get("content") or "",
+        "content": message_content,
     }]
 
 

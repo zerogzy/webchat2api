@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 import time
@@ -28,6 +30,8 @@ class ToolConfig:
 
 
 CompletionFunc = Callable[[dict[str, Any], ModelSpec, list[dict[str, Any]]], gemini.GeminiCompletion]
+_INLINE_MEDIA_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
+_MAX_INLINE_MEDIA_BYTES = 10 * 1024 * 1024
 
 
 def list_models() -> dict[str, Any]:
@@ -78,7 +82,8 @@ def generate_content(model: str, body: dict[str, Any], completion_func: Completi
     parsed = parse_native_tool_response(completion.content, tools, tool_config) if tools else []
     if parsed:
         return gemini_response(model_id, function_call_parts(parsed), "STOP", text)
-    return gemini_response(model_id, [{"text": tool_calls.strip_tool_markup(completion.content)}], "STOP", text)
+    content = native_text_response(completion.content) if tools else completion.content
+    return gemini_response(model_id, [{"text": tool_calls.strip_tool_markup(content)}], "STOP", text)
 
 
 def stream_generate_content(model: str, body: dict[str, Any], completion_func: CompletionFunc | None = None, first_event: dict[str, Any] | None = None) -> Iterator[dict[str, Any]]:
@@ -102,6 +107,30 @@ def stream_generate_content(model: str, body: dict[str, Any], completion_func: C
     yield gemini_response(_model_id(model), [], "STOP", text)
 
 
+def _inline_media_part(part: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    inline = _dict_value(part, "inline_data", "inlineData")
+    if not isinstance(inline, dict):
+        return None
+    data = inline.get("data")
+    if not isinstance(data, str) or not data:
+        return None
+    mime_type = str(inline.get("mime_type") or inline.get("mimeType") or "application/octet-stream").strip().lower() or "application/octet-stream"
+    if mime_type == "image/jpg":
+        mime_type = "image/jpeg"
+    if mime_type not in _INLINE_MEDIA_MIME_TYPES:
+        raise HTTPException(status_code=400, detail={"error": "unsupported inline media mime type"})
+    try:
+        decoded = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail={"error": "invalid inline media data"}) from exc
+    if not decoded:
+        raise HTTPException(status_code=400, detail={"error": "inline media is empty"})
+    if len(decoded) > _MAX_INLINE_MEDIA_BYTES:
+        raise HTTPException(status_code=400, detail={"error": "inline media is too large"})
+    content_part = {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{data}"}}
+    return content_part, f"[image:{mime_type}]"
+
+
 def messages_from_contents(body: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
     contents = body.get("contents")
     if not isinstance(contents, list) or not contents:
@@ -109,7 +138,7 @@ def messages_from_contents(body: dict[str, Any]) -> tuple[list[dict[str, Any]], 
     messages: list[dict[str, Any]] = []
     text_parts: list[str] = []
     non_text_parts: list[str] = []
-    saw_media = False
+    media_previews: list[str] = []
     for content in contents:
         if not isinstance(content, dict):
             continue
@@ -117,38 +146,45 @@ def messages_from_contents(body: dict[str, Any]) -> tuple[list[dict[str, Any]], 
         parts = content.get("parts")
         if not isinstance(parts, list):
             continue
-        message_parts: list[str] = []
+        message_parts: list[dict[str, Any]] = []
         for part in parts:
             if not isinstance(part, dict):
                 continue
             if isinstance(part.get("text"), str):
                 text = str(part.get("text") or "")
                 if text:
-                    message_parts.append(text)
+                    message_parts.append({"type": "text", "text": text})
                     text_parts.append(text)
                 continue
-            if part.get("inline_data") is not None or part.get("inlineData") is not None:
-                saw_media = True
+            inline_media = _inline_media_part(part)
+            if inline_media is not None:
+                media_part, preview = inline_media
+                message_parts.append(media_part)
+                media_previews.append(preview)
                 continue
             call = _dict_value(part, "function_call", "functionCall")
             if call:
                 serialized = "Function call: " + json.dumps(call, ensure_ascii=False, separators=(",", ":"))
-                message_parts.append(serialized)
+                message_parts.append({"type": "text", "text": serialized})
                 non_text_parts.append(serialized)
                 continue
             response = _dict_value(part, "function_response", "functionResponse")
             if response:
                 serialized = "Function response: " + json.dumps(response, ensure_ascii=False, separators=(",", ":"))
-                message_parts.append(serialized)
+                message_parts.append({"type": "text", "text": serialized})
                 non_text_parts.append(serialized)
-        if message_parts:
-            messages.append({"role": role, "content": "\n".join(message_parts)})
+        if not message_parts:
+            continue
+        if all(part.get("type") == "text" for part in message_parts):
+            messages.append({"role": role, "content": "\n".join(str(part.get("text") or "") for part in message_parts)})
+        else:
+            messages.append({"role": role, "content": message_parts})
     request_text = "\n".join(text_parts).strip()
     if not request_text and non_text_parts:
         request_text = "\n".join(non_text_parts).strip()
+    if not request_text and media_previews:
+        request_text = "\n".join(media_previews).strip()
     if not request_text:
-        if saw_media:
-            raise HTTPException(status_code=400, detail={"error": "Gemini native inline media is not supported by this provider"})
         raise HTTPException(status_code=400, detail={"error": "Gemini generateContent requires at least one text part"})
     if not messages:
         raise HTTPException(status_code=400, detail={"error": "Gemini generateContent requires at least one text part"})
@@ -221,6 +257,31 @@ def inject_native_tool_prompt(messages: list[dict[str, Any]], tools: list[Native
     return [{"role": "system", "content": prompt}, *messages]
 
 
+def _extract_json_object(text: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            value, _ = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            start = text.find("{", start + 1)
+            continue
+        return value if isinstance(value, dict) else {}
+    return {}
+
+
+def native_text_response(text: str) -> str:
+    stripped = _strip_fences(text or "").strip()
+    obj = _extract_json_object(stripped)
+    if not obj:
+        return text
+    status = str(obj.get("status") or "").strip().lower()
+    if status != "text":
+        return text
+    content = obj.get("content")
+    return str(content).strip() if content is not None else ""
+
+
 def parse_native_tool_response(text: str, tools: list[NativeTool], config: ToolConfig | None = None) -> list[tool_calls.ParsedToolCall]:
     config = config or ToolConfig()
     available = [item.name for item in tools]
@@ -289,6 +350,18 @@ def _native_role_to_openai(role: str) -> str:
     if lowered == "system":
         return "system"
     return "user"
+
+
+def _strip_fences(text: str) -> str:
+    stripped = str(text or "").strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
 
 def _dict_value(data: dict[str, Any], *keys: str) -> dict[str, Any]:
