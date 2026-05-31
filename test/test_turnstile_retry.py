@@ -15,6 +15,7 @@ install_tiktoken_stub()
 
 from services.openai_backend_api import RetryableTurnstileError
 from services.protocol import conversation
+from services.providers.gpt import runtime as gpt_runtime
 
 
 class TurnstileRetryTests(unittest.TestCase):
@@ -49,9 +50,9 @@ class TurnstileRetryTests(unittest.TestCase):
         initial_backend: Any = types.SimpleNamespace(access_token="first-token")
 
         with (
-            mock.patch.object(conversation, "OpenAIBackendAPI", FakeBackend),
-            mock.patch.object(conversation, "conversation_events", fake_conversation_events),
-            mock.patch.object(conversation, "account_service", account_service),
+            mock.patch.object(gpt_runtime, "OpenAIBackendAPI", FakeBackend),
+            mock.patch.object(gpt_runtime, "conversation_events", fake_conversation_events),
+            mock.patch.object(gpt_runtime, "account_service", account_service),
         ):
             deltas = list(conversation.stream_text_deltas(initial_backend, request))
 

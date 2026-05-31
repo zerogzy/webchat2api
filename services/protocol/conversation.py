@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import tiktoken
 
@@ -79,7 +79,7 @@ def count_text_tokens(text: str, model: str) -> int:
     return len(encoding_for_model(model).encode(text))
 
 
-def stream_image_chunks(outputs: Iterable[ImageOutput]) -> Iterable[dict[str, Any]]:
+def stream_image_chunks(outputs: Iterable[ImageOutput]) -> Iterator[dict[str, Any]]:
     for output in outputs:
         yield output.to_chunk()
 

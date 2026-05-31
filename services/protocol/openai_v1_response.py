@@ -8,7 +8,7 @@ from fastapi import HTTPException
 
 from api.image_inputs import resolve_inline_image_reference
 
-from services.providers.base import ConversationRequest, GEMINI_PROVIDER, GROK_PROVIDER, ImageOutput
+from services.providers.base import ConversationRequest, GEMINI_PROVIDER, GROK_PROVIDER, ImageGenerationError, ImageOutput
 from services.providers.registry import chat_adapter, resolve_model, response_image_outputs
 import services.protocol.tool_calls as tool_calls
 from services.protocol.conversation import encode_images, stream_text_deltas, text_backend

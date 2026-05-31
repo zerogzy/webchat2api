@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import os
 import time
 import unittest
 from pathlib import Path
@@ -15,7 +16,7 @@ if importlib.util.find_spec("requests") is not None:
 from test.utils import save_image
 from utils.log import logger
 
-AUTH_KEY = "webchat2api"
+AUTH_KEY = os.getenv("LOGIN_SECRET")
 BASE_URL = "http://localhost:83"
 ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
 
@@ -41,6 +42,7 @@ def summarize_chunk(chunk: dict[str, object]) -> dict[str, object]:
 
 
 @unittest.skipIf(requests is None, "requests is not installed")
+@unittest.skipIf(not AUTH_KEY, "LOGIN_SECRET is required for live HTTP auth")
 class ImageEditsTests(unittest.TestCase):
     def test_image_edit_http(self):
         """测试图片编辑的非流式 HTTP 调用。"""
