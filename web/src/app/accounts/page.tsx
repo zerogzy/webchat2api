@@ -50,6 +50,7 @@ import {
   type AccountDeleteIdentifier,
   type AccountDeletePayload,
   type AccountExportProvider,
+  type AccountSelectionPayload,
   type AccountStatus,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -240,7 +241,10 @@ function accountProviderId(account: Account): ProviderId {
 function accountRowKey(account: Account, index: number) {
   const provider = accountProviderId(account);
   const token = accountToken(account);
-  if (token) return `${provider}:${token}`;
+  if (token) return `${provider}:token:${token}`;
+  const deleteIdentifier = accountDeleteIdentifier(account);
+  if (deleteIdentifier?.account_id) return `${provider}:account:${deleteIdentifier.account_id}`;
+  if (deleteIdentifier?.row_id) return `${provider}:row:${deleteIdentifier.row_id}`;
   return `${provider}:sanitized-${account.email ?? ""}-${account.type ?? ""}-${index}`;
 }
 
@@ -271,11 +275,19 @@ function accountDeleteIdentifier(account: Account): AccountDeleteCandidate | nul
   return rowId ? { row_id: rowId } : null;
 }
 
-function accountDeletePayloads(accounts: Account[]): AccountDeletePayload {
+function accountSelectionPayload(accounts: Account[]): AccountSelectionPayload {
   return {
     tokens: accountTokens(accounts),
     identifiers: accounts.map(accountDeleteIdentifier).filter((item): item is AccountDeleteCandidate => item !== null),
   };
+}
+
+function accountDeletePayloads(accounts: Account[]): AccountDeletePayload {
+  return accountSelectionPayload(accounts);
+}
+
+function accountSelectionCount(payload: AccountSelectionPayload) {
+  return payload.tokens.length + payload.identifiers.length;
 }
 
 function accountHasDeleteIdentifier(account: Account) {
@@ -354,18 +366,19 @@ function ProviderAccountSection({
   onFilterChange: (next: Partial<ProviderFilters[ProviderId]>) => void;
   onPageChange: (page: number) => void;
   onSelectChange: (ids: string[]) => void;
-  onRefresh: (tokens: string[]) => void;
+  onRefresh: (payload: AccountSelectionPayload) => void;
   onDelete: (payload: AccountDeletePayload) => void;
   onDeleteLimited: () => void;
-  onExport: (tokens: string[]) => void;
+  onExport: (payload: AccountSelectionPayload) => void;
   onEdit: (account: Account) => void;
 }) {
   const selectedSet = new Set(selectedIds);
   const selectedRows = accounts.filter((account, index) => selectedSet.has(accountRowKey(account, index)));
-  const selectedPayloads = accountDeletePayloads(selectedRows);
+  const selectedPayloads = accountSelectionPayload(selectedRows);
   const selectedTokens = selectedPayloads.tokens;
-  const selectedRefreshTokens = provider.refresh.enabled ? selectedTokens : [];
-  const selectedDeleteCount = selectedPayloads.tokens.length + selectedPayloads.identifiers.length;
+  const selectedRefreshPayload = provider.refresh.enabled ? selectedPayloads : { tokens: [], identifiers: [] };
+  const selectedRefreshCount = accountSelectionCount(selectedRefreshPayload);
+  const selectedDeleteCount = accountSelectionCount(selectedPayloads);
   const limitedTokens = accountTokens(accounts.filter((item) => item.status === "限流"));
   const typeOptions = [
     { label: "全部计划/池", value: "all" },
@@ -453,8 +466,8 @@ function ProviderAccountSection({
         <Button
           variant="ghost"
           className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
-          onClick={() => onRefresh(selectedRefreshTokens)}
-          disabled={!provider.refresh.enabled || selectedRefreshTokens.length === 0 || isRefreshing}
+          onClick={() => onRefresh(selectedRefreshPayload)}
+          disabled={!provider.refresh.enabled || selectedRefreshCount === 0 || isRefreshing}
           title={provider.refresh.rowTitle}
         >
           {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
@@ -481,11 +494,11 @@ function ProviderAccountSection({
         <Button
           variant="ghost"
           className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
-          onClick={() => onExport(provider.canExportWithoutTokens ? [] : selectedTokens)}
-          disabled={!accountProviderSupportsTokenExport(provider.id, selectedTokens.length) || isExporting || isDeleting}
+          onClick={() => onExport(provider.canExportWithoutTokens ? { tokens: [], identifiers: [] } : selectedPayloads)}
+          disabled={!accountProviderSupportsTokenExport(provider.id, selectedTokens.length, selectedPayloads.identifiers.length) || isExporting || isDeleting}
         >
           {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-          {selectedTokens.length > 0 ? provider.selectedExportButtonLabel : provider.exportButtonLabel}
+          {accountSelectionCount(selectedPayloads) > 0 ? provider.selectedExportButtonLabel : provider.exportButtonLabel}
         </Button>
         {selectedIds.length > 0 ? (
           <span className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-semibold text-stone-600 shadow-sm">
@@ -591,8 +604,8 @@ function ProviderAccountSection({
                       <button
                         type="button"
                         className="rounded-lg p-2 transition hover:bg-white hover:text-stone-700"
-                        onClick={() => onRefresh([token])}
-                        disabled={isRefreshing || !provider.refresh.enabled || !token}
+                        onClick={() => onRefresh(accountSelectionPayload([account]))}
+                        disabled={isRefreshing || !provider.refresh.enabled || !accountHasDeleteIdentifier(account)}
                         title={provider.refresh.rowTitle}
                       >
                         <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
@@ -817,20 +830,20 @@ function AccountsPageContent() {
     }
   };
 
-  const handleRefreshAccounts = async (provider: ProviderId, accessTokens: string[]) => {
+  const handleRefreshAccounts = async (provider: ProviderId, payload: AccountSelectionPayload) => {
     const providerDefinition = getAccountProviderDefinition(provider);
     if (!providerDefinition.refresh.enabled) {
       toast.error(providerDefinition.refresh.rowTitle);
       return;
     }
-    if (accessTokens.length === 0) {
+    if (accountSelectionCount(payload) === 0) {
       toast.error(`没有可刷新的 ${providerDefinition.label} 账户`);
       return;
     }
 
     setIsRefreshing(true);
     try {
-      const data = await refreshAccounts(accessTokens, provider);
+      const data = await refreshAccounts(payload, provider);
       handleProviderMutationResult(provider, data.items);
       if (data.errors.length > 0) {
         const firstError = data.errors[0]?.error;
@@ -879,8 +892,8 @@ function AccountsPageContent() {
     }
   };
 
-  const handleExportAccounts = async (provider: AccountExportProvider, tokens: string[]) => {
-    if (!accountProviderSupportsTokenExport(provider, tokens.length)) {
+  const handleExportAccounts = async (provider: AccountExportProvider, payload: AccountSelectionPayload) => {
+    if (!accountProviderSupportsTokenExport(provider, payload.tokens.length, payload.identifiers.length)) {
       const label = accountExportProviderLabel(provider);
       toast.error(`没有可导出的 ${label} 账户`);
       return;
@@ -888,7 +901,7 @@ function AccountsPageContent() {
 
     setIsExporting(true);
     try {
-      const data = await exportAccounts(provider, tokens);
+      const data = await exportAccounts(provider, payload);
       downloadBlob(data.blob, data.filename);
       const label = accountExportProviderLabel(provider);
       toast.success(`${label} TXT 文件已导出`);
@@ -923,8 +936,8 @@ function AccountsPageContent() {
             <Button
               variant="outline"
               className="h-10 rounded-xl border-stone-200 bg-white/85 px-4 text-stone-700 shadow-sm hover:bg-white"
-              onClick={() => void handleRefreshAccounts(activeProvider, accountTokens(activeRows.accounts))}
-              disabled={!activeDefinition.refresh.enabled || isLoading || isRefreshing || isDeleting || accountTokens(activeRows.accounts).length === 0}
+              onClick={() => void handleRefreshAccounts(activeProvider, accountSelectionPayload(activeRows.accounts))}
+              disabled={!activeDefinition.refresh.enabled || isLoading || isRefreshing || isDeleting || accountSelectionCount(accountSelectionPayload(activeRows.accounts)) === 0}
             >
               <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
               {activeDefinition.refresh.buttonLabel ?? activeDefinition.refresh.rowTitle}
@@ -1064,10 +1077,10 @@ function AccountsPageContent() {
             onFilterChange={(next) => setProviderFilters(activeProvider, next)}
             onPageChange={(nextPage) => setProviderPage(activeProvider, nextPage)}
             onSelectChange={(ids) => setProviderSelection(activeProvider, ids)}
-            onRefresh={(tokens) => void handleRefreshAccounts(activeProvider, tokens)}
+            onRefresh={(payload) => void handleRefreshAccounts(activeProvider, payload)}
             onDelete={(payload) => void handleDeleteTokens(activeProvider, payload)}
             onDeleteLimited={() => void handleDeleteLimitedAccounts(activeProvider)}
-            onExport={(tokens) => void handleExportAccounts(activeProvider, tokens)}
+            onExport={(payload) => void handleExportAccounts(activeProvider, payload)}
             onEdit={openEditDialog}
           />
         )}

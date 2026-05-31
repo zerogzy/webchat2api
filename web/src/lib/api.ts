@@ -61,7 +61,7 @@ type AccountUpdateResponse = {
 };
 
 export type AccountImportPayload = {
-  access_token: string;
+  access_token?: string;
   accessToken?: string;
   type?: string;
   provider?: AccountProvider;
@@ -87,6 +87,8 @@ export type AccountDeletePayload = {
   tokens: string[];
   identifiers: AccountDeleteIdentifier[];
 };
+
+export type AccountSelectionPayload = AccountDeletePayload;
 
 export type SettingsConfig = {
   proxy: string;
@@ -342,11 +344,12 @@ export async function deleteLimitedAccounts(provider?: AccountExportProvider) {
   });
 }
 
-export async function refreshAccounts(accessTokens: string[], provider?: AccountExportProvider) {
+export async function refreshAccounts(payload: AccountSelectionPayload, provider?: AccountExportProvider) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
     body: {
-      access_tokens: accessTokens,
+      access_tokens: payload.tokens,
+      ...(payload.identifiers.length > 0 ? { identifiers: payload.identifiers } : {}),
       ...(provider ? { provider } : {}),
     },
   });
@@ -366,13 +369,14 @@ function accountExportFallbackFilename(provider: AccountExportProvider) {
   return getAccountProviderDefinition(provider).exportFilename;
 }
 
-export async function exportAccounts(provider: AccountExportProvider, accessTokens: string[] = []) {
+export async function exportAccounts(provider: AccountExportProvider, payload: AccountSelectionPayload = { tokens: [], identifiers: [] }) {
   const response = await request.request<Blob>({
     url: "/api/accounts/export",
     method: "POST",
     data: {
       provider,
-      access_tokens: accessTokens,
+      access_tokens: payload.tokens,
+      ...(payload.identifiers.length > 0 ? { identifiers: payload.identifiers } : {}),
     },
     responseType: "blob",
   });
