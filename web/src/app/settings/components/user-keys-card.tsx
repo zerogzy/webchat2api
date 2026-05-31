@@ -173,7 +173,7 @@ export function UserKeysCard() {
 
   return (
     <>
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card className="rounded-[28px] border-white/75 bg-card/88 shadow-[var(--shadow-soft)] backdrop-blur-sm">
         <CardContent className="space-y-6 p-6">
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-center gap-3">
@@ -214,7 +214,7 @@ export function UserKeysCard() {
               <LoaderCircle className="size-5 animate-spin text-stone-400" />
             </div>
           ) : items.length === 0 ? (
-            <div className="rounded-xl bg-stone-50 px-6 py-10 text-center text-sm text-stone-500">
+            <div className="rounded-2xl border border-white/70 bg-muted/55 px-6 py-10 text-center text-sm text-muted-foreground">
               暂无普通用户密钥。点击右上角按钮后即可创建并分发给其他人。
             </div>
           ) : (

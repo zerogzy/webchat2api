@@ -1,13 +1,15 @@
 import { httpRequest, request } from "@/lib/request";
+import { getAccountProviderDefinition } from "@/providers/registry";
 
 export type AccountType = string;
-export type AccountProvider = "gpt" | "grok" | string;
+export type AccountProvider = "gpt" | "grok" | "gemini" | string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = string;
 export type AuthRole = "admin" | "user";
 
 export type Account = {
-  access_token: string;
+  access_token?: string;
+  has_gemini_session?: boolean;
   type: AccountType;
   provider?: AccountProvider;
   export_type?: string | null;
@@ -18,6 +20,7 @@ export type Account = {
   expired?: string | null;
   id_token?: string | null;
   account_id?: string | null;
+  row_id?: string | null;
   last_refresh?: string | null;
   refresh_token?: string | null;
   user_id?: string | null;
@@ -67,12 +70,23 @@ export type AccountImportPayload = {
   expired?: string;
   id_token?: string;
   account_id?: string;
+  row_id?: string;
   last_refresh?: string;
   refresh_token?: string;
   [key: string]: unknown;
 };
 
-export type AccountExportProvider = "gpt" | "grok";
+export type AccountExportProvider = "gpt" | "grok" | "gemini";
+
+export type AccountDeleteIdentifier = {
+  account_id?: string | null;
+  row_id?: string | null;
+};
+
+export type AccountDeletePayload = {
+  tokens: string[];
+  identifiers: AccountDeleteIdentifier[];
+};
 
 export type SettingsConfig = {
   proxy: string;
@@ -245,6 +259,8 @@ export type ModelInfo = {
   object?: string;
   created?: number;
   owned_by?: string;
+  provider?: AccountProvider;
+  capability?: "chat" | "image" | "image_edit" | "video" | string;
 };
 
 export type ModelListResponse = {
@@ -288,38 +304,51 @@ export async function login(authKey: string) {
   });
 }
 
-export async function fetchAccounts() {
-  return httpRequest<AccountListResponse>("/api/accounts");
+export async function fetchAccounts(provider?: AccountExportProvider) {
+  const query = provider ? `?provider=${encodeURIComponent(provider)}` : "";
+  return httpRequest<AccountListResponse>(`/api/accounts${query}`);
 }
 
-export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {
+export async function createAccounts(
+  tokens: string[],
+  accounts: AccountImportPayload[] = [],
+  provider?: AccountExportProvider,
+) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",
     body: {
       tokens,
+      ...(provider ? { provider } : {}),
       ...(accounts.length > 0 ? { accounts } : {}),
     },
   });
 }
 
-export async function deleteAccounts(tokens: string[]) {
+export async function deleteAccounts(payload: AccountDeletePayload, provider?: AccountExportProvider) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "DELETE",
-    body: { tokens },
+    body: {
+      tokens: payload.tokens,
+      ...(payload.identifiers.length > 0 ? { identifiers: payload.identifiers } : {}),
+      ...(provider ? { provider } : {}),
+    },
   });
 }
 
-export async function deleteLimitedAccounts() {
+export async function deleteLimitedAccounts(provider?: AccountExportProvider) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "DELETE",
-    body: { mode: "limited" },
+    body: { mode: "limited", ...(provider ? { provider } : {}) },
   });
 }
 
-export async function refreshAccounts(accessTokens: string[]) {
+export async function refreshAccounts(accessTokens: string[], provider?: AccountExportProvider) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
-    body: { access_tokens: accessTokens },
+    body: {
+      access_tokens: accessTokens,
+      ...(provider ? { provider } : {}),
+    },
   });
 }
 
@@ -334,7 +363,7 @@ function getFilenameFromDisposition(value: unknown, fallback: string) {
 }
 
 function accountExportFallbackFilename(provider: AccountExportProvider) {
-  return provider === "gpt" ? "webchat2api-gpt.txt" : "webchat2api_grok.txt";
+  return getAccountProviderDefinition(provider).exportFilename;
 }
 
 export async function exportAccounts(provider: AccountExportProvider, accessTokens: string[] = []) {
@@ -361,11 +390,13 @@ export async function updateAccount(
     status?: AccountStatus;
     quota?: number;
   },
+  provider?: AccountExportProvider,
 ) {
   return httpRequest<AccountUpdateResponse>("/api/accounts/update", {
     method: "POST",
     body: {
       access_token: accessToken,
+      ...(provider ? { provider } : {}),
       ...updates,
     },
   });

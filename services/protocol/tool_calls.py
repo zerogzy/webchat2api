@@ -129,6 +129,61 @@ def _serialize_tool_history(messages: list[dict[str, Any]]) -> list[dict[str, An
     return injected
 
 
+def make_parsed_tool_call(name: str, arguments: Any) -> ParsedToolCall:
+    return _make_call(name, arguments)
+
+
+def parse_gemini_json_tool_calls(text: str, available_tools: list[str] | None = None) -> ToolParseResult:
+    text = _strip_fences(text or "").strip()
+    if not text:
+        return ToolParseResult()
+    obj = _extract_json_value(text, "{")
+    if not isinstance(obj, dict):
+        return ToolParseResult(saw_tool_syntax='"status"' in text or '"tool_calls"' in text)
+    status = str(obj.get("status") or "").strip().lower()
+    saw_tool_syntax = status in {"call", "text"} or isinstance(obj.get("tool_calls"), list)
+    if status == "text":
+        return ToolParseResult(saw_tool_syntax=saw_tool_syntax)
+    raw_calls = obj.get("tool_calls")
+    calls = _calls_from_items(raw_calls) if isinstance(raw_calls, list) else []
+    if available_tools:
+        available = set(available_tools)
+        calls = [call for call in calls if call.name in available]
+    return ToolParseResult(calls=calls, saw_tool_syntax=saw_tool_syntax)
+
+
+def tool_choice_mode(tool_choice: object) -> tuple[str, str]:
+    if tool_choice == "none":
+        return "none", ""
+    if tool_choice in ("required", True):
+        return "required", ""
+    if isinstance(tool_choice, dict):
+        raw_function = tool_choice.get("function")
+        function = raw_function if isinstance(raw_function, dict) else {}
+        name = str(function.get("name") or tool_choice.get("name") or "").strip()
+        if name:
+            return "forced", name
+    return "auto", ""
+
+
+def parse_gemini_openai_tool_response(text: str, body: dict[str, Any]) -> ToolParseResult:
+    names = tool_names(body.get("tools"))
+    if not names:
+        return ToolParseResult()
+    mode, forced = tool_choice_mode(body.get("tool_choice"))
+    if mode == "none":
+        return ToolParseResult()
+    allowed = [name for name in names if not forced or name == forced]
+    parsed = parse_gemini_json_tool_calls(text, allowed) or ToolParseResult()
+    if not parsed.calls:
+        parsed = parse_tool_calls(text, allowed)
+    if parsed.calls:
+        return parsed
+    if mode in {"required", "forced"} and allowed and parsed.saw_tool_syntax:
+        return ToolParseResult(saw_tool_syntax=parsed.saw_tool_syntax)
+    return parsed
+
+
 def tool_calls_to_xml(calls: object) -> str:
     if not isinstance(calls, list):
         return ""

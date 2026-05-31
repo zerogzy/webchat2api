@@ -382,7 +382,7 @@ export function Sub2APIConnections() {
 
   return (
     <>
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card className="rounded-[28px] border-white/75 bg-card/88 shadow-[var(--shadow-soft)] backdrop-blur-sm">
         <CardContent className="space-y-6 p-6">
           <div className="flex items-start justify-between">
             <div className="flex items-center gap-3">
@@ -413,7 +413,7 @@ export function Sub2APIConnections() {
               <LoaderCircle className="size-5 animate-spin text-stone-400" />
             </div>
           ) : servers.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-3 rounded-xl bg-stone-50 px-6 py-10 text-center">
+            <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-white/70 bg-muted/55 px-6 py-10 text-center">
               <ServerCog className="size-8 text-stone-300" />
               <div className="space-y-1">
                 <p className="text-sm font-medium text-stone-600">暂无 Sub2API 连接</p>
@@ -482,7 +482,7 @@ export function Sub2APIConnections() {
                     </div>
 
                     {importJob ? (
-                      <div className="space-y-2 rounded-xl bg-stone-50 px-3 py-3">
+                      <div className="space-y-2 rounded-2xl border border-white/70 bg-muted/55 px-3 py-3">
                         <div className="text-xs font-medium tracking-[0.16em] text-stone-400 uppercase">导入任务</div>
                         {(() => {
                           const progress =
@@ -536,7 +536,7 @@ export function Sub2APIConnections() {
             </div>
           )}
 
-          <div className="rounded-xl bg-stone-50 px-4 py-3 text-sm leading-6 text-stone-500">
+          <div className="rounded-2xl border border-white/70 bg-muted/55 px-4 py-3 text-sm leading-6 text-muted-foreground">
             <p className="font-medium text-stone-600">使用说明</p>
             <ul className="mt-1 list-inside list-disc space-y-0.5">
               <li>输入 Sub2API 地址和管理员账户（或 Admin API Key），保存为一个连接。</li>

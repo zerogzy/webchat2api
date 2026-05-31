@@ -3,14 +3,13 @@ from __future__ import annotations
 from typing import Any, Iterator
 
 from services.models import GROK_PROVIDER, resolve_model
-from services.providers import grok
+from services.providers.registry import image_edit_outputs
 from services.protocol.conversation import (
     ConversationRequest,
     ImageGenerationError,
     collect_image_outputs,
     encode_images,
     stream_image_chunks,
-    stream_image_outputs_with_pool,
 )
 
 
@@ -24,22 +23,14 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     base_url = str(body.get("base_url") or "") or None
     spec = resolve_model(model)
     if spec.provider == GROK_PROVIDER:
-        if spec.capability != "image_edit":
-            raise ImageGenerationError(
-                f"unsupported Grok image model: {model}",
-                status_code=400,
-                error_type="invalid_request_error",
-                code="unsupported_model",
-                param="model",
-            )
-        outputs = grok.app_chat_image_edit_outputs(body, spec, prompt, images, n, size)
+        outputs = image_edit_outputs(spec, None, body=body, prompt=prompt, images=images, n=n, size=size)
         if body.get("stream"):
             return stream_image_chunks(outputs)
         return collect_image_outputs(outputs)
     encoded_images = encode_images(images)
     if not encoded_images:
         raise ImageGenerationError("image is required")
-    outputs = stream_image_outputs_with_pool(ConversationRequest(
+    request = ConversationRequest(
         prompt=prompt,
         model=model,
         n=n,
@@ -48,7 +39,8 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         base_url=base_url,
         images=encoded_images,
         message_as_error=True,
-    ))
+    )
+    outputs = image_edit_outputs(spec, request, body=body, prompt=prompt, images=images, n=n, size=size)
     if body.get("stream"):
         return stream_image_chunks(outputs)
     return collect_image_outputs(outputs)

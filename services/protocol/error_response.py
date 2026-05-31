@@ -104,21 +104,25 @@ def openai_error_response(
     )
 
 
+def anthropic_error_payload(detail: object, status_code: int) -> dict[str, Any]:
+    error_type = "api_error" if status_code >= 500 else _default_error_type(status_code)
+    return {
+        "type": "error",
+        "error": {
+            "type": error_type,
+            "message": error_message_from_detail(detail) or "request failed",
+        },
+    }
+
+
 def anthropic_error_response(
     detail: object,
     status_code: int,
     *,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
-    error_type = "api_error" if status_code >= 500 else _default_error_type(status_code)
     return JSONResponse(
         status_code=status_code,
-        content={
-            "type": "error",
-            "error": {
-                "type": error_type,
-                "message": error_message_from_detail(detail) or "request failed",
-            },
-        },
+        content=anthropic_error_payload(detail, status_code),
         headers=headers,
     )

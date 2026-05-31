@@ -120,7 +120,8 @@ def patched_grok_validation(return_value: object = None, side_effect: Exception 
 
 from services.account_service import AccountService
 import services.account_service as account_service_module
-from services.models import GROK_PROVIDER, GPT_PROVIDER, resolve_model
+from services.providers import registry as provider_registry
+from services.models import GEMINI_PROVIDER, GROK_PROVIDER, GPT_PROVIDER, resolve_model
 
 account_service_module.log_service.add = lambda *args, **kwargs: None
 
@@ -161,11 +162,182 @@ class AccountProviderTests(unittest.TestCase):
         service = AccountService(MemoryStorage())
         service.add_account_items([
             {"access_token": "gpt-token", "type": "plus", "provider": "gpt"},
-            {"access_token": "grok-token", "type": "basic", "provider": "grok"},
+            {"access_token": "sso=grok-token", "type": "basic", "provider": "grok"},
         ])
 
         self.assertEqual(service.get_text_access_token(provider=GPT_PROVIDER), "gpt-token")
         self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
+
+    def test_selects_gemini_text_token_by_provider(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "gpt-token", "provider": "gpt"},
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": "gemini"},
+        ])
+
+        self.assertEqual(service.get_text_access_token(provider=GEMINI_PROVIDER), "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
+        [gemini_account] = [item for item in service.list_accounts() if item["provider"] == GEMINI_PROVIDER]
+        self.assertEqual(gemini_account["cookies"], {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts"})
+
+    def test_gemini_provider_alias_normalizes_to_gemini(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts", "provider": "google"},
+        ])
+
+        [account] = service.list_accounts()
+        self.assertEqual(account["provider"], GEMINI_PROVIDER)
+        self.assertEqual(service.get_text_access_token(provider="gemini"), "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
+
+    def test_unknown_account_provider_is_rejected(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"access_token": "mystery-token", "provider": "mystery"},
+        ])
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(service.list_accounts(), [])
+
+    def test_unknown_requested_text_provider_does_not_select_gpt_token(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "gpt-token", "provider": "gpt"},
+        ])
+
+        with self.assertRaises(ValueError):
+            service.get_text_access_token(provider="mystery")
+
+    def test_gemini_provider_delete_accepts_cookie_field_token_without_set_mutation(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": "gemini"},
+        ])
+
+        try:
+            result = service.delete_accounts(["__Secure-1PSID=psid"], provider=GEMINI_PROVIDER)
+        except RuntimeError as exc:
+            self.fail(f"Gemini delete mutated target token set while iterating: {exc}")
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
+
+    def test_gemini_provider_delete_accepts_normalized_access_token(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": "gemini"},
+        ])
+
+        result = service.delete_accounts(["__Secure-1PSID=psid; __Secure-1PSIDTS=psidts"], provider=GEMINI_PROVIDER)
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
+
+    def test_gemini_provider_delete_accepts_full_cookie_header(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": "gemini"},
+        ])
+
+        result = service.delete_accounts([
+            "SID=ignored; __Secure-1PSID=psid; __Secure-1PSIDTS=psidts; NID=ignored",
+        ], provider=GEMINI_PROVIDER)
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
+
+    def test_gemini_account_normalizes_cookie_sources_and_metadata(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {
+                "access_token": "SID=sid; __Secure-1PSID=psid; NID=nid; SNlM0e=embedded-session",
+                "cookies": {"__Secure-1PSIDTS": "psidts", "CONSENT": "yes", "at": "cookie-at"},
+                "session_token": "top-session",
+                "provider": "gemini",
+            },
+        ])
+
+        [account] = service.list_accounts(provider=GEMINI_PROVIDER)
+        self.assertEqual(account["access_token"], "SID=sid; __Secure-1PSID=psid; NID=nid; SNlM0e=embedded-session")
+        self.assertEqual(account["__Secure-1PSID"], "psid")
+        self.assertEqual(account["__Secure-1PSIDTS"], "psidts")
+        self.assertEqual(account["cookies"]["SID"], "sid")
+        self.assertEqual(account["cookies"]["NID"], "nid")
+        self.assertEqual(account["cookies"]["CONSENT"], "yes")
+        self.assertEqual(account["cookies"]["SNlM0e"], "embedded-session")
+        self.assertEqual(account["cookies"]["at"], "cookie-at")
+        self.assertEqual(account["session_token"], "top-session")
+        self.assertEqual(account["SNlM0e"], "embedded-session")
+        self.assertEqual(account["at"], "cookie-at")
+        self.assertTrue(account["has_gemini_session"])
+        self.assertEqual(account["account_category"], "full_session")
+        self.assertEqual(account["account_status"], "usable_gemini_session")
+
+    def test_gemini_account_categories_cover_session_shapes(self) -> None:
+        strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
+
+        cases = [
+            ({}, "missing_session", "missing_gemini_session", False),
+            ({"__Secure-1PSID": "psid"}, "psid_only", "usable_gemini_session", True),
+            ({"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts"}, "psid_psidts", "usable_gemini_session", True),
+            (
+                {"access_token": "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts; SNlM0e=session"},
+                "full_session",
+                "usable_gemini_session",
+                True,
+            ),
+        ]
+
+        for account, category, status, has_session in cases:
+            with self.subTest(category=category):
+                normalized = strategy.normalize_account({**account, "provider": GEMINI_PROVIDER, "access_token": strategy.normalize_access_token(account)}) if account else account
+                source = normalized or account
+                self.assertEqual(strategy.account_category(source), category)
+                self.assertEqual(strategy.account_status(source), status)
+                self.assertEqual(strategy.has_gemini_session(source), has_session)
+
+    def test_gemini_refresh_uses_client_helpers_not_generic_account_refresh(self) -> None:
+        strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": GEMINI_PROVIDER, "status": "正常"},
+        ])
+
+        self.assertFalse(strategy.supports_refresh({"__Secure-1PSID": "psid"}))
+        result = service.refresh_accounts([], provider=GEMINI_PROVIDER)
+
+        self.assertEqual(result["refreshed"], 0)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["items"][0]["account_category"], "psid_psidts")
+
+    def test_gemini_auth_failure_detection_and_refresh_error_message(self) -> None:
+        strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
+
+        self.assertTrue(strategy.is_auth_failure_payload({"status_code": 401, "detail": "Unauthorized"}))
+        self.assertTrue(strategy.is_auth_failure_payload({"error": {"message": "SNlM0e not found"}}))
+        self.assertTrue(strategy.is_auth_failure_payload([{"code": "gemini_auth_failed"}]))
+        self.assertFalse(strategy.is_auth_failure_payload({"status_code": 429, "message": "rate limited"}))
+        self.assertFalse(strategy.is_auth_failure_payload({"message": "token budget was exceeded"}))
+        self.assertEqual(strategy.refresh_error_message(RuntimeError("rotate failed")), "rotate failed")
+        self.assertEqual(strategy.refresh_error_message(Exception()), "Gemini session refresh failed")
+
+    def test_gemini_sanitization_redacts_secrets_and_preserves_metadata(self) -> None:
+        strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
+        account = strategy.normalize_account({
+            "accessToken": "SID=sid; __Secure-1PSID=psid; __Secure-1PSIDTS=psidts; SNlM0e=session",
+            "cookies": {"NID": "nid", "at": "at-token"},
+            "provider": GEMINI_PROVIDER,
+            "account_id": "account-a",
+        })
+
+        sanitized = strategy.sanitize_account(account)
+
+        for key in ("access_token", "accessToken", "cookies", "__Secure-1PSID", "__Secure-1PSIDTS", "SNlM0e", "session_token", "at"):
+            self.assertNotIn(key, sanitized)
+        self.assertEqual(sanitized["account_id"], "account-a")
+        self.assertTrue(sanitized["row_id"])
+        self.assertTrue(sanitized["has_gemini_session"])
+        self.assertEqual(sanitized["account_category"], "full_session")
+        self.assertEqual(sanitized["account_status"], "usable_gemini_session")
 
     def test_grok_account_normalizes_simple_sso_cookie_token(self) -> None:
         service = AccountService(MemoryStorage())
@@ -201,10 +373,111 @@ class AccountProviderTests(unittest.TestCase):
         [account] = service.list_accounts()
         self.assertEqual(account["access_token"], "sso=grok-token ; other=value")
 
+    def test_grok_account_rejects_plain_token_without_sso_cookie(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"access_token": "grok-token", "provider": "grok"},
+            {"access_token": "sso-rw=grok-token", "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(service.list_accounts(provider=GROK_PROVIDER), [])
+
+    def test_grok_account_imports_explicit_sso_payload(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"sso": "grok-sso-token", "provider": "grok", "tier": "premium"},
+            {"sso": "sso=grok-simple-cookie-token", "provider": "grok"},
+            {"sso": "sso=grok-cookie-header-token; other=value", "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 3)
+        accounts = service.list_accounts(provider=GROK_PROVIDER)
+        self.assertEqual([account["access_token"] for account in accounts], [
+            "grok-sso-token",
+            "grok-simple-cookie-token",
+            "sso=grok-cookie-header-token; other=value",
+        ])
+        self.assertEqual(accounts[0]["tier"], "super")
+
+    def test_grok_account_imports_sso_alias_payloads(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"raw_sso": "raw-sso-token", "provider": "grok"},
+            {"rawSso": "raw-camel-sso-token", "provider": "grok"},
+            {"sso_token": "sso-token-field", "provider": "grok"},
+            {"ssoToken": "sso-camel-token-field", "provider": "grok"},
+            {"raw_sso": "sso=raw-cookie-token", "provider": "grok"},
+            {"sso_token": "sso=alias-cookie-token; other=value", "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 6)
+        tokens = service.list_tokens(provider=GROK_PROVIDER)
+        self.assertEqual(tokens, [
+            "raw-sso-token",
+            "raw-camel-sso-token",
+            "sso-token-field",
+            "sso-camel-token-field",
+            "raw-cookie-token",
+            "sso=alias-cookie-token; other=value",
+        ])
+
+    def test_grok_account_imports_sso_from_token_and_cookies_dict(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"token": "sso=grok-token-field", "provider": "grok"},
+            {"cookies": {"sso": "grok-cookies-dict-token", "sso-rw": "rw-token"}, "provider": "grok"},
+            {"cookies": {"SSO": "sso=grok-cookies-dict-cookie-token"}, "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 3)
+        tokens = service.list_tokens(provider=GROK_PROVIDER)
+        self.assertEqual(tokens, [
+            "grok-token-field",
+            "grok-cookies-dict-token",
+            "grok-cookies-dict-cookie-token",
+        ])
+
+    def test_grok_account_rejects_explicit_sso_cookie_like_payload_without_sso_pair(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"sso": "sso-rw=grok-token", "provider": "grok"},
+            {"sso": "not-sso=grok-token", "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(service.list_accounts(provider=GROK_PROVIDER), [])
+
+    def test_grok_account_imports_cookie_field_with_sso(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"cookie": "sso=grok-cookie-token; sso-rw=rw-token", "provider": "grok"},
+            {"cookies": "sso=grok-cookies-token; other=value", "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 2)
+        tokens = service.list_tokens(provider=GROK_PROVIDER)
+        self.assertEqual(tokens, [
+            "sso=grok-cookie-token; sso-rw=rw-token",
+            "sso=grok-cookies-token; other=value",
+        ])
+
+    def test_grok_account_rejects_cookie_field_without_sso(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_account_items([
+            {"cookie": "sso-rw=grok-token", "provider": "grok"},
+            {"token": "grok-token", "provider": "grok"},
+            {"cookies": {"sso-rw": "rw-token"}, "provider": "grok"},
+            {"cookies": {"not-sso": "grok-token"}, "provider": "grok"},
+        ])
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(service.list_accounts(provider=GROK_PROVIDER), [])
+
     def test_grok_account_cloudflare_fields_are_optional_metadata(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
-            {"access_token": "grok-token", "provider": "grok"},
+            {"access_token": "sso=grok-token", "provider": "grok"},
         ])
 
         [account] = service.list_accounts()
@@ -214,7 +487,7 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
 
     def test_grok_console_quota_normalizes_defaults_and_persists(self) -> None:
-        storage = MemoryStorage([{"access_token": "grok-token", "provider": "grok"}])
+        storage = MemoryStorage([{"access_token": "sso=grok-token", "provider": "grok"}])
         service = AccountService(storage)
 
         [account] = service.list_accounts()
@@ -233,11 +506,11 @@ class AccountProviderTests(unittest.TestCase):
         now = [1000.0]
         service = AccountService(MemoryStorage([
             {
-                "access_token": "exhausted-token",
+                "access_token": "sso=exhausted-token",
                 "provider": "grok",
                 "quota_console": {"remaining": 0, "total": 30, "window_seconds": 900, "reset_at": 1900},
             },
-            {"access_token": "ready-token", "provider": "grok"},
+            {"access_token": "sso=ready-token", "provider": "grok"},
         ]), now=lambda: now[0])
 
         self.assertEqual(service.get_grok_console_access_token(), "ready-token")
@@ -251,7 +524,7 @@ class AccountProviderTests(unittest.TestCase):
         now = [5000.0]
         service = AccountService(MemoryStorage([
             {
-                "access_token": "grok-token",
+                "access_token": "sso=grok-token",
                 "provider": "grok",
                 "quota_console": {"remaining": 1, "total": 30, "window_seconds": 900, "reset_at": None},
             }
@@ -267,7 +540,7 @@ class AccountProviderTests(unittest.TestCase):
     def test_grok_console_selection_reserves_without_provider_mark(self) -> None:
         service = AccountService(MemoryStorage([
             {
-                "access_token": "grok-token",
+                "access_token": "sso=grok-token",
                 "provider": "grok",
                 "quota_console": {"remaining": 1, "total": 1, "window_seconds": 900, "reset_at": None},
             }
@@ -281,7 +554,7 @@ class AccountProviderTests(unittest.TestCase):
 
     def test_text_and_image_usage_do_not_consume_console_quota(self) -> None:
         storage = MemoryStorage([
-            {"access_token": "grok-token", "provider": "grok"},
+            {"access_token": "sso=grok-token", "provider": "grok"},
             {"access_token": "gpt-token", "provider": "gpt", "quota": 1},
         ])
         service = AccountService(storage)
@@ -298,21 +571,21 @@ class AccountProviderTests(unittest.TestCase):
     def test_selects_grok_app_chat_token_by_tier_semantics(self) -> None:
         basic_service = AccountService(MemoryStorage())
         basic_service.add_account_items([
-            {"access_token": "basic-token", "provider": "grok", "tier": "free"},
-            {"access_token": "super-token", "provider": "grok", "tier": "premium"},
-            {"access_token": "heavy-token", "provider": "grok", "tier": "heavy"},
+            {"access_token": "sso=basic-token", "provider": "grok", "tier": "free"},
+            {"access_token": "sso=super-token", "provider": "grok", "tier": "premium"},
+            {"access_token": "sso=heavy-token", "provider": "grok", "tier": "heavy"},
         ])
         super_service = AccountService(MemoryStorage())
         super_service.add_account_items([
-            {"access_token": "basic-token", "provider": "grok", "tier": "free"},
-            {"access_token": "super-token", "provider": "grok", "tier": "premium"},
-            {"access_token": "heavy-token", "provider": "grok", "tier": "heavy"},
+            {"access_token": "sso=basic-token", "provider": "grok", "tier": "free"},
+            {"access_token": "sso=super-token", "provider": "grok", "tier": "premium"},
+            {"access_token": "sso=heavy-token", "provider": "grok", "tier": "heavy"},
         ])
         heavy_service = AccountService(MemoryStorage())
         heavy_service.add_account_items([
-            {"access_token": "basic-token", "provider": "grok", "tier": "free"},
-            {"access_token": "super-token", "provider": "grok", "tier": "premium"},
-            {"access_token": "heavy-token", "provider": "grok", "tier": "heavy"},
+            {"access_token": "sso=basic-token", "provider": "grok", "tier": "free"},
+            {"access_token": "sso=super-token", "provider": "grok", "tier": "premium"},
+            {"access_token": "sso=heavy-token", "provider": "grok", "tier": "heavy"},
         ])
 
         self.assertEqual(basic_service.get_grok_app_chat_access_token(resolve_model("grok-4.20-0309-non-reasoning")), "basic-token")
@@ -322,8 +595,8 @@ class AccountProviderTests(unittest.TestCase):
     def test_prefer_best_grok_app_chat_selection_tries_heavy_super_basic(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
-            {"access_token": "basic-token", "provider": "grok", "tier": "basic", "cf_cookies": "cf_bm=value", "user_agent": "Test UA"},
-            {"access_token": "super-token", "provider": "grok", "tier": "super"},
+            {"access_token": "sso=basic-token", "provider": "grok", "tier": "basic", "cf_cookies": "cf_bm=value", "user_agent": "Test UA"},
+            {"access_token": "sso=super-token", "provider": "grok", "tier": "super"},
         ])
 
         [account] = [item for item in service.list_accounts() if item["access_token"] == "basic-token"]
@@ -334,9 +607,9 @@ class AccountProviderTests(unittest.TestCase):
     def test_grok_app_chat_selection_uses_capabilities_and_status(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
-            {"access_token": "disabled-heavy", "provider": "grok", "tier": "heavy", "status": "禁用"},
-            {"access_token": "image-heavy", "provider": "grok", "tier": "heavy", "capabilities": ["image"]},
-            {"access_token": "chat-heavy", "provider": "grok", "tier": "heavy", "capabilities": "chat,heavy"},
+            {"access_token": "sso=disabled-heavy", "provider": "grok", "tier": "heavy", "status": "禁用"},
+            {"access_token": "sso=image-heavy", "provider": "grok", "tier": "heavy", "capabilities": ["image"]},
+            {"access_token": "sso=chat-heavy", "provider": "grok", "tier": "heavy", "capabilities": "chat,heavy"},
         ])
 
         self.assertEqual(service.get_grok_app_chat_access_token(resolve_model("grok-4.20-heavy")), "chat-heavy")
@@ -345,8 +618,8 @@ class AccountProviderTests(unittest.TestCase):
         service = AccountService(MemoryStorage())
         service.add_account_items([
             {"access_token": "gpt-token", "provider": "gpt"},
-            {"access_token": "unknown-tier", "provider": "grok", "tier": "enterprise"},
-            {"access_token": "plain-grok", "provider": "grok"},
+            {"access_token": "sso=unknown-tier", "provider": "grok", "tier": "enterprise"},
+            {"access_token": "sso=plain-grok", "provider": "grok"},
         ])
 
         self.assertEqual(service.get_grok_app_chat_access_token(resolve_model("grok-4.20-0309-heavy")), "unknown-tier")
@@ -355,7 +628,7 @@ class AccountProviderTests(unittest.TestCase):
     def test_refresh_accounts_attempts_grok_validation(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
-            {"access_token": "grok-token", "provider": "grok", "status": "正常"},
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常"},
         ])
 
         with patched_grok_validation(return_value={"rateLimits": []}) as validate:
@@ -372,7 +645,7 @@ class AccountProviderTests(unittest.TestCase):
     def test_refresh_accounts_marks_invalid_grok_validation_abnormal(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
-            {"access_token": "grok-token", "provider": "grok", "status": "正常"},
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常"},
         ])
 
         previous_auto_remove = account_service_module.config.data.get("auto_remove_invalid_accounts")
@@ -397,7 +670,7 @@ class AccountProviderTests(unittest.TestCase):
     def test_refresh_accounts_keeps_valid_grok_validation_usable(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
-            {"access_token": "grok-token", "provider": "grok", "status": "异常"},
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "异常"},
         ])
 
         with patched_grok_validation(return_value={"rateLimits": [{"remaining": 1}]}) as validate:
@@ -410,15 +683,199 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(account["status"], "正常")
         self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
 
+    def test_same_access_token_is_scoped_by_provider(self) -> None:
+        storage = MemoryStorage()
+        service = AccountService(storage)
+        service.add_account_items([
+            {"access_token": "shared-token", "provider": GPT_PROVIDER, "status": "正常"},
+            {"access_token": "sso=shared-token", "provider": GROK_PROVIDER, "status": "正常"},
+            {"access_token": "__Secure-1PSID=shared-token; __Secure-1PSIDTS=ts", "provider": GEMINI_PROVIDER, "status": "正常"},
+        ])
+
+        self.assertEqual(len(service.list_accounts()), 3)
+        self.assertEqual(len(storage.accounts), 3)
+        self.assertEqual(service.list_tokens(provider=GPT_PROVIDER), ["shared-token"])
+        self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), ["shared-token"])
+        self.assertEqual(service.list_tokens(provider=GEMINI_PROVIDER), ["__Secure-1PSID=shared-token; __Secure-1PSIDTS=ts"])
+
+    def test_add_accounts_can_target_non_default_provider(self) -> None:
+        service = AccountService(MemoryStorage())
+
+        result = service.add_accounts(["sso=shared-token"], provider=GROK_PROVIDER)
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(service.list_tokens(provider=GPT_PROVIDER), [])
+        self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), ["shared-token"])
+        self.assertEqual(service.get_account("shared-token", provider=GROK_PROVIDER)["provider"], GROK_PROVIDER)
+
+    def test_add_accounts_rejects_plain_grok_token(self) -> None:
+        service = AccountService(MemoryStorage())
+
+        result = service.add_accounts(["shared-token"], provider=GROK_PROVIDER)
+
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), [])
+
+    def test_provider_scoped_delete_update_refresh_and_export_do_not_cross_providers(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "shared-token", "provider": GPT_PROVIDER, "status": "正常", "quota": 1},
+            {"access_token": "sso=shared-token", "provider": GROK_PROVIDER, "status": "正常"},
+        ])
+
+        update_result = service.update_account("shared-token", {"status": "禁用"}, provider=GROK_PROVIDER)
+        self.assertIsNotNone(update_result)
+        self.assertEqual(service.get_account("shared-token", provider=GPT_PROVIDER)["status"], "正常")
+        self.assertEqual(service.get_account("shared-token", provider=GROK_PROVIDER)["status"], "禁用")
+
+        with patched_grok_validation(return_value={"rateLimits": []}) as validate:
+            refresh_result = service.refresh_accounts(["shared-token"], provider=GROK_PROVIDER)
+        validate.assert_called_once()
+        self.assertEqual(refresh_result["refreshed"], 1)
+        self.assertEqual(refresh_result["items"][0]["provider"], GROK_PROVIDER)
+        self.assertEqual(service.get_account("shared-token", provider=GPT_PROVIDER)["status"], "正常")
+
+        self.assertEqual(
+            [item["access_token"] for item in service.build_export_items(["shared-token"], provider=GROK_PROVIDER)],
+            ["shared-token"],
+        )
+        delete_result = service.delete_accounts(["shared-token"], provider=GROK_PROVIDER)
+        self.assertEqual(delete_result["removed"], 1)
+        self.assertIsNotNone(service.get_account("shared-token", provider=GPT_PROVIDER))
+        self.assertIsNone(service.get_account("shared-token", provider=GROK_PROVIDER))
+
+    def test_delete_limited_accounts_can_filter_by_provider(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "gpt-token", "provider": GPT_PROVIDER, "status": "限流"},
+            {"access_token": "sso=grok-token", "provider": GROK_PROVIDER, "status": "限流"},
+        ])
+
+        result = service.delete_limited_accounts(provider=GROK_PROVIDER)
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual([item["access_token"] for item in service.list_accounts()], ["gpt-token"])
+
     def test_image_and_refresh_candidates_do_not_use_grok_for_image(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
-            {"access_token": "grok-token", "provider": "grok", "quota": 5, "status": "限流"},
+            {"access_token": "sso=grok-token", "provider": "grok", "quota": 5, "status": "正常", "tier": "supergrok"},
+            {"access_token": "gemini-token", "provider": "gemini", "quota": 5, "status": "正常"},
             {"access_token": "gpt-token", "provider": "gpt", "quota": 5, "status": "正常"},
         ])
 
         self.assertEqual(service._list_ready_candidate_tokens(), ["gpt-token"])
         self.assertEqual(service.list_limited_tokens(), [])
+
+    def test_registry_exposes_independent_account_strategies(self) -> None:
+        gpt_strategy = provider_registry.account_strategy(GPT_PROVIDER)
+        grok_strategy = provider_registry.account_strategy(GROK_PROVIDER)
+        gemini_strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
+
+        self.assertEqual(gpt_strategy.normalize_access_token({"accessToken": "gpt-token"}), "gpt-token")
+        self.assertEqual(grok_strategy.normalize_access_token({"access_token": "sso=grok-token"}), "grok-token")
+        self.assertEqual(
+            gemini_strategy.normalize_access_token({"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts"}),
+            "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts",
+        )
+        self.assertIsNot(gpt_strategy, grok_strategy)
+        self.assertIsNot(grok_strategy, gemini_strategy)
+
+    def test_registry_provider_definitions_expose_capabilities_and_models(self) -> None:
+        definitions = provider_registry.provider_definitions()
+
+        self.assertEqual(set(definitions), {GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER})
+        self.assertIn("image", definitions[GPT_PROVIDER].capabilities)
+        self.assertIn("image_edit", definitions[GROK_PROVIDER].capabilities)
+        self.assertEqual(definitions[GEMINI_PROVIDER].capabilities, frozenset({"chat"}))
+        self.assertTrue(any(spec.provider == GPT_PROVIDER for spec in definitions[GPT_PROVIDER].model_specs))
+        self.assertTrue(any(spec.provider == GROK_PROVIDER for spec in definitions[GROK_PROVIDER].model_specs))
+        self.assertTrue(any(spec.provider == GEMINI_PROVIDER for spec in definitions[GEMINI_PROVIDER].model_specs))
+
+    def test_gemini_account_deletes_by_sanitized_account_id_identifier(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {
+                "__Secure-1PSID": "psid-a",
+                "__Secure-1PSIDTS": "psidts-a",
+                "provider": "gemini",
+                "account_id": "gemini-account-a",
+            },
+            {
+                "__Secure-1PSID": "psid-b",
+                "__Secure-1PSIDTS": "psidts-b",
+                "provider": "gemini",
+                "account_id": "gemini-account-b",
+            },
+        ])
+
+        result = service.delete_accounts([], provider=GEMINI_PROVIDER, identifiers=[{"account_id": "gemini-account-a"}])
+
+        self.assertEqual(result["removed"], 1)
+        remaining = service.list_accounts(provider=GEMINI_PROVIDER)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["account_id"], "gemini-account-b")
+        self.assertEqual(remaining[0]["access_token"], "__Secure-1PSID=psid-b; __Secure-1PSIDTS=psidts-b")
+
+    def test_gemini_account_deletes_by_sanitized_row_id_identifier_without_account_id(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {
+                "__Secure-1PSID": "psid-row",
+                "__Secure-1PSIDTS": "psidts-row",
+                "provider": "gemini",
+            },
+        ])
+        [account] = service.list_accounts(provider=GEMINI_PROVIDER)
+        row_id = provider_registry.account_strategy(GEMINI_PROVIDER).sanitize_account(account)["row_id"]
+
+        result = service.delete_accounts([], provider=GEMINI_PROVIDER, identifiers=[{"row_id": row_id}])
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
+
+    def test_gemini_account_identifier_delete_is_provider_scoped(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {
+                "__Secure-1PSID": "psid-a",
+                "__Secure-1PSIDTS": "psidts-a",
+                "provider": "gemini",
+                "account_id": "shared-account-id",
+            },
+            {
+                "access_token": "gpt-token",
+                "provider": "gpt",
+                "account_id": "shared-account-id",
+            },
+        ])
+
+        result = service.delete_accounts([], provider=GEMINI_PROVIDER, identifiers=[{"account_id": "shared-account-id"}])
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_tokens(provider=GPT_PROVIDER), ["gpt-token"])
+        self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
+
+    def test_gpt_account_delete_by_token_still_ignores_identifier_only_payload(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([{"access_token": "gpt-token", "provider": "gpt", "account_id": "gpt-account"}])
+
+        result = service.delete_accounts([], provider=GPT_PROVIDER, identifiers=[{"account_id": "gpt-account"}])
+
+        self.assertEqual(result["removed"], 0)
+        self.assertEqual(service.list_tokens(provider=GPT_PROVIDER), ["gpt-token"])
+
+    def test_account_service_uses_registry_account_strategy(self) -> None:
+        service = AccountService(MemoryStorage())
+        strategy = Mock(wraps=provider_registry.account_strategy(GPT_PROVIDER))
+
+        with patch.object(account_service_module, "account_strategy", return_value=strategy) as patched:
+            result = service.add_account_items([{"accessToken": "gpt-token", "provider": "gpt"}])
+
+        self.assertEqual(result["added"], 1)
+        patched.assert_called()
+        self.assertEqual(strategy.normalize_access_token.call_count, 2)
+
 
 
 if __name__ == "__main__":
