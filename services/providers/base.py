@@ -53,6 +53,97 @@ class ChatAdapter(Protocol):
     collect_text: Any
 
 
+@dataclass(frozen=True)
+class AccountStateDecisionInput:
+    account: dict[str, Any]
+    adapter: AccountAdapter
+    spec: ModelSpec | None = None
+    payload: Any = None
+    status_code: int | None = None
+    current_time: float | None = None
+
+
+@dataclass(frozen=True)
+class AccountStateDecision:
+    unavailable: bool = False
+    rate_limited: bool = False
+    auth_failed: bool = False
+    capability_mismatch: bool = False
+    tier_mismatch: bool = False
+    matched_tiers: frozenset[str] = frozenset()
+    reset_account: dict[str, Any] | None = None
+    writeback: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def skip_for_selection(self) -> bool:
+        return self.unavailable or self.rate_limited or self.auth_failed or self.capability_mismatch
+
+    def matches_tier(self, requested_tier: str) -> bool:
+        if self.tier_mismatch:
+            return False
+        return requested_tier in self.matched_tiers if self.matched_tiers else bool(requested_tier)
+
+
+def _coerce_status_code(value: int | str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def decide_account_state(request: AccountStateDecisionInput) -> AccountStateDecision:
+    account = request.account if isinstance(request.account, dict) else {}
+    adapter = request.adapter
+    status_code = _coerce_status_code(request.status_code)
+    auth_failed = status_code in {401, 403} or adapter.is_auth_failure_payload(request.payload)
+    rate_limited = status_code in {402, 429}
+    writeback: dict[str, Any] = {}
+    reset_account: dict[str, Any] | None = None
+
+    if auth_failed:
+        writeback.update({"status": "异常", "quota": 0})
+    elif rate_limited:
+        writeback["status"] = "限流"
+
+    current_time = request.current_time
+    if current_time is not None:
+        reset_account = adapter.reset_console_quota_if_ready(account, current_time)
+        if reset_account != account:
+            status = reset_account.get("status")
+            quota = reset_account.get("quota_console")
+            if status is not None:
+                writeback["status"] = status
+            if quota is not None:
+                writeback["quota_console"] = quota
+
+    spec = request.spec
+    capability_mismatch = False
+    tier_mismatch = False
+    matched_tiers: set[str] = set()
+    if spec is not None:
+        capability_mismatch = not adapter.account_has_capability(account, spec)
+        requested = adapter.requested_tiers(spec)
+        if requested:
+            account_tier = adapter.normalize_tier(account.get("tier") or account.get("model_tier"))
+            matched_tiers = {tier for tier in requested if adapter.tier_matches(account_tier, tier)}
+            tier_mismatch = not matched_tiers
+
+    unavailable_statuses = (account.get("status"), account.get("account_status"))
+
+    return AccountStateDecision(
+        unavailable=any(status in adapter.UNAVAILABLE_STATUSES for status in unavailable_statuses),
+        rate_limited=rate_limited,
+        auth_failed=auth_failed,
+        capability_mismatch=capability_mismatch,
+        tier_mismatch=tier_mismatch,
+        matched_tiers=frozenset(matched_tiers),
+        reset_account=reset_account,
+        writeback=writeback,
+    )
+
+
 class ImageAdapter(Protocol):
     def generation_outputs(self, *args: Any, **kwargs: Any) -> Iterator[Any]: ...
     def edit_outputs(self, *args: Any, **kwargs: Any) -> Iterator[Any]: ...
