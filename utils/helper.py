@@ -97,6 +97,19 @@ def new_uuid() -> str:
     return str(uuid.uuid4())
 
 
+def has_image_message_content(content: object, _depth: int = 0) -> bool:
+    if _depth > 20:
+        return False
+    if isinstance(content, dict):
+        item_type = str(content.get("type") or "").strip()
+        if item_type in {"image", "image_url", "input_image"}:
+            return True
+        return any(has_image_message_content(value, _depth + 1) for value in content.values())
+    if isinstance(content, list):
+        return any(has_image_message_content(item, _depth + 1) for item in content)
+    return False
+
+
 def is_image_chat_request(body: dict[str, object]) -> bool:
     model = str(body.get("model") or "").strip()
     modalities = body.get("modalities")

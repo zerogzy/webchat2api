@@ -43,27 +43,42 @@ class DeepResearchResult:
 CompletionTextFunc = Callable[[str, str], str]
 
 
+def _deep_research_language(body: dict[str, Any]) -> str:
+    return str(body.get("language") or body.get("lang") or "").strip()
+
+
+def _deep_research_max_sources(body: dict[str, Any]) -> int:
+    raw = body.get("max_sources", body.get("maxSources", 0))
+    try:
+        value = int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
+
+
 def run_deep_research(body: dict[str, Any], completion_func: CompletionTextFunc | None = None) -> dict[str, Any]:
     query = _query(body)
     model = str(body.get("model") or "gemini-2.5-pro")
+    language = _deep_research_language(body)
+    max_sources = _deep_research_max_sources(body)
     result = DeepResearchResult(id=f"dr_{uuid.uuid4().hex}", status="in_progress", query=query, model=model)
     started = time.time()
     complete = completion_func or gemini_native.complete_text
     try:
-        plan_text = complete(model, _plan_prompt(query))
+        plan_text = complete(model, _plan_prompt(query, language, max_sources))
         plan = _json_value(plan_text)
         questions = _questions(plan, query)
         result.steps.append({"type": "plan", "content": plan})
         findings: list[dict[str, Any]] = []
         for index, question in enumerate(questions, start=1):
-            research_text = complete(model, _research_prompt(query, question))
+            research_text = complete(model, _research_prompt(query, question, language, max_sources))
             research = _json_value(research_text)
             sources = _sources(research)
             result.sources.extend(sources)
             step = {"type": "research", "index": index, "question": question, "content": research}
             result.steps.append(step)
             findings.append({"question": question, "research": research})
-        synthesis = complete(model, _synthesis_prompt(query, findings))
+        synthesis = complete(model, _synthesis_prompt(query, findings, language, max_sources))
         synthesis_data = _json_value(synthesis)
         result.summary = str(synthesis_data.get("summary") or synthesis).strip()
         result.status = "completed"
@@ -83,19 +98,21 @@ def run_deep_research(body: dict[str, Any], completion_func: CompletionTextFunc 
 def stream_deep_research(body: dict[str, Any], completion_func: CompletionTextFunc | None = None) -> Iterator[tuple[str, dict[str, Any]]]:
     query = _query(body)
     model = str(body.get("model") or "gemini-2.5-pro")
+    language = _deep_research_language(body)
+    max_sources = _deep_research_max_sources(body)
     result_id = f"dr_{uuid.uuid4().hex}"
     yield "progress", {"id": result_id, "status": "in_progress", "query": query, "model": model}
     complete = completion_func or gemini_native.complete_text
     started = time.time()
     try:
-        plan = _json_value(complete(model, _plan_prompt(query)))
+        plan = _json_value(complete(model, _plan_prompt(query, language, max_sources)))
         questions = _questions(plan, query)
         yield "step", {"id": result_id, "type": "plan", "content": plan}
         findings: list[dict[str, Any]] = []
         sources: list[dict[str, Any]] = []
         steps = [{"type": "plan", "content": plan}]
         for index, question in enumerate(questions, start=1):
-            research = _json_value(complete(model, _research_prompt(query, question)))
+            research = _json_value(complete(model, _research_prompt(query, question, language, max_sources)))
             step = {"type": "research", "index": index, "question": question, "content": research}
             steps.append(step)
             findings.append({"question": question, "research": research})
@@ -103,7 +120,7 @@ def stream_deep_research(body: dict[str, Any], completion_func: CompletionTextFu
             for source in _sources(research):
                 sources.append(source)
                 yield "source", {"id": result_id, "source": source}
-        synthesis = complete(model, _synthesis_prompt(query, findings))
+        synthesis = complete(model, _synthesis_prompt(query, findings, language, max_sources))
         synthesis_data = _json_value(synthesis)
         result = DeepResearchResult(
             id=result_id,
@@ -194,16 +211,31 @@ def _query(body: dict[str, Any]) -> str:
     return query
 
 
-def _plan_prompt(query: str) -> str:
-    return "Return JSON only with a questions array for researching this query: " + query
+def _plan_prompt(query: str, language: str = "", max_sources: int = 0) -> str:
+    prompt = "Return JSON only with a questions array for researching this query: " + query
+    if language:
+        prompt += " Respond in language: " + language
+    if max_sources > 0:
+        prompt += " Use at most " + str(max_sources) + " sources overall."
+    return prompt
 
 
-def _research_prompt(query: str, question: str) -> str:
-    return "Return JSON only with summary and sources array for query " + json.dumps(query) + " subquestion " + json.dumps(question)
+def _research_prompt(query: str, question: str, language: str = "", max_sources: int = 0) -> str:
+    prompt = "Return JSON only with summary and sources array for query " + json.dumps(query) + " subquestion " + json.dumps(question)
+    if language:
+        prompt += " language " + json.dumps(language)
+    if max_sources > 0:
+        prompt += " max_sources " + str(max_sources)
+    return prompt
 
 
-def _synthesis_prompt(query: str, findings: list[dict[str, Any]]) -> str:
-    return "Return JSON only with summary for query " + json.dumps(query) + " using findings " + json.dumps(findings, ensure_ascii=False)
+def _synthesis_prompt(query: str, findings: list[dict[str, Any]], language: str = "", max_sources: int = 0) -> str:
+    prompt = "Return JSON only with summary for query " + json.dumps(query) + " using findings " + json.dumps(findings, ensure_ascii=False)
+    if language:
+        prompt += " language " + json.dumps(language)
+    if max_sources > 0:
+        prompt += " max_sources " + str(max_sources)
+    return prompt
 
 
 def _json_value(text: str) -> dict[str, Any]:

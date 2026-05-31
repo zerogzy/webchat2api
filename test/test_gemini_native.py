@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import time
@@ -25,7 +26,7 @@ from api import gemini as gemini_api
 from services import gemini_deep_research
 from services.providers import gemini as gemini_provider
 from services.providers.gemini import models as gemini_models
-from services.protocol import gemini_native, openai_v1_chat_complete
+from services.protocol import gemini_native, openai_v1_chat_complete, openai_v1_response
 
 AUTH_HEADERS = {"Authorization": "Bearer webchat2api"}
 
@@ -129,16 +130,110 @@ class GeminiNativeProtocolTests(unittest.TestCase):
         self.assertEqual(chunks[0]["candidates"][0]["content"]["parts"], [])
         self.assertEqual(chunks[0]["candidates"][0]["finishReason"], "STOP")
 
-    def test_inline_media_without_text_rejects(self) -> None:
+    def test_inline_media_without_text_is_preserved(self) -> None:
+        seen_messages: list[dict[str, Any]] = []
+
+        response = gemini_native.generate_content(
+            "gemini-2.5-pro",
+            {"contents": [{"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "AA=="}}]}]},
+            completion_func=lambda body, spec, messages: seen_messages.extend(messages) or gemini_provider.GeminiCompletion("described"),
+        )
+
+        self.assertEqual(response["candidates"][0]["content"]["parts"], [{"text": "described"}])
+        self.assertEqual(seen_messages, [{
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}],
+        }])
+        self.assertEqual(gemini_native.request_text_from_body({"contents": [{"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "AA=="}}]}]}), "[image:image/png]")
+
+    def test_inline_media_with_text_is_preserved(self) -> None:
+        seen_messages: list[dict[str, Any]] = []
+        body = {"contents": [{"role": "user", "parts": [
+            {"text": "Describe this"},
+            {"inline_data": {"mime_type": "image/jpeg", "data": "AQI="}},
+        ]}]}
+
+        gemini_native.generate_content(
+            "gemini-2.5-pro",
+            body,
+            completion_func=lambda body, spec, messages: seen_messages.extend(messages) or gemini_provider.GeminiCompletion("ok"),
+        )
+
+        self.assertEqual(seen_messages, [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AQI="}},
+            ],
+        }])
+        self.assertEqual(gemini_native.request_text_from_body(body), "Describe this")
+
+    def test_responses_gemini_input_image_is_preserved_until_provider_error(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            openai_v1_response.handle({
+                "model": "gemini-2.5-pro",
+                "input": [
+                    {"type": "input_text", "text": "Describe this"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AA=="},
+                ],
+            })
+
+        detail = cast(dict[str, Any], getattr(raised.exception, "detail"))
+        self.assertEqual(getattr(raised.exception, "status_code"), 400)
+        self.assertEqual(detail["error"], "Gemini Web image input is not supported by this upstream adapter")
+
+
+    def test_inline_media_rejects_invalid_or_oversized_data(self) -> None:
+        invalid_cases = [
+            ({"mimeType": "text/plain", "data": "AA=="}, "unsupported inline media mime type"),
+            ({"mimeType": "image/png", "data": "not-base64"}, "invalid inline media data"),
+            ({"mimeType": "image/png", "data": ""}, "Gemini generateContent requires at least one text part"),
+        ]
+        for inline, message in invalid_cases:
+            with self.subTest(message=message):
+                with self.assertRaises(HTTPException) as raised:
+                    gemini_native.generate_content(
+                        "gemini-2.5-pro",
+                        {"contents": [{"role": "user", "parts": [{"inlineData": inline}]}]},
+                        completion_func=lambda body, spec, messages: gemini_provider.GeminiCompletion("ignored"),
+                    )
+                self.assertIn(message, str(getattr(raised.exception, "detail")))
+
+        oversized = base64.b64encode(b"0" * (10 * 1024 * 1024 + 1)).decode("ascii")
         with self.assertRaises(HTTPException) as raised:
             gemini_native.generate_content(
                 "gemini-2.5-pro",
-                {"contents": [{"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "AA=="}}]}]},
+                {"contents": [{"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": oversized}}]}]},
                 completion_func=lambda body, spec, messages: gemini_provider.GeminiCompletion("ignored"),
             )
+        self.assertIn("inline media is too large", str(getattr(raised.exception, "detail")))
 
-        self.assertEqual(getattr(raised.exception, "status_code"), 400)
-        self.assertIn("inline media", str(getattr(raised.exception, "detail")))
+    def test_native_tool_text_status_returns_content_text(self) -> None:
+        body = _native_body("weather") | {"tools": [_tool()]}
+        response = gemini_native.generate_content(
+            "gemini-2.5-pro",
+            body,
+            completion_func=lambda body, spec, messages: gemini_provider.GeminiCompletion('{"status":"text","content":"No tool needed"}'),
+        )
+
+        self.assertEqual(response["candidates"][0]["content"]["parts"], [{"text": "No tool needed"}])
+
+    def test_deepresearch_options_are_included_in_prompts(self) -> None:
+        prompts: list[str] = []
+        outputs = iter([
+            '{"questions":["What is A?"]}',
+            '{"summary":"A facts","sources":[]}',
+            '{"summary":"Final report"}',
+        ])
+
+        result = gemini_deep_research.run_deep_research(
+            {"query": "A", "language": "fr", "max_sources": 2},
+            completion_func=lambda model, prompt: prompts.append(prompt) or next(outputs),
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(any("fr" in prompt for prompt in prompts))
+        self.assertTrue(any("2" in prompt for prompt in prompts))
 
 
 class GeminiDeepResearchTests(unittest.TestCase):

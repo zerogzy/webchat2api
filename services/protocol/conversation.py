@@ -86,6 +86,16 @@ def message_text(content: Any) -> str:
     return ""
 
 
+def image_token_estimate(value: Any) -> int:
+    if isinstance(value, dict):
+        if str(value.get("type") or "") in {"image", "image_url", "input_image"}:
+            return 85
+        return sum(image_token_estimate(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(image_token_estimate(item) for item in value)
+    return 0
+
+
 def normalize_messages(messages: object, system: Any = None) -> list[dict[str, Any]]:
     normalized = []
     if config.global_system_prompt:
@@ -164,6 +174,7 @@ def count_message_tokens(messages: list[dict[str, Any]], model: str) -> int:
     total = 0
     for message in messages:
         total += 3
+        total += image_token_estimate(message.get("content"))
         for key, value in message.items():
             if not isinstance(value, str):
                 continue

@@ -19,7 +19,7 @@ from api.support import (
     sanitize_sub2api_servers,
 )
 from services.account_service import account_service
-from services.models import normalize_account_provider
+from services.models import GROK_PROVIDER, normalize_account_provider, normalize_provider
 from services.providers.registry import account_strategy
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.remote_account_service import REMOTE_ACCOUNT_SYNC_FAILED, remote_account_config, remote_account_import_service
@@ -153,12 +153,29 @@ class RemoteAccountInjectRequest(BaseModel):
     provider: Literal["gpt", "grok", "gemini"] = "gpt"
 
 
-def _account_payload_token(item: dict[str, Any]) -> str:
-    return str(item.get("access_token") or item.get("accessToken") or "").strip()
+def _account_payload_provider(item: dict[str, Any], provider: str | None) -> str:
+    provider_value = item.get("provider") or provider
+    if str(provider_value or "").strip():
+        return normalize_account_provider(provider_value)
+    return normalize_provider(provider_value)
+
+
+def _account_payload_token(item: dict[str, Any], provider: str | None = None) -> str:
+    try:
+        payload_provider = _account_payload_provider(item, provider)
+    except ValueError:
+        return ""
+    payload = dict(item)
+    payload.setdefault("provider", payload_provider)
+    return str(_account_strategy(payload_provider).normalize_access_token(payload) or "").strip()
 
 
 def _unique_tokens(tokens: list[str]) -> list[str]:
     return list(dict.fromkeys(str(token or "").strip() for token in tokens if str(token or "").strip()))
+
+
+def _should_refresh_created_accounts(provider: str | None) -> bool:
+    return normalize_provider(provider) != GROK_PROVIDER
 
 
 def _delete_identifiers(identifiers: Sequence[AccountDeleteIdentifier | dict[str, Any]]) -> list[dict[str, str]]:
@@ -272,21 +289,35 @@ def create_router() -> APIRouter:
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         account_payloads = [item for item in body.accounts if isinstance(item, dict)]
-        payload_tokens = [_account_payload_token(item) for item in account_payloads]
+        scoped_payloads = [{**item, "provider": item.get("provider") or body.provider} for item in account_payloads]
+        payload_tokens = [_account_payload_token(item, body.provider) for item in scoped_payloads]
         tokens = _unique_tokens([*body.tokens, *payload_tokens])
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        if account_payloads:
-            result = account_service.add_account_items(account_payloads)
+        if scoped_payloads:
+            result = account_service.add_account_items(scoped_payloads)
+            saved_tokens = {
+                str(item.get("access_token") or "").strip()
+                for item in result.get("items", [])
+                if isinstance(item, dict) and str(item.get("access_token") or "").strip()
+            }
             payload_token_set = set(_unique_tokens(payload_tokens))
             extra_tokens = [token for token in tokens if token not in payload_token_set]
             if extra_tokens:
                 extra_result = account_service.add_accounts(extra_tokens, provider=body.provider)
                 result["added"] = int(result.get("added") or 0) + int(extra_result.get("added") or 0)
                 result["skipped"] = int(result.get("skipped") or 0) + int(extra_result.get("skipped") or 0)
+                for item in extra_result.get("items", []):
+                    if isinstance(item, dict) and (token := str(item.get("access_token") or "").strip()):
+                        saved_tokens.add(token)
+            refresh_tokens = [token for token in tokens if token in saved_tokens]
         else:
             result = account_service.add_accounts(tokens, provider=body.provider)
-        refresh_result = account_service.refresh_accounts(tokens, provider=body.provider)
+            refresh_tokens = tokens
+        if _should_refresh_created_accounts(body.provider):
+            refresh_result = account_service.refresh_accounts(refresh_tokens, provider=body.provider)
+        else:
+            refresh_result = {"refreshed": 0, "errors": [], "items": result.get("items", [])}
         return sanitize_account_result({
             **result,
             "refreshed": refresh_result.get("refreshed", 0),

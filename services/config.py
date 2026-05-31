@@ -64,6 +64,8 @@ PERSISTENT_CONFIG_KEYS = {
     "flaresolverr_timeout_sec",
     "enable_turnstile_solver",
     "browser_bridge_url",
+    "chat_completion_cache",
+    "chat_completion_message_normalization",
 }
 
 
@@ -195,6 +197,28 @@ def _normalize_network_profiles(value: object) -> dict[str, object]:
     if grok_app_chat:
         normalized["grok_app_chat"] = grok_app_chat
     return normalized
+
+
+def _normalize_chat_completion_cache_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "enabled": _normalize_bool(source.get("enabled"), False),
+        "ttl_seconds": _normalize_positive_int(source.get("ttl_seconds"), 60, 0),
+        "max_entries": _normalize_positive_int(source.get("max_entries"), 256, 1),
+        "cache_stream": _normalize_bool(source.get("cache_stream"), False),
+        "cache_tool_calls": _normalize_bool(source.get("cache_tool_calls"), False),
+        "dedupe_inflight": _normalize_bool(source.get("dedupe_inflight"), True),
+    }
+
+
+def _normalize_chat_completion_message_normalization_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "enabled": _normalize_bool(source.get("enabled"), False),
+        "drop_adjacent_duplicates": _normalize_bool(source.get("drop_adjacent_duplicates"), True),
+        "drop_assistant_history": _normalize_bool(source.get("drop_assistant_history"), False),
+        "merge_adjacent_same_role_text": _normalize_bool(source.get("merge_adjacent_same_role_text"), False),
+    }
 
 
 def _normalize_image_storage_settings(value: object) -> dict[str, object]:
@@ -495,6 +519,8 @@ class ConfigStore:
         data["image_storage"] = self.get_image_storage_settings()
         data["chatgpt_fingerprint"] = self.chatgpt_fingerprint
         data["grok_console_fingerprint"] = self.grok_console_fingerprint
+        data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
+        data["chat_completion_message_normalization"] = self.get_chat_completion_message_normalization_settings()
         data["network_profiles"] = self.network_profiles
         data["flaresolverr_url"] = self.flaresolverr_url
         data["flaresolverr_timeout_sec"] = self.flaresolverr_timeout_sec
@@ -531,6 +557,10 @@ class ConfigStore:
         if "image_storage" in next_data:
             next_data["image_storage"] = _normalize_image_storage_settings(next_data.get("image_storage"))
             _validate_image_storage_settings(next_data["image_storage"])
+        if "chat_completion_cache" in next_data:
+            next_data["chat_completion_cache"] = _normalize_chat_completion_cache_settings(next_data.get("chat_completion_cache"))
+        if "chat_completion_message_normalization" in next_data:
+            next_data["chat_completion_message_normalization"] = _normalize_chat_completion_message_normalization_settings(next_data.get("chat_completion_message_normalization"))
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
@@ -548,6 +578,12 @@ class ConfigStore:
 
     def get_image_storage_settings(self) -> dict[str, object]:
         return _normalize_image_storage_settings(self.data.get("image_storage"))
+
+    def get_chat_completion_cache_settings(self) -> dict[str, object]:
+        return _normalize_chat_completion_cache_settings(self.data.get("chat_completion_cache"))
+
+    def get_chat_completion_message_normalization_settings(self) -> dict[str, object]:
+        return _normalize_chat_completion_message_normalization_settings(self.data.get("chat_completion_message_normalization"))
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

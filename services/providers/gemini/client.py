@@ -26,6 +26,9 @@ GEMINI_REQUIRED_COOKIES = ("__Secure-1PSID", "__Secure-1PSIDTS")
 GEMINI_SENSITIVE_COOKIE_NAMES = ("__Secure-1PSID", "__Secure-1PSIDTS", "SNlM0e", "at", "session_token")
 GEMINI_NON_COOKIE_FIELDS = ("SNlM0e", "session_token", "at")
 GEMINI_WEB_RPC_ID = "assistant.lamda.BardFrontendService.StreamGenerate"
+GEMINI_WEB_IMAGE_UNSUPPORTED_DETAIL = "Gemini Web image input is not supported by this upstream adapter"
+GEMINI_IMAGE_PART_TYPES = {"image", "image_url", "input_image"}
+GEMINI_IMAGE_PAYLOAD_KEYS = {"image_url", "inlineData", "inline_data"}
 
 
 @dataclass(frozen=True)
@@ -232,6 +235,23 @@ def rotate_psidts_cookie(session: object, cookie_header: str, user_agent: str | 
     return merged
 
 
+def contains_image_content(value: object) -> bool:
+    if isinstance(value, dict):
+        block_type = str(value.get("type") or "").strip()
+        if block_type in GEMINI_IMAGE_PART_TYPES:
+            return True
+        if any(key in value for key in GEMINI_IMAGE_PAYLOAD_KEYS):
+            return True
+        return any(contains_image_content(item) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_image_content(item) for item in value)
+    return False
+
+
+def raise_unsupported_image_input() -> None:
+    raise HTTPException(status_code=400, detail={"error": GEMINI_WEB_IMAGE_UNSUPPORTED_DETAIL})
+
+
 def message_text(content: object) -> str:
     if isinstance(content, str):
         return content
@@ -255,6 +275,8 @@ def message_text(content: object) -> str:
 def build_prompt(messages: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for message in messages:
+        if contains_image_content(message.get("content")):
+            raise_unsupported_image_input()
         role = str(message.get("role") or "user").strip().lower()
         text = message_text(message.get("content")).strip()
         if not text:
@@ -623,12 +645,12 @@ def extract_completion(payload: object) -> GeminiCompletion:
 def chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> GeminiCompletion:
     from services.account_service import account_service
 
+    payload = build_web_payload(spec, body, messages)
     access_token = account_service.get_text_access_token(provider="gemini")
     if not access_token:
         raise HTTPException(status_code=503, detail={"error": "no available Gemini account"})
     account = account_service.get_account(access_token) or {"access_token": access_token, "provider": "gemini"}
     cookie_header = account_cookie_header(account)
-    payload = build_web_payload(spec, body, messages)
     session_token = account_session_token(account)
     if session_token:
         payload["session_token"] = session_token
