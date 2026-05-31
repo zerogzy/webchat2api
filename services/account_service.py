@@ -11,7 +11,16 @@ from services.log_service import (
     LOG_TYPE_ACCOUNT,
     log_service,
 )
-from services.providers.base import GEMINI_PROVIDER, GPT_PROVIDER, GROK_PROVIDER, ModelSpec, RemoteAccountValidator
+from services.providers.base import (
+    GEMINI_PROVIDER,
+    GPT_PROVIDER,
+    GROK_PROVIDER,
+    AccountStateDecision,
+    AccountStateDecisionInput,
+    ModelSpec,
+    RemoteAccountValidator,
+    decide_account_state,
+)
 from services.providers.registry import account_strategy, normalize_account_provider, normalize_provider
 from services.providers.gemini.accounts import account_row_id as gemini_account_row_id
 from services.storage.base import StorageBackend
@@ -159,6 +168,18 @@ class AccountService:
     def _set_account_locked(self, account: dict) -> None:
         provider = account["provider"]
         self._provider_accounts_locked(provider)[account["access_token"]] = account
+
+    def _state_decision(self, account: dict, *, spec: ModelSpec | None = None, payload: Any = None, status_code: int | None = None) -> AccountStateDecision:
+        return decide_account_state(
+            AccountStateDecisionInput(
+                account=account,
+                adapter=_account_strategy(account.get("provider")),
+                spec=spec,
+                payload=payload,
+                status_code=status_code,
+                current_time=self._now(),
+            )
+        )
 
     def _pop_account_locked(self, access_token: str, provider: str | None = None) -> dict | None:
         if provider_filter := self._provider_filter(provider):
@@ -324,7 +345,7 @@ class AccountService:
             candidates = [
                 token
                 for account in self._all_accounts_locked()
-                if account.get("status") not in {"禁用", "异常", "限流"}
+                if not self._state_decision(account).unavailable
                    and normalize_provider(account.get("provider")) == target_provider
                    and (token := account.get("access_token") or "")
                    and token not in excluded
@@ -387,16 +408,15 @@ class AccountService:
                 account
                 for account in self._all_accounts_locked()
                 if normalize_provider(account.get("provider")) == GROK_PROVIDER
-                   and account.get("status") not in account_strategy(GROK_PROVIDER).UNAVAILABLE_STATUSES
                    and account.get("access_token")
                    and account.get("access_token") not in excluded
-                   and account_strategy(GROK_PROVIDER).account_has_capability(account, spec)
+                   and not self._state_decision(account, spec=spec).skip_for_selection
             ]
             for requested_tier in requested_tiers:
                 tiered_candidates = [
                     account.get("access_token") or ""
                     for account in accounts
-                    if account_strategy(GROK_PROVIDER).tier_matches(account_strategy(GROK_PROVIDER).normalize_tier(account.get("tier") or account.get("model_tier")), requested_tier)
+                    if self._state_decision(account, spec=spec).matches_tier(requested_tier)
                 ]
                 token = self._next_text_token([candidate for candidate in tiered_candidates if candidate])
                 if token:
@@ -762,15 +782,19 @@ class AccountService:
             payload = strategy.validate_remote_info(access_token, account)
         except Exception as exc:
             status = strategy.remote_error_status(exc)
-            if status in {401, 403} or any(marker in str(exc).lower() for marker in ("auth", "login", "session", "token")):
+            decision = self._state_decision(account, status_code=status)
+            if decision.auth_failed:
                 self.remove_invalid_token(access_token, event)
-            elif status in {402, 429}:
-                self.update_account(access_token, {"status": "限流"}, provider=provider_filter)
+            elif decision.rate_limited:
+                self.update_account(access_token, decision.writeback, provider=provider_filter)
             raise
-        if strategy.is_auth_failure_payload(payload):
+        decision = self._state_decision(account, payload=payload)
+        if decision.auth_failed:
             self.remove_invalid_token(access_token, event)
             raise RuntimeError("Grok app-chat authentication failed")
-        return self.update_account(access_token, {"status": "正常", "app_chat": True}, provider=provider_filter)
+        updates = dict(decision.writeback)
+        updates.update({"status": "正常", "app_chat": True})
+        return self.update_account(access_token, updates, provider=provider_filter)
 
     def _refresh_error_message(self, access_token: str, exc: Exception, provider: str | None = None) -> str:
         account = self.get_account(access_token, provider=provider) or {}

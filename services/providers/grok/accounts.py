@@ -460,9 +460,10 @@ def account_has_capability(account: dict[str, Any], spec: ModelSpec) -> bool:
 
 
 def validate_remote_info(access_token: str, account: dict[str, Any] | None = None) -> dict[str, Any]:
-    from services.providers.grok.client import validate_grok_access_token
+    from services.providers import grok
 
-    return validate_grok_access_token(access_token, account)
+    validator = getattr(grok, "validate_grok_access_token")
+    return validator(access_token, account)
 
 
 def remote_error_status(exc: Exception) -> int | None:

@@ -121,6 +121,7 @@ def patched_grok_validation(return_value: object = None, side_effect: Exception 
 from services.account_service import AccountService
 import services.account_service as account_service_module
 from services.providers import registry as provider_registry
+from services.providers.base import AccountStateDecisionInput, decide_account_state
 from services.models import GEMINI_PROVIDER, GROK_PROVIDER, GPT_PROVIDER, resolve_model
 
 account_service_module.log_service.add = lambda *args, **kwargs: None
@@ -294,6 +295,18 @@ class AccountProviderTests(unittest.TestCase):
                 self.assertEqual(strategy.account_category(source), category)
                 self.assertEqual(strategy.account_status(source), status)
                 self.assertEqual(strategy.has_gemini_session(source), has_session)
+
+    def test_gemini_text_selection_skips_missing_psid_accounts(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "SNlM0e=session-only", "provider": GEMINI_PROVIDER},
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": GEMINI_PROVIDER},
+        ])
+
+        accounts = service.list_accounts(provider=GEMINI_PROVIDER)
+        self.assertEqual(accounts[0]["account_category"], "session_token_only")
+        self.assertEqual(accounts[0]["account_status"], "missing_psid")
+        self.assertEqual(service.get_text_access_token(provider=GEMINI_PROVIDER), "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
 
     def test_gemini_refresh_uses_client_helpers_not_generic_account_refresh(self) -> None:
         strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
@@ -624,6 +637,62 @@ class AccountProviderTests(unittest.TestCase):
 
         self.assertEqual(service.get_grok_app_chat_access_token(resolve_model("grok-4.20-0309-heavy")), "unknown-tier")
         self.assertEqual(service.get_grok_app_chat_access_token(resolve_model("grok-4.20-0309-heavy")), "plain-grok")
+
+    def test_grok_app_chat_selection_skips_capability_and_tier_mismatches(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=image-heavy", "provider": "grok", "tier": "heavy", "capabilities": ["image"]},
+            {"access_token": "sso=basic-chat", "provider": "grok", "tier": "basic", "capabilities": ["chat"]},
+            {"access_token": "sso=heavy-chat", "provider": "grok", "tier": "heavy", "capabilities": ["chat"]},
+        ])
+
+        self.assertEqual(service.get_grok_app_chat_access_token(resolve_model("grok-4.20-heavy")), "heavy-chat")
+
+    def test_shared_account_state_decision_covers_auth_rate_limit_and_restore(self) -> None:
+        strategy = provider_registry.account_strategy(GROK_PROVIDER)
+        account = strategy.normalize_account({
+            "access_token": "grok-token",
+            "provider": GROK_PROVIDER,
+            "status": "限流",
+            "quota_console": {"remaining": 0, "total": 3, "window_seconds": 900, "reset_at": 10},
+        })
+
+        auth_decision = decide_account_state(AccountStateDecisionInput(account=account, adapter=strategy, status_code=401))
+        rate_limit_decision = decide_account_state(AccountStateDecisionInput(account=account, adapter=strategy, status_code=429))
+        restore_decision = decide_account_state(AccountStateDecisionInput(account=account, adapter=strategy, current_time=11))
+
+        self.assertTrue(auth_decision.auth_failed)
+        self.assertEqual(auth_decision.writeback, {"status": "异常", "quota": 0})
+        self.assertTrue(rate_limit_decision.rate_limited)
+        self.assertEqual(rate_limit_decision.writeback, {"status": "限流"})
+        self.assertEqual(restore_decision.writeback["quota_console"], {"remaining": 3, "total": 3, "window_seconds": 900, "reset_at": None})
+
+    def test_shared_account_state_decision_reports_capability_and_tier_mismatch(self) -> None:
+        strategy = provider_registry.account_strategy(GROK_PROVIDER)
+        spec = resolve_model("grok-4.20-0309-heavy")
+
+        image_decision = decide_account_state(AccountStateDecisionInput(
+            account={"provider": GROK_PROVIDER, "status": "正常", "tier": "heavy", "capabilities": ["image"]},
+            adapter=strategy,
+            spec=spec,
+        ))
+        basic_decision = decide_account_state(AccountStateDecisionInput(
+            account={"provider": GROK_PROVIDER, "status": "正常", "tier": "basic", "capabilities": ["chat"]},
+            adapter=strategy,
+            spec=spec,
+        ))
+        heavy_decision = decide_account_state(AccountStateDecisionInput(
+            account={"provider": GROK_PROVIDER, "status": "正常", "tier": "heavy", "capabilities": ["chat"]},
+            adapter=strategy,
+            spec=spec,
+        ))
+
+        self.assertTrue(image_decision.capability_mismatch)
+        self.assertTrue(image_decision.skip_for_selection)
+        self.assertTrue(basic_decision.tier_mismatch)
+        self.assertFalse(basic_decision.matches_tier("heavy"))
+        self.assertFalse(heavy_decision.tier_mismatch)
+        self.assertTrue(heavy_decision.matches_tier("heavy"))
 
     def test_refresh_accounts_attempts_grok_validation(self) -> None:
         service = AccountService(MemoryStorage())
