@@ -23,7 +23,8 @@ from services.providers.base import (
 )
 from services.providers.registry import account_strategy, normalize_account_provider, normalize_provider
 from services.providers.gemini.accounts import account_row_id as gemini_account_row_id
-from services.providers.grok.accounts import account_row_id as grok_account_row_id
+from services.providers.grok.accounts import account_row_id as grok_account_row_id, normalize_app_chat_rate_limit_payload
+from services.providers.grok.client import grok_rate_limit_account_hints
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
@@ -829,8 +830,15 @@ class AccountService:
         if decision.auth_failed:
             self.remove_invalid_token(access_token, event)
             raise RuntimeError("Grok app-chat authentication failed")
+        hints = grok_rate_limit_account_hints(payload) if isinstance(payload, dict) else {}
+        usable_hint_keys = {"quota", "rate_limit_window_seconds", "tier"}
+        if not (usable_hint_keys & hints.keys()):
+            return UNCHANGED_REMOTE_INFO
         updates = dict(decision.writeback)
-        updates.update({"status": "正常", "app_chat": True})
+        quota_payload = normalize_app_chat_rate_limit_payload(payload)
+        if quota_payload:
+            updates["quota_console"] = quota_payload
+        updates.update(hints)
         return self.update_account(access_token, updates, provider=provider_filter)
 
     def _refresh_error_message(self, access_token: str, exc: Exception, provider: str | None = None) -> str:
