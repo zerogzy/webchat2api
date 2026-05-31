@@ -314,7 +314,14 @@ def create_router() -> APIRouter:
             refresh_tokens = [token for token in tokens if token in saved_tokens]
         else:
             result = account_service.add_accounts(tokens, provider=body.provider)
-            refresh_tokens = tokens
+            saved_tokens = {
+                str(item.get("access_token") or "").strip()
+                for item in result.get("items", [])
+                if isinstance(item, dict) and str(item.get("access_token") or "").strip()
+            }
+            refresh_tokens = [token for token in tokens if token in saved_tokens]
+            if not refresh_tokens and not int(result.get("added") or 0) and not int(result.get("skipped") or 0):
+                raise HTTPException(status_code=400, detail={"error": "tokens is required"})
         if _should_refresh_created_accounts(body.provider):
             refresh_result = account_service.refresh_accounts(refresh_tokens, provider=body.provider)
         else:

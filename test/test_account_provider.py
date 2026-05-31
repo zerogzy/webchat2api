@@ -776,6 +776,8 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(service.list_tokens(provider=GPT_PROVIDER), [])
         self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), ["shared-token"])
         self.assertEqual(service.get_account("shared-token", provider=GROK_PROVIDER)["provider"], GROK_PROVIDER)
+        [account] = service.list_accounts(provider=GROK_PROVIDER)
+        self.assertTrue(provider_registry.account_strategy(GROK_PROVIDER).sanitize_account(account)["has_sso"])
 
     def test_add_accounts_rejects_plain_grok_token(self) -> None:
         service = AccountService(MemoryStorage())
@@ -784,6 +786,17 @@ class AccountProviderTests(unittest.TestCase):
 
         self.assertEqual(result["added"], 0)
         self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), [])
+
+    def test_structured_grok_raw_sso_accepts_bare_token(self) -> None:
+        service = AccountService(MemoryStorage())
+
+        result = service.add_account_items([{"raw_sso": "explicit-bare-sso-token", "provider": GROK_PROVIDER}])
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), ["explicit-bare-sso-token"])
+        [account] = service.list_accounts(provider=GROK_PROVIDER)
+        self.assertEqual(account["access_token"], "explicit-bare-sso-token")
+        self.assertTrue(provider_registry.account_strategy(GROK_PROVIDER).sanitize_account(account)["has_sso"])
 
     def test_provider_scoped_delete_update_refresh_and_export_do_not_cross_providers(self) -> None:
         service = AccountService(MemoryStorage())
