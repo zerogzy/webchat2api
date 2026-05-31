@@ -4,27 +4,28 @@
   <img src="assets/logo.png" alt="webchat2api logo" width="180" />
 </p>
 
-<p align="center">webchat2api 是一个将 GPT/ChatGPT Web 与 Grok/xAI Web 能力封装为标准 API 接口的代理服务项目，提供 FastAPI 后端、Next.js Web 管理端、OpenAI 风格 API、GPT/Grok 账号池管理、文生文/文生图试验页以及 Docker 自托管部署能力。</p>
+<p align="center">webchat2api 是一个将 GPT/ChatGPT Web、Grok/xAI Web 与 Gemini Web 能力封装为标准 API 接口的代理服务项目，提供 FastAPI 后端、Next.js Web 管理端、OpenAI 风格 API、Gemini native API、GPT/Grok/Gemini 账号池管理、文生文/文生图试验页以及 Docker 自托管部署能力。</p>
 
 > [!WARNING]
-> 免责声明：本项目涉及对 GPT/ChatGPT Web 与 Grok/xAI Web 能力的逆向研究与封装，仅供个人学习、技术研究与非商业性技术交流使用。严禁用于商业倒卖、批量滥用、违反服务条款或违法违规场景。使用者需自行承担账号受限、封禁及其他法律与合规风险。
+> 免责声明：本项目涉及对 GPT/ChatGPT Web、Grok/xAI Web 与 Gemini Web 能力的逆向研究与封装，仅供个人学习、技术研究与非商业性技术交流使用。严禁用于商业倒卖、批量滥用、违反服务条款或违法违规场景。使用者需自行承担账号受限、封禁及其他法律与合规风险。
 
 > [!IMPORTANT]
 > 默认登录密钥为 `admin`，仅适合本地测试。公网或生产环境部署后必须通过 `LOGIN_SECRET` 或 `WEBCHAT2API_AUTH_KEY` 修改为强随机密钥。
 
 ## 功能概览
 
-- OpenAI 风格 API：将 GPT/ChatGPT Web 与 Grok/xAI Web 能力包装为 `/v1/models`、`/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`、`/v1/responses`、`/v1/messages` 等接口
+- OpenAI 风格 API：将 GPT/ChatGPT Web、Grok/xAI Web 与 Gemini Web 能力包装为 `/v1/models`、`/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`、`/v1/responses`、`/v1/messages` 等接口；兼容上游前缀 `/openai/v1/models`、`/openai/v1/chat/completions` 和 `/claude/v1/messages`
 - 公共接口：提供 `/health`、`/version`、`/auth/login`，AI 接口统一使用 Bearer Token 鉴权
-- GPT/Grok 文本模型：`/v1/models` 优先通过 `provider=gpt` 账号动态拉取 GPT 模型，并合并静态 Grok 模型；`/v1/chat/completions` 按 `model` 自动分发到 GPT 或 Grok 服务商账号
+- GPT/Grok/Gemini 文本模型：`/v1/models` 优先通过 `provider=gpt` 账号动态拉取 GPT 模型，并合并静态 Grok 与 Gemini 模型；`/v1/chat/completions` 按 `model` 自动分发到 GPT、Grok 或 Gemini 服务商账号
 - Grok app-chat：支持通过 grok.com app-chat 路径访问带 `mode_id` 的 Grok 模型，并可走 Browser Bridge 用真实 Chromium 代理请求
 - Grok 图片生成与编辑：`grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro` 通过 app-chat 图片能力生成图片；`grok-imagine-image-edit` 支持 app-chat 图片编辑；`grok-imagine-video` 已列出但暂未实现
+- Gemini native API：提供 `/gemini/v1beta/models`、`generateContent`、`streamGenerateContent`、`deepresearch`、`deepresearch/stream`、`interactions` 和 `interactions/{id}`；支持 Gemini native contents/parts/tools/toolConfig/generationConfig 与 functionCall/functionResponse 转换
 - tier 感知账号选择：Grok app-chat 会按模型所需 `basic`、`super`、`heavy` tier 和账号 `capabilities` 优先选择匹配账号，未匹配时再回退到普通 Grok 轮换
 - Web 管理后台：账号池、用户 API Key、代理、日志、图片任务、图片文件、备份、图片存储和系统配置管理
 - 管理接口：提供 `/api/settings`、`/api/auth/users`、`/api/accounts`、`/api/cpa/*`、`/api/sub2api/*`、`/api/remote-account/*`、`/api/image-tasks/*`、`/api/images*`、`/api/logs`、`/api/proxy/test`、`/api/storage/info`、`/api/backups*`、`/api/backup/test`、`/api/image-storage/*` 等后台能力
 - 远程账号注入：管理员可配置远程账号来源、手动同步来源，或通过 `/api/remote-account/inject` 注入账号；响应会隐藏来源鉴权 Token 和账号凭据
-- 账号服务商：账号 `provider` 选择 `gpt` 或 `grok`，账号 `type` 仍表示套餐或订阅类型
-- 试验页：`/`、`/image`、`/image-manager`、`/accounts`、`/logs`、`/settings`、`/login` 覆盖文生文聊天、文本模型批量可用性测试、文生图/图生图切换、图片队列、图片历史、图片管理、账号导入导出和系统设置
+- 账号服务商：账号 `provider` 选择 `gpt`、`grok` 或 `gemini`，账号 `type` 仍表示套餐或订阅类型；账号导入、刷新、导出和脱敏逻辑按服务商模块处理
+- 试验页：`/`、`/image`、`/image-manager`、`/accounts`、`/logs`、`/settings`、`/login` 覆盖文生文聊天、文本模型批量可用性测试、文生图/图生图切换、图片队列、图片历史、图片管理、账号导入导出和系统设置；`/image` 的文本和图片测试可按 GPT/Grok/Gemini provider 过滤模型与账号
 - 文生文聊天历史：保存在浏览器本地，刷新页面后仍保留
 - 图片账号轮换：图片生成/编辑遇到失效账号时，会跳过该账号并尝试下一个可用账号
 - 网络配置：ChatGPT Web、Grok Console 与 Grok app-chat 请求使用可配置网络 profile，支持独立的指纹、TLS impersonate、超时、代理和 Cloudflare Cookie
@@ -33,8 +34,23 @@
 - 图片存储：支持本地、WebDAV、双写模式，提供 WebDAV 连通性测试和同步；图片索引写入 `data/image_index.json`，标签写入 `data/image_tags.json`
 - Grok 防护处理：支持手动 `cf_clearance`、FlareSolverr clearance 刷新，以及可选 Browser Bridge 浏览器路径；这些都是尽力而为，不保证绕过所有 Cloudflare/WAF 挑战
 - GPT Turnstile：默认启用 `enable_turnstile_solver`，会在 ChatGPT 返回 Turnstile 要求时尝试生成 Sentinel Turnstile Token；该能力依赖上游挑战和求解结果，真实 GPT Turnstile 仍可能失败
-- 账号导出：仅导出 TXT，并按 GPT/Grok 服务商分别下载为 `webchat2api-gpt.txt` / `webchat2api_grok.txt`；文件内容每行一个 `access_token` 或 `sso` 凭据
+- 账号导出：仅导出 TXT，并按 GPT/Grok/Gemini 服务商分别下载为 `webchat2api-gpt.txt` / `webchat2api_grok.txt` / `webchat2api_gemini.txt`；文件内容每行一个 `access_token`、`sso` 或 Gemini cookie/session 凭据
+- 账号导入：账号导入弹窗按 GPT/Grok/Gemini provider 显示对应提示；GPT 支持 Access Token、Session JSON、CPA、远程 CPA 与 Sub2API，Grok 支持 token/cookie、CPA、远程 CPA 与 Sub2API，Gemini 支持包含 `__Secure-1PSID` 的 cookie/session、CPA、远程 CPA 与 Sub2API
 - 部署方式：Docker CLI、Docker Compose
+
+## Provider 模块边界
+
+项目把 GPT、Grok、Gemini 拆为可独立维护的 provider 模块，公共 API 路由保持不变。
+
+| 层级 | 位置 | 维护说明 |
+| --- | --- | --- |
+| 后端 provider 基础与注册 | `services/providers/base.py`、`services/providers/registry.py` | 定义 provider 常量、`ModelSpec`、模型注册表和 provider 归一化。 |
+| GPT provider | `services/providers/gpt/` | GPT 模型、账号导入导出、ChatGPT Web 文本链路和 GPT 图片链路。 |
+| Grok provider | `services/providers/grok/` | Grok 模型、账号 token/cookie 处理、Console 文本链路、app-chat 文本与图片链路。 |
+| Gemini provider | `services/providers/gemini/` | Gemini 模型、cookie/session 账号处理、Gemini Web 文本链路和 Gemini native API 相关能力。 |
+| 前端 provider 注册 | `web/src/providers/` | 账号页的导入文案、导出按钮、刷新能力、额度展示和 provider 标签集中配置。 |
+
+维护新模型或账号字段时，优先改对应 provider 目录，再确认 `services/providers/registry.py`、`services/account_service.py` 和 `web/src/providers/` 是否需要同步。`services/models.py` 仍是兼容 facade，供旧导入路径使用。
 
 ## 界面预览
 
@@ -192,7 +208,7 @@ Grok app-chat 模型会按所需账号层级选号：`basic` 可跑 lite 和 fas
 Authorization: Bearer <LOGIN_SECRET 或用户 API Key>
 ```
 
-OpenAI 兼容文本接口也接受 `x-api-key: <LOGIN_SECRET 或用户 API Key>`。当前仅包括 `/v1/models`、`/v1/chat/completions`、`/v1/responses` 和 `/v1/messages`。图片生成与图片编辑接口请继续使用 Bearer Token。
+OpenAI 兼容文本接口也接受 `x-api-key: <LOGIN_SECRET 或用户 API Key>`。当前包括 `/v1/models`、`/v1/chat/completions`、`/v1/responses`、`/v1/messages`，以及兼容别名 `/openai/v1/models`、`/openai/v1/chat/completions`、`/claude/v1/messages`。图片生成与图片编辑接口请继续使用 Bearer Token。
 
 健康检查：
 
@@ -213,7 +229,7 @@ curl http://localhost:83/v1/models \
   -H "Authorization: Bearer admin"
 ```
 
-`/v1/models` 会优先使用已导入的 `provider=gpt` 账号动态拉取 GPT 模型；如果没有可用 GPT 账号或拉取失败，会回退到匿名/内置 GPT 文本模型：`auto`、`gpt-5`、`gpt-5-thinking`、`gpt-4o`、`gpt-4o-mini`。GPT 图片模型包括 `gpt-image-2`、`codex-gpt-image-2`。Grok 当前使用内置模型列表，因为现有 Grok token/cookie 无法访问 `console.x.ai` 或 `api.x.ai` 的模型列表端点。Grok Console 文本模型包括 `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent`；app-chat 文本模型包括 `grok-4.20-0309` 系列、`grok-4.20-fast`、`grok-4.20-auto`、`grok-4.20-expert`、`grok-4.20-heavy`、`grok-4.3-beta`；图片模型包括 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`、`grok-imagine-image-edit`，`grok-imagine-video` 仅声明为未支持的视频能力。
+`/v1/models` 会优先使用已导入的 `provider=gpt` 账号动态拉取 GPT 模型；如果没有可用 GPT 账号或拉取失败，会回退到匿名/内置 GPT 文本模型：`auto`、`gpt-5`、`gpt-5-thinking`、`gpt-4o`、`gpt-4o-mini`。GPT 图片模型包括 `gpt-image-2`、`codex-gpt-image-2`。Grok 当前使用内置模型列表，因为现有 Grok token/cookie 无法访问 `console.x.ai` 或 `api.x.ai` 的模型列表端点。Gemini 当前使用内置模型列表，包括 `gemini-2.5-pro`、`gemini-2.5-flash`、`gemini-pro`。Grok Console 文本模型包括 `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent`；app-chat 文本模型包括 `grok-4.20-0309` 系列、`grok-4.20-fast`、`grok-4.20-auto`、`grok-4.20-expert`、`grok-4.20-heavy`、`grok-4.3-beta`；图片模型包括 `grok-imagine-image-lite`、`grok-imagine-image`、`grok-imagine-image-pro`、`grok-imagine-image-edit`，`grok-imagine-video` 仅声明为未支持的视频能力。
 
 聊天接口：
 
@@ -229,7 +245,7 @@ curl http://localhost:83/v1/chat/completions \
   }'
 ```
 
-也可直接选择 Grok 模型，接口会按模型分发到 `provider=grok` 的账号：
+也可直接选择 Grok 或 Gemini 模型，接口会按模型分发到对应 provider 的账号：
 
 ```bash
 curl http://localhost:83/v1/chat/completions \
@@ -277,7 +293,7 @@ curl http://localhost:83/v1/images/generations \
 
 账号导入说明：
 
-导入 GPT 账号时使用 `provider=gpt` 或保持默认；导入 Grok 账号 token/cookie 时使用 `provider=grok`。`provider` 负责选择服务商，`type` 仍用于记录 plan、subscription 等套餐或订阅类型。
+导入 GPT 账号时使用 `provider=gpt` 或保持默认；导入 Grok 账号 token/cookie 时使用 `provider=grok`；导入 Gemini cookie/session 时使用 `provider=gemini`，并确保包含 `__Secure-1PSID`。`provider` 负责选择服务商，`type` 仍用于记录 plan、subscription 等套餐或订阅类型。
 
 远程账号注入面向管理员使用，适合把外部账号源同步到本项目账号池。常用接口包括：
 
@@ -302,7 +318,7 @@ curl http://localhost:83/api/accounts/export \
   }'
 ```
 
-`provider` 可选 `gpt` 或 `grok`，用于分别导出 GPT/Grok TXT 文件；GPT 下载文件名固定为 `webchat2api-gpt.txt`，Grok 下载文件名固定为 `webchat2api_grok.txt`。`access_tokens` 为空数组时导出该服务商全部账号；内容仅包含凭据本身，每个账号一行，优先使用清理后的 `access_token`，缺失 `access_token` 时使用清理后的 `sso`。
+`provider` 可选 `gpt`、`grok` 或 `gemini`，用于分别导出对应 TXT 文件；GPT 下载文件名固定为 `webchat2api-gpt.txt`，Grok 下载文件名固定为 `webchat2api_grok.txt`，Gemini 下载文件名固定为 `webchat2api_gemini.txt`。`access_tokens` 为空数组时导出该服务商全部账号；内容仅包含凭据本身，每个账号一行，优先使用清理后的 `access_token`，缺失 `access_token` 时使用清理后的 `sso` 或 Gemini cookie/session。
 
 ## 配置
 
@@ -396,4 +412,4 @@ Browser Bridge 可选健康语义测试位于 `services/browser_bridge/test_heal
 
 ## 致谢
 
-感谢 https://github.com/chenyme/grok2api 和 https://github.com/basketikun/chatgpt2api。
+感谢 https://github.com/chenyme/grok2api 和 https://github.com/basketikun/chatgpt2api

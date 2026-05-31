@@ -118,6 +118,16 @@ class RemoteAccountApiTests(unittest.TestCase):
         self.assertTrue(body["source"]["has_bearer_token"])
         self.assertEqual(body["source"]["provider"], "grok")
 
+    def test_create_source_accepts_gemini_provider(self) -> None:
+        response = self.client.post(
+            "/api/remote-account/sources",
+            headers=AUTH_HEADERS,
+            json={"name": "Gemini Remote", "url": "https://example.test/gemini", "provider": "gemini"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["source"]["provider"], "gemini")
+
     def test_direct_inject_passes_payload_and_strategy(self) -> None:
         response = self.client.post(
             "/api/remote-account/inject",
@@ -145,6 +155,17 @@ class RemoteAccountApiTests(unittest.TestCase):
         self.assertEqual(kwargs["source_id"], "manual")
         self.assertEqual(kwargs["source_name"], "Manual")
         self.assertEqual(kwargs["provider_default"], "gpt")
+
+    def test_direct_inject_accepts_gemini_provider(self) -> None:
+        response = self.client.post(
+            "/api/remote-account/inject",
+            headers=AUTH_HEADERS,
+            json={"tokens": ["gemini-cookie"], "provider": "gemini"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        _, kwargs = self.import_service.inject_calls[-1]
+        self.assertEqual(kwargs["provider_default"], "gemini")
 
 
     def test_sync_source_generic_exception_response_is_sanitized(self) -> None:

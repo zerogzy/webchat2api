@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from services.models import GROK_PROVIDER, resolve_model
-from services.providers import grok
+from services.models import resolve_model
+from services.providers.registry import image_generation_outputs
 from services.protocol.conversation import (
     ConversationRequest,
     collect_image_outputs,
     stream_image_chunks,
-    stream_image_outputs_with_pool,
 )
 
 
@@ -20,12 +19,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     response_format = str(body.get("response_format") or "b64_json")
     base_url = str(body.get("base_url") or "") or None
     spec = resolve_model(model)
-    if spec.provider == GROK_PROVIDER:
-        outputs = grok.app_chat_image_outputs(body, spec, prompt, n)
-        if body.get("stream"):
-            return stream_image_chunks(outputs)
-        return collect_image_outputs(outputs)
-    outputs = stream_image_outputs_with_pool(ConversationRequest(
+    request = ConversationRequest(
         prompt=prompt,
         model=model,
         n=n,
@@ -33,7 +27,8 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         response_format=response_format,
         base_url=base_url,
         message_as_error=True,
-    ))
+    )
+    outputs = image_generation_outputs(spec, request, body=body, prompt=prompt, n=n)
     if body.get("stream"):
         return stream_image_chunks(outputs)
     return collect_image_outputs(outputs)
