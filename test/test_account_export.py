@@ -79,6 +79,7 @@ if "pydantic" not in sys.modules:
 from services.account_service import AccountService
 import services.account_service as account_service_module
 from services.models import GEMINI_PROVIDER, GROK_PROVIDER, GPT_PROVIDER
+from services.providers import registry as provider_registry
 
 account_service_module.log_service.add = lambda *args, **kwargs: None
 
@@ -239,6 +240,42 @@ class AccountExportTests(unittest.TestCase):
         self.assertEqual(len(grok_items), 1)
         self.assertEqual(gpt_items[0]["id_token"], "gpt-id")
         self.assertEqual(grok_items[0]["id_token"], "grok-id")
+
+    def test_build_export_items_by_grok_row_id_returns_raw_sso(self) -> None:
+        service = AccountService(
+            MemoryStorage(
+                [
+                    {"access_token": "sso=grok-row-token", "provider": GROK_PROVIDER, "id_token": "grok-id", "refresh_token": "grok-rt"},
+                ]
+            )
+        )
+        [account] = service.list_accounts(provider=GROK_PROVIDER)
+        row_id = provider_registry.account_strategy(GROK_PROVIDER).sanitize_account(account)["row_id"]
+
+        items = service.build_export_items(provider=GROK_PROVIDER, identifiers=[{"row_id": row_id}])
+
+        self.assertEqual([item["access_token"] for item in items], ["grok-row-token"])
+        self.assertEqual(items[0]["id_token"], "grok-id")
+        self.assertEqual(items[0]["refresh_token"], "grok-rt")
+
+    def test_build_export_items_by_gemini_row_id_returns_secret_only_in_export(self) -> None:
+        service = AccountService(
+            MemoryStorage(
+                [
+                    {"access_token": "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts", "provider": GEMINI_PROVIDER, "account_id": "gemini-a"},
+                    {"access_token": "__Secure-1PSID=other-psid; __Secure-1PSIDTS=other-psidts", "provider": GEMINI_PROVIDER, "account_id": "gemini-b"},
+                ]
+            )
+        )
+        [target, _other] = service.list_accounts(provider=GEMINI_PROVIDER)
+        sanitized = provider_registry.account_strategy(GEMINI_PROVIDER).sanitize_account(target)
+        self.assertNotIn("access_token", sanitized)
+        self.assertTrue(sanitized["row_id"])
+
+        items = service.build_export_items(provider=GEMINI_PROVIDER, identifiers=[{"row_id": sanitized["row_id"]}])
+
+        self.assertEqual([item["access_token"] for item in items], ["__Secure-1PSID=psid; __Secure-1PSIDTS=psidts"])
+        self.assertEqual(items[0]["account_id"], "gemini-a")
 
     def test_account_txt_content_is_line_oriented_and_keeps_tokens(self) -> None:
         content = AccountService.build_export_text(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -231,7 +232,7 @@ def _normalize_sso_candidate(candidate: str, *, allow_bare: bool) -> str:
 def normalize_access_token(item: dict[str, Any]) -> str:
     token = clean_string(item.get("access_token") or item.get("accessToken") or "")
     if item.get("_grok_sso_import") and token:
-        return token
+        return token if ";" in token else _normalize_bare_sso_token(token)
     if _looks_like_existing_normalized_account(item, token):
         return token
     for candidate in _explicit_sso_candidates(item):
@@ -498,15 +499,42 @@ def remote_error_status(exc: Exception) -> int | None:
         return None
 
 
+GROK_CONFIRMED_INVALID_MARKERS = (
+    "invalid-credentials",
+    "invalid_credentials",
+    "bad-credentials",
+    "bad_credentials",
+    "bad credentials",
+    "unauthenticated",
+    "failed to look up session id",
+    "blocked-user",
+    "blocked_user",
+    "email-domain-rejected",
+    "email_domain_rejected",
+    "session not found",
+    "account suspended",
+    "token revoked",
+    "token_revoked",
+    "token expired",
+    "token_expired",
+    "token-expired",
+    "authentication_failed",
+    "authentication failed",
+)
+
+
 def is_auth_failure_payload(payload: Any) -> bool:
     if isinstance(payload, dict):
         for key in ("error", "message", "detail", "code", "reason"):
             text = clean_string(payload.get(key)).lower()
-            if any(marker in text for marker in ("auth", "login", "session", "token", "unauthorized", "forbidden")):
+            if any(marker in text for marker in GROK_CONFIRMED_INVALID_MARKERS):
                 return True
         return any(is_auth_failure_payload(value) for value in payload.values())
     if isinstance(payload, (list, tuple, set)):
         return any(is_auth_failure_payload(value) for value in payload)
+    if isinstance(payload, str):
+        text = clean_string(payload).lower()
+        return any(marker in text for marker in GROK_CONFIRMED_INVALID_MARKERS)
     return False
 
 
@@ -515,7 +543,25 @@ def supports_refresh(account: dict[str, Any]) -> bool:
 
 
 def refresh_error_message(exc: Exception) -> str:
-    return "Grok app-chat rate-limit validation failed"
+    code = clean_string(getattr(exc, "code", ""))
+    upstream_status = remote_error_status(exc)
+    if code == "authentication_failed":
+        return "Grok 账号鉴权失败：SSO/Cookie 可能已失效，已按策略标记为异常"
+    if code == "rate_limit_exceeded":
+        return "Grok 账号配额不足或触发限流，已按策略标记为限流"
+    if code == "rate_limit_network_error":
+        return "Grok 配额检查暂时不可用：网络请求失败，账号状态保持不变"
+    if code in {"cloudflare_challenge", "rate_limit_check_unavailable"}:
+        return "Grok 配额检查暂时不可用：可能需要 Cloudflare 验证或 cf_clearance，账号状态保持不变"
+    if code in {"invalid_rate_limit_response", "upstream_transient"}:
+        return "Grok 配额检查暂时不可用：上游返回了非预期响应，账号状态保持不变"
+    if upstream_status in {400, 401, 403} and is_auth_failure_payload({"code": code, "message": str(exc)}):
+        return "Grok 账号鉴权失败：SSO/Cookie 可能已失效，已按策略标记为异常"
+    if upstream_status in {402, 429}:
+        return "Grok 账号配额不足或触发限流，已按策略标记为限流"
+    if bool(getattr(exc, "is_check_unavailable", False)):
+        return "Grok 配额检查暂时不可用，账号状态保持不变"
+    return "Grok 刷新未完成：未收到可确认账号失效的响应，账号状态保持不变"
 
 
 def export_filename() -> str:
@@ -565,10 +611,21 @@ def _account_has_sso(item: dict[str, Any]) -> bool:
     return False
 
 
+def account_row_id(account: dict[str, Any]) -> str:
+    access_token = normalize_access_token(dict(account))
+    if not access_token:
+        return ""
+    source = "\0".join(["grok", access_token])
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
 def sanitize_account(item: dict[str, Any]) -> dict[str, Any]:
     account = dict(item)
+    row_id = account_row_id(item)
     for key in GROK_SECRET_KEYS:
         account.pop(key, None)
+    if row_id:
+        account["row_id"] = row_id
     account["has_access_token"] = bool(clean_string(item.get("access_token") or item.get("accessToken")))
     account["has_sso"] = _account_has_sso(item)
     account["has_id_token"] = bool(clean_string(item.get("id_token")))
