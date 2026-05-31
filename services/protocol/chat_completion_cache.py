@@ -10,18 +10,9 @@ from typing import Any, Callable
 
 from services.config import config
 
-CACHEABLE_TEXT_KEYS = {
-    "frequency_penalty",
-    "max_completion_tokens",
-    "max_tokens",
-    "model",
-    "presence_penalty",
-    "response_format",
-    "seed",
-    "stop",
-    "temperature",
-    "top_p",
-    "user",
+CACHE_KEY_EXCLUDED_BODY_KEYS = {
+    "messages",
+    "stream",
 }
 
 
@@ -77,7 +68,7 @@ def normalize_text_messages(messages: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def cache_key(body: dict[str, Any], messages: list[dict[str, Any]], *, stream: bool) -> str:
-    payload = {key: body.get(key) for key in CACHEABLE_TEXT_KEYS if key in body}
+    payload = {key: value for key, value in body.items() if key not in CACHE_KEY_EXCLUDED_BODY_KEYS}
     payload["messages"] = messages
     payload["stream"] = bool(stream)
     encoded = json.dumps(_json_safe(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -104,9 +95,30 @@ def _setting_int(settings: dict[str, object], key: str, default: int = 0) -> int
     return default
 
 
+def _is_deterministic_text_request(body: dict[str, Any]) -> bool:
+    temperature = body.get("temperature")
+    if temperature is None:
+        return False
+    try:
+        if float(temperature) != 0.0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    top_p = body.get("top_p")
+    if top_p is not None:
+        try:
+            if float(top_p) != 1.0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def is_cacheable_text_request(body: dict[str, Any], *, stream: bool) -> bool:
     settings = config.get_chat_completion_cache_settings()
     if not settings.get("enabled") or _setting_float(settings, "ttl_seconds") <= 0:
+        return False
+    if not _is_deterministic_text_request(body):
         return False
     if stream and not settings.get("cache_stream"):
         return False

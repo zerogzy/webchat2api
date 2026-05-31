@@ -49,7 +49,7 @@ class ChatCompletionCacheProtocolTests(unittest.TestCase):
             calls += 1
             return "cached text"
 
-        body = {"model": "auto", "messages": [{"role": "user", "content": "Hello"}]}
+        body = {"model": "auto", "temperature": 0, "messages": [{"role": "user", "content": "Hello"}]}
         with (
             mock.patch.object(openai_v1_chat_complete, "text_backend", return_value=object()),
             mock.patch.object(openai_v1_chat_complete.gpt_chat, "chat_completion", side_effect=fake_chat_completion),
@@ -68,12 +68,38 @@ class ChatCompletionCacheProtocolTests(unittest.TestCase):
 
         self.assertNotEqual(cold, warm)
 
+    def test_cache_key_changes_for_extra_output_affecting_fields(self) -> None:
+        messages = [{"role": "user", "content": "Hello"}]
+        fast = cache_key({"model": "auto", "temperature": 0, "reasoning_effort": "low", "messages": messages}, messages, stream=False)
+        deep = cache_key({"model": "auto", "temperature": 0, "reasoning_effort": "high", "messages": messages}, messages, stream=False)
+
+        self.assertNotEqual(fast, deep)
+
+    def test_cache_key_ignores_body_messages_in_favor_of_normalized_messages(self) -> None:
+        raw_messages = [{"role": "user", "content": "Hello"}, {"role": "user", "content": "Hello"}]
+        normalized_messages = [{"role": "user", "content": "Hello"}]
+        first = cache_key({"model": "auto", "temperature": 0, "messages": raw_messages}, normalized_messages, stream=False)
+        second = cache_key({"model": "auto", "temperature": 0, "messages": normalized_messages}, normalized_messages, stream=False)
+
+        self.assertEqual(first, second)
+
+    def test_cache_requires_deterministic_sampling(self) -> None:
+        self.enable_cache()
+        deterministic_body = {"model": "auto", "temperature": 0, "messages": [{"role": "user", "content": "Hello"}]}
+        default_sampling_body = {"model": "auto", "messages": [{"role": "user", "content": "Hello"}]}
+        warm_body = {"model": "auto", "temperature": 0.2, "messages": [{"role": "user", "content": "Hello"}]}
+
+        self.assertTrue(openai_v1_chat_complete.is_cacheable_text_request(deterministic_body, stream=False))
+        self.assertFalse(openai_v1_chat_complete.is_cacheable_text_request(default_sampling_body, stream=False))
+        self.assertFalse(openai_v1_chat_complete.is_cacheable_text_request(warm_body, stream=False))
+
     def test_streaming_and_tool_requests_bypass_cache(self) -> None:
         self.enable_cache()
 
-        stream_body = {"model": "auto", "stream": True, "messages": [{"role": "user", "content": "Hello"}]}
+        stream_body = {"model": "auto", "temperature": 0, "stream": True, "messages": [{"role": "user", "content": "Hello"}]}
         tool_body = {
             "model": "auto",
+            "temperature": 0,
             "messages": [{"role": "user", "content": "Hello"}],
             "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
         }
@@ -92,7 +118,7 @@ class ChatCompletionCacheProtocolTests(unittest.TestCase):
 
     def test_exceptions_are_not_cached(self) -> None:
         self.enable_cache()
-        body = {"model": "auto", "messages": [{"role": "user", "content": "Hello"}]}
+        body = {"model": "auto", "temperature": 0, "messages": [{"role": "user", "content": "Hello"}]}
         failing_then_ok = mock.Mock(side_effect=[RuntimeError("boom"), "ok"])
 
         with (
@@ -112,7 +138,7 @@ class ChatCompletionCacheProtocolTests(unittest.TestCase):
         release = threading.Event()
         results: list[dict[str, Any]] = []
         errors: list[BaseException] = []
-        body = {"model": "auto", "messages": [{"role": "user", "content": "Hello"}]}
+        body = {"model": "auto", "temperature": 0, "messages": [{"role": "user", "content": "Hello"}]}
         calls = 0
 
         def fake_chat_completion(body: dict[str, Any], messages: list[dict[str, Any]], model: str, backend: object = None) -> str:

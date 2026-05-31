@@ -150,6 +150,7 @@ def create_router() -> APIRouter:
         await filter_or_log(call, prompt)
         return await call.run(openai_search.handle, payload)
 
+    @router.post("/v1/completions")
     @router.post("/v1/complete")
     async def create_completion(
             body: CompletionRequest,
