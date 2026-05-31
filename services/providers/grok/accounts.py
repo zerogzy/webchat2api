@@ -561,7 +561,7 @@ def refresh_error_message(exc: Exception) -> str:
         return "Grok 账号配额不足或触发限流，已按策略标记为限流"
     if bool(getattr(exc, "is_check_unavailable", False)):
         return "Grok 配额检查暂时不可用，账号状态保持不变"
-    return "Grok 刷新未完成：未收到可确认账号失效的响应，账号状态保持不变"
+    return "Grok 配额检查暂时不可用，账号状态保持不变"
 
 
 def export_filename() -> str:

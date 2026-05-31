@@ -824,7 +824,7 @@ class AccountService:
             if status in {400, 401, 403} and strategy.is_auth_failure_payload({"code": code, "message": str(exc)}):
                 self.remove_invalid_token(access_token, event)
                 raise
-            raise
+            return UNCHANGED_REMOTE_INFO
         decision = self._state_decision(account, payload=payload)
         if decision.auth_failed:
             self.remove_invalid_token(access_token, event)
