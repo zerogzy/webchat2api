@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import re
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 EXPORT_FILENAME = "webchat2api_gemini.txt"
 SECRET_KEYS = ("access_token", "accessToken", "cookies", "__Secure-1PSID", "__Secure-1PSIDTS", "SNlM0e", "session_token", "at")
 SESSION_TOKEN_FIELDS = ("session_token", "SNlM0e", "at")
-UNAVAILABLE_STATUSES = {"禁用", "异常", "限流"}
+GEMINI_REQUIRED_COOKIES = ("__Secure-1PSID", "__Secure-1PSIDTS")
+GEMINI_SENSITIVE_COOKIE_NAMES = ("__Secure-1PSID", "__Secure-1PSIDTS", "SNlM0e", "at", "session_token")
+GEMINI_NON_COOKIE_FIELDS = ("SNlM0e", "session_token", "at")
+UNAVAILABLE_STATUSES = {"禁用", "异常", "限流", "missing_gemini_session", "missing_psid"}
 AUTH_FAILURE_MARKERS = (
     "auth",
     "login",
@@ -22,6 +28,22 @@ AUTH_FAILURE_MARKERS = (
     "missing token",
     "credential",
 )
+
+
+@dataclass(frozen=True)
+class GeminiCookieState:
+    cookie_header: str
+    cookies: dict[str, str]
+    psid: str
+    psidts: str
+
+
+@dataclass(frozen=True)
+class GeminiRotateCookiesResult:
+    cookie_header: str
+    cookies: dict[str, str]
+    psidts: str
+    refreshed_psidts: str
 
 
 def clean_string(value: Any) -> str:
@@ -72,17 +94,113 @@ def _merged_cookie_fields(item: dict[str, Any]) -> dict[str, str]:
     return cookies
 
 
-def _session_field(item: dict[str, Any], cookies: dict[str, str], name: str) -> str:
-    return clean_string(item.get(name)) or clean_string(cookies.get(name))
+def cookie_header_from_mapping(cookies: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for name, value in cookies.items():
+        name_text = str(name or "").strip()
+        value_text = clean_string(value)
+        if name_text and value_text:
+            parts.append(f"{name_text}={value_text}")
+    return "; ".join(parts)
+
+
+def sanitize_cookie_header(cookie_header: str) -> str:
+    cookies = parse_cookie_header(cookie_header)
+    for name in list(cookies):
+        if name in GEMINI_SENSITIVE_COOKIE_NAMES:
+            cookies[name] = "[redacted]"
+    return cookie_header_from_mapping(cookies)
+
+
+def merge_cookie_headers(*cookie_headers: str) -> str:
+    cookies: dict[str, str] = {}
+    for cookie_header_value in cookie_headers:
+        for name, value in parse_cookie_header(cookie_header_value).items():
+            if value:
+                cookies[name] = value
+    return cookie_header_from_mapping(cookies)
+
+
+def cookie_header_from_response(response: object) -> str:
+    cookies_attr = getattr(response, "cookies", None)
+    response_cookies = cookies_attr() if callable(cookies_attr) else cookies_attr
+    parts: list[str] = []
+    if isinstance(response_cookies, dict):
+        parts.extend(f"{name}={clean_string(value)}" for name, value in response_cookies.items())
+    elif isinstance(response_cookies, Iterable) and not isinstance(response_cookies, (str, bytes)):
+        for cookie in response_cookies:
+            name = getattr(cookie, "name", None)
+            value = getattr(cookie, "value", None)
+            if name is not None and value is not None:
+                parts.append(f"{name}={clean_string(value)}")
+    headers = getattr(response, "headers", None)
+    raw_set_cookie = ""
+    if isinstance(headers, dict):
+        raw_set_cookie = str(headers.get("set-cookie") or headers.get("Set-Cookie") or "")
+    if raw_set_cookie:
+        for item in re.split(r",\s*(?=[^;,\s]+=)", raw_set_cookie):
+            first = item.strip().split(";", 1)[0]
+            if "=" in first:
+                parts.append(first)
+    return merge_cookie_headers(*parts)
+
+
+def merge_response_cookies(cookie_header_value: str, response: object) -> str:
+    return merge_cookie_headers(cookie_header_value, cookie_header_from_response(response))
+
 
 
 def gemini_session_token(item: dict[str, Any]) -> str:
-    cookies = _merged_cookie_fields(item)
     for name in SESSION_TOKEN_FIELDS:
-        value = _session_field(item, cookies, name)
+        value = clean_string(item.get(name))
+        if value:
+            return value
+    access_cookies = parse_cookie_header(clean_string(item.get("access_token") or item.get("accessToken")))
+    stored_cookies = item.get("cookies")
+    stored_cookie_values = stored_cookies if isinstance(stored_cookies, dict) else {}
+    for name in ("SNlM0e", "at"):
+        value = clean_string(access_cookies.get(name)) or clean_string(stored_cookie_values.get(name))
         if value:
             return value
     return ""
+
+
+def gemini_cookie_state(item: dict[str, Any], require_session_cookies: bool = False) -> GeminiCookieState:
+    raw_cookies = _merged_cookie_fields(item)
+    psid = clean_string(raw_cookies.get("__Secure-1PSID")) or _cookie_field(item, "__Secure-1PSID")
+    psidts = clean_string(raw_cookies.get("__Secure-1PSIDTS")) or _cookie_field(item, "__Secure-1PSIDTS")
+    if psid:
+        raw_cookies["__Secure-1PSID"] = psid
+    if psidts:
+        raw_cookies["__Secure-1PSIDTS"] = psidts
+    for name in GEMINI_NON_COOKIE_FIELDS:
+        raw_cookies.pop(name, None)
+    if require_session_cookies:
+        missing = [name for name in GEMINI_REQUIRED_COOKIES if not raw_cookies.get(name)]
+        if missing:
+            raise ValueError(f"Gemini account is missing required cookie(s): {', '.join(missing)}")
+    cookies = {name: value for name, value in raw_cookies.items() if value}
+    return GeminiCookieState(
+        cookie_header=cookie_header_from_mapping(cookies),
+        cookies=cookies,
+        psid=cookies.get("__Secure-1PSID", ""),
+        psidts=cookies.get("__Secure-1PSIDTS", ""),
+    )
+
+
+def gemini_rotate_cookies_result(cookie_header_value: str, response: object) -> GeminiRotateCookiesResult:
+    previous_cookies = parse_cookie_header(cookie_header_value)
+    merged_header = merge_response_cookies(cookie_header_value, response)
+    merged_cookies = parse_cookie_header(merged_header)
+    psidts = clean_string(merged_cookies.get("__Secure-1PSIDTS"))
+    previous_psidts = clean_string(previous_cookies.get("__Secure-1PSIDTS"))
+    refreshed_psidts = psidts if psidts and psidts != previous_psidts else ""
+    return GeminiRotateCookiesResult(
+        cookie_header=merged_header,
+        cookies=merged_cookies,
+        psidts=psidts,
+        refreshed_psidts=refreshed_psidts,
+    )
 
 
 def account_category(item: dict[str, Any]) -> str:

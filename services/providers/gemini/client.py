@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
@@ -11,6 +10,17 @@ from curl_cffi import requests
 from fastapi import HTTPException
 
 from services.providers.base import ModelSpec
+from services.providers.gemini.accounts import (
+    cookie_header_from_mapping,
+    cookie_header_from_response,
+    gemini_cookie_state,
+    gemini_rotate_cookies_result,
+    gemini_session_token,
+    merge_cookie_headers,
+    merge_response_cookies,
+    parse_cookie_header,
+    sanitize_cookie_header,
+)
 from services.providers.gemini.models import gemini_model_metadata
 from services.network.client import create_session
 
@@ -22,9 +32,6 @@ GEMINI_ROTATE_COOKIES_BODY = '[000,"-0000000000000000000"]'
 GEMINI_BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 GEMINI_GENERATE_MAX_ATTEMPTS = 3
 GEMINI_RETRY_BACKOFF_SECONDS = 0.25
-GEMINI_REQUIRED_COOKIES = ("__Secure-1PSID", "__Secure-1PSIDTS")
-GEMINI_SENSITIVE_COOKIE_NAMES = ("__Secure-1PSID", "__Secure-1PSIDTS", "SNlM0e", "at", "session_token")
-GEMINI_NON_COOKIE_FIELDS = ("SNlM0e", "session_token", "at")
 GEMINI_WEB_RPC_ID = "assistant.lamda.BardFrontendService.StreamGenerate"
 GEMINI_WEB_IMAGE_UNSUPPORTED_DETAIL = "Gemini Web image input is not supported by this upstream adapter"
 GEMINI_IMAGE_PART_TYPES = {"image", "image_url", "input_image"}
@@ -52,78 +59,6 @@ class GeminiWebError(RuntimeError):
         if self.code:
             detail["code"] = self.code
         return detail
-
-
-def clean_cookie_value(value: Any) -> str:
-    return str(value or "").strip().strip(";").strip('"').strip("'").strip(";")
-
-
-def parse_cookie_header(cookie_header: str) -> dict[str, str]:
-    cookies: dict[str, str] = {}
-    for part in str(cookie_header or "").split(";"):
-        if "=" not in part:
-            continue
-        name, value = part.split("=", 1)
-        name = name.strip()
-        value = clean_cookie_value(value)
-        if name:
-            cookies[name] = value
-    return cookies
-
-
-def cookie_header_from_mapping(cookies: dict[str, Any]) -> str:
-    parts: list[str] = []
-    for name, value in cookies.items():
-        name_text = str(name or "").strip()
-        value_text = clean_cookie_value(value)
-        if name_text and value_text:
-            parts.append(f"{name_text}={value_text}")
-    return "; ".join(parts)
-
-
-def sanitize_cookie_header(cookie_header: str) -> str:
-    cookies = parse_cookie_header(cookie_header)
-    for name in list(cookies):
-        if name in GEMINI_SENSITIVE_COOKIE_NAMES:
-            cookies[name] = "[redacted]"
-    return cookie_header_from_mapping(cookies)
-
-
-def merge_cookie_headers(*cookie_headers: str) -> str:
-    cookies: dict[str, str] = {}
-    for cookie_header in cookie_headers:
-        for name, value in parse_cookie_header(cookie_header).items():
-            if value:
-                cookies[name] = value
-    return cookie_header_from_mapping(cookies)
-
-
-def cookie_header_from_response(response: object) -> str:
-    cookies_attr = getattr(response, "cookies", None)
-    response_cookies = cookies_attr() if callable(cookies_attr) else cookies_attr
-    parts: list[str] = []
-    if isinstance(response_cookies, dict):
-        parts.extend(f"{name}={clean_cookie_value(value)}" for name, value in response_cookies.items())
-    elif isinstance(response_cookies, Iterable) and not isinstance(response_cookies, (str, bytes)):
-        for cookie in response_cookies:
-            name = getattr(cookie, "name", None)
-            value = getattr(cookie, "value", None)
-            if name is not None and value is not None:
-                parts.append(f"{name}={clean_cookie_value(value)}")
-    headers = getattr(response, "headers", None)
-    raw_set_cookie = ""
-    if isinstance(headers, dict):
-        raw_set_cookie = str(headers.get("set-cookie") or headers.get("Set-Cookie") or "")
-    if raw_set_cookie:
-        for item in re.split(r",\s*(?=[^;,\s]+=)", raw_set_cookie):
-            first = item.split(";", 1)[0]
-            if "=" in first:
-                parts.append(first)
-    return merge_cookie_headers(*parts)
-
-
-def merge_response_cookies(cookie_header: str, response: object) -> str:
-    return merge_cookie_headers(cookie_header, cookie_header_from_response(response))
 
 
 def session_token_from_response(raw_text: str) -> str:
@@ -172,46 +107,14 @@ def stream_generate_url(session_token: str = "") -> str:
 
 
 def account_session_token(account: dict[str, Any]) -> str:
-    for key in ("session_token", "SNlM0e", "at"):
-        value = clean_cookie_value(account.get(key))
-        if value:
-            return value
-    direct = parse_cookie_header(str(account.get("access_token") or ""))
-    for key in ("SNlM0e", "at"):
-        value = clean_cookie_value(direct.get(key))
-        if value:
-            return value
-    stored_cookies = account.get("cookies")
-    if isinstance(stored_cookies, dict):
-        for key in ("SNlM0e", "at"):
-            value = clean_cookie_value(stored_cookies.get(key))
-            if value:
-                return value
-    return ""
+    return gemini_session_token(account)
 
 
 def account_cookie_header(account: dict[str, Any]) -> str:
-    direct = str(account.get("access_token") or "").strip()
-    cookies = parse_cookie_header(direct)
-    stored_cookies = account.get("cookies")
-    if isinstance(stored_cookies, dict):
-        for name, value in stored_cookies.items():
-            value_text = clean_cookie_value(value)
-            if value_text:
-                cookies[str(name)] = value_text
-    for name in GEMINI_REQUIRED_COOKIES:
-        value = clean_cookie_value(account.get(name))
-        if value:
-            cookies[name] = value
-    for name in GEMINI_NON_COOKIE_FIELDS:
-        cookies.pop(name, None)
-    missing = [name for name in GEMINI_REQUIRED_COOKIES if not cookies.get(name)]
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": f"Gemini account is missing required cookie(s): {', '.join(missing)}"},
-        )
-    return cookie_header_from_mapping(cookies)
+    try:
+        return gemini_cookie_state(account, require_session_cookies=True).cookie_header
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
 
 def rotate_psidts_cookie(session: object, cookie_header: str, user_agent: str | None = None) -> str:
@@ -228,11 +131,10 @@ def rotate_psidts_cookie(session: object, cookie_header: str, user_agent: str | 
         raise classify_upstream_error(status_code, raw_text)
     if status_code >= 400:
         raise classify_upstream_error(status_code, raw_text)
-    merged = merge_response_cookies(cookie_header, response)
-    merged_cookies = parse_cookie_header(merged)
-    if not merged_cookies.get("__Secure-1PSIDTS"):
+    rotation = gemini_rotate_cookies_result(cookie_header, response)
+    if not rotation.psidts:
         raise GeminiWebError("Gemini cookie rotation did not issue __Secure-1PSIDTS", status_code=401, upstream_status=status_code, code="gemini_session_cookie_missing")
-    return merged
+    return rotation.cookie_header
 
 
 def contains_image_content(value: object) -> bool:

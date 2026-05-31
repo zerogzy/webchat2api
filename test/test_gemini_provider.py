@@ -97,6 +97,17 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(getattr(raised.exception, "status_code"), 400)
         self.assertIn("Gemini Web image input", str(getattr(raised.exception, "detail")))
 
+    def test_build_web_payload_rejects_openai_compatible_nested_image_payload_key(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            gemini.build_web_payload(
+                resolve_model("gemini-2.5-pro"),
+                {},
+                [{"role": "user", "content": {"text": "Describe it", "image_url": "data:image/png;base64,AA=="}}],
+            )
+
+        self.assertEqual(getattr(raised.exception, "status_code"), 400)
+        self.assertIn("Gemini Web image input", str(getattr(raised.exception, "detail")))
+
     def test_chat_completion_rejects_image_message_before_account_lookup(self) -> None:
         account_service = mock.Mock()
         with mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
@@ -134,18 +145,20 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(header, "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts; NID=nid")
 
     def test_cookie_header_helpers_preserve_extra_cookies_and_redact_secrets(self) -> None:
-        header = 'NID="nid"; __Secure-1PSID="psid"; SNlM0e=token; __Secure-1PSIDTS=psidts;'
+        header = 'NID="nid"; empty=; quoted="value"; __Secure-1PSID="psid"; SNlM0e=token; __Secure-1PSIDTS=psidts;'
 
         parsed = gemini.parse_cookie_header(header)
         self.assertEqual(parsed["NID"], "nid")
         self.assertEqual(parsed["__Secure-1PSID"], "psid")
+        self.assertEqual(parsed["empty"], "")
+        self.assertEqual(parsed["quoted"], "value")
         self.assertEqual(
             gemini.cookie_header_from_mapping(parsed),
-            "NID=nid; __Secure-1PSID=psid; SNlM0e=token; __Secure-1PSIDTS=psidts",
+            "NID=nid; quoted=value; __Secure-1PSID=psid; SNlM0e=token; __Secure-1PSIDTS=psidts",
         )
         self.assertEqual(
             gemini.sanitize_cookie_header(header),
-            "NID=nid; __Secure-1PSID=[redacted]; SNlM0e=[redacted]; __Secure-1PSIDTS=[redacted]",
+            "NID=nid; quoted=value; __Secure-1PSID=[redacted]; SNlM0e=[redacted]; __Secure-1PSIDTS=[redacted]",
         )
 
     def test_merge_cookie_headers_deduplicates_and_redacts_debug_output(self) -> None:
@@ -173,6 +186,47 @@ class GeminiProviderTests(unittest.TestCase):
         })
 
         self.assertEqual(header, "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
+
+    def test_gemini_cookie_state_normalizes_account_without_session_token_fields(self) -> None:
+        state = gemini.gemini_cookie_state({
+            "access_token": "__Secure-1PSID=old; __Secure-1PSIDTS=old-ts; SNlM0e=token",
+            "cookies": {"__Secure-1PSID": "stored", "NID": "nid", "at": "at-token"},
+            "__Secure-1PSIDTS": "field-ts",
+        })
+
+        self.assertEqual(state.psid, "stored")
+        self.assertEqual(state.psidts, "old-ts")
+        self.assertEqual(state.cookies, {"__Secure-1PSID": "stored", "__Secure-1PSIDTS": "old-ts", "NID": "nid"})
+        self.assertEqual(state.cookie_header, "__Secure-1PSID=stored; __Secure-1PSIDTS=old-ts; NID=nid")
+
+    def test_gemini_cookie_state_reports_missing_required_cookie(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            gemini.gemini_cookie_state({"access_token": "__Secure-1PSID=psid"}, require_session_cookies=True)
+
+        self.assertIn("__Secure-1PSIDTS", str(raised.exception))
+
+    def test_account_session_token_precedence_prefers_direct_then_snlm0e_then_at(self) -> None:
+        self.assertEqual(
+            gemini.account_session_token({
+                "session_token": "direct",
+                "SNlM0e": "top-snlm0e",
+                "at": "top-at",
+                "access_token": "SNlM0e=access-snlm0e; at=access-at",
+                "cookies": {"SNlM0e": "cookie-snlm0e", "at": "cookie-at"},
+            }),
+            "direct",
+        )
+        self.assertEqual(
+            gemini.account_session_token({
+                "access_token": "SNlM0e=access-snlm0e; at=access-at",
+                "cookies": {"SNlM0e": "cookie-snlm0e"},
+            }),
+            "access-snlm0e",
+        )
+        self.assertEqual(
+            gemini.account_session_token({"access_token": "at=access-at", "cookies": {"SNlM0e": "cookie-snlm0e"}}),
+            "cookie-snlm0e",
+        )
 
     def test_account_session_token_reads_account_cookie_and_access_token_shapes(self) -> None:
         self.assertEqual(gemini.account_session_token({"session_token": "direct"}), "direct")
@@ -533,6 +587,29 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(call["data"], '[000,"-0000000000000000000"]')
         self.assertEqual(call["headers"]["cookie"], "__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts")
         self.assertEqual(call["headers"]["user-agent"], "Test-UA")
+
+    def test_rotate_cookies_result_exposes_refreshed_psidts_metadata(self) -> None:
+        class FakeResponse:
+            headers = {"Set-Cookie": "__Secure-1PSIDTS=new-ts; Path=/; Secure, NID=nid; Path=/"}
+            cookies = None
+
+        result = gemini.gemini_rotate_cookies_result("__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts", FakeResponse())
+
+        self.assertEqual(result.cookie_header, "__Secure-1PSID=psid; __Secure-1PSIDTS=new-ts; NID=nid")
+        self.assertEqual(result.psidts, "new-ts")
+        self.assertEqual(result.refreshed_psidts, "new-ts")
+        self.assertEqual(result.cookies["__Secure-1PSIDTS"], "new-ts")
+
+    def test_rotate_cookies_result_keeps_empty_refresh_metadata_when_psidts_unchanged(self) -> None:
+        class FakeResponse:
+            headers: dict[str, str] = {}
+            cookies = None
+
+        result = gemini.gemini_rotate_cookies_result("__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts", FakeResponse())
+
+        self.assertEqual(result.cookie_header, "__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts")
+        self.assertEqual(result.psidts, "old-ts")
+        self.assertEqual(result.refreshed_psidts, "")
 
     def test_rotate_psidts_cookie_allows_200_without_new_cookie_when_existing_psidts_present(self) -> None:
         class FakeResponse:
