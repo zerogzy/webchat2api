@@ -81,7 +81,7 @@ export function isProviderAccount(account: Account, provider: ProviderId) {
   return normalizeAccountProvider(account.provider) === provider;
 }
 
-export function accountProviderSupportsTokenExport(provider: AccountExportProvider, tokenCount: number) {
+export function accountProviderSupportsTokenExport(provider: AccountExportProvider, tokenCount: number, identifierCount = 0) {
   const definition = getAccountProviderDefinition(provider);
-  return definition.canExportWithoutTokens || tokenCount > 0;
+  return definition.canExportWithoutTokens || tokenCount > 0 || identifierCount > 0;
 }

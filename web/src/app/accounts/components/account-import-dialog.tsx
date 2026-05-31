@@ -89,13 +89,13 @@ function normalizeGrokSsoCookie(value: string) {
   if (!trimmed) {
     return "";
   }
-  if (hasCookiePair(trimmed, "sso")) {
-    return trimmed;
-  }
-  if (trimmed.includes("=") || hasCookiePair(trimmed, "sso-rw")) {
+  if (trimmed.includes(";") || hasCookiePair(trimmed, "sso-rw")) {
     return "";
   }
-  return `sso=${trimmed}`;
+  if (trimmed.includes("=")) {
+    return /^sso\s*=\s*[^=;\s]+$/i.test(trimmed) ? trimmed : "";
+  }
+  return trimmed;
 }
 
 function getProviderScopedRecord(raw: Record<string, unknown>, provider: ImportProvider) {
@@ -292,7 +292,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   const submitTokens = async (tokens: string[], successText?: string, accountPayloads: AccountImportPayload[] = []) => {
     const normalizedTokens = tokens.map((item) => item.trim()).filter(Boolean);
 
-    if (normalizedTokens.length === 0) {
+    if (normalizedTokens.length === 0 && accountPayloads.length === 0) {
       toast.error("请先提供至少一个可用凭据");
       return;
     }
@@ -321,31 +321,45 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     }
   };
 
-  const buildTokenPayloads = (tokens: string[]): AccountImportPayload[] => tokens.map((token) => ({ access_token: token, provider: importProvider }));
+  const buildTokenPayloads = (tokens: string[]): AccountImportPayload[] => {
+    if (importProvider === "grok") {
+      return [];
+    }
+
+    return tokens.map((token) => ({ access_token: token, provider: importProvider }));
+  };
+
+  const normalizeImportTokens = (tokens: string[]) => {
+    if (importProvider !== "grok") {
+      return tokens;
+    }
+    return tokens.map(normalizeGrokSsoCookie).filter(Boolean);
+  };
+
+  const hasInvalidGrokImportTokens = (tokens: string[]) => {
+    return importProvider === "grok" && tokens.some((token) => !normalizeGrokSsoCookie(token));
+  };
+
+  const showInvalidGrokImportToast = () => {
+    toast.error("Grok 每行仅支持裸 SSO 值或单个 sso=完整值；不支持 sso-rw、完整 Cookie header 或其他 name=value。");
+  };
 
   const buildGeminiSessionPayload = (secure1Psid: string, secure1Psidts: string): AccountImportPayload => {
-    const cookieParts = [`__Secure-1PSID=${secure1Psid}`];
-    if (secure1Psidts) {
-      cookieParts.push(`__Secure-1PSIDTS=${secure1Psidts}`);
-    }
-    const accessToken = cookieParts.join("; ");
-    const cookies: Record<string, string> = {
-      "__Secure-1PSID": secure1Psid,
-    };
-    if (secure1Psidts) {
-      cookies["__Secure-1PSIDTS"] = secure1Psidts;
-    }
     return {
-      access_token: accessToken,
       provider: "gemini",
       "__Secure-1PSID": secure1Psid,
-      ...(secure1Psidts ? { "__Secure-1PSIDTS": secure1Psidts } : {}),
-      cookies,
+      "__Secure-1PSIDTS": secure1Psidts,
     };
   };
 
   const handleImportTokenText = async () => {
-    const tokens = splitTokens(tokenInput);
+    const rawTokens = splitTokens(tokenInput);
+    if (hasInvalidGrokImportTokens(rawTokens)) {
+      showInvalidGrokImportToast();
+      return;
+    }
+
+    const tokens = normalizeImportTokens(rawTokens);
     await submitTokens(tokens, providerDefinition.importTokenCopy.successLabel, buildTokenPayloads(tokens));
   };
 
@@ -359,7 +373,13 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
 
     try {
       const content = await readFileAsText(file);
-      const tokens = splitTokens(content);
+      const rawTokens = splitTokens(content);
+      if (hasInvalidGrokImportTokens(rawTokens)) {
+        showInvalidGrokImportToast();
+        return;
+      }
+
+      const tokens = normalizeImportTokens(rawTokens);
 
       if (tokens.length === 0) {
         toast.error("TXT 文件里没有读取到有效凭据");
@@ -381,27 +401,31 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     const sessionCopy = providerDefinition.importSessionCopy;
 
     if (importProvider === "gemini") {
-      const fullCookieTokens = splitTokens(sessionInput);
-      if (fullCookieTokens.length > 0) {
-        await submitTokens(fullCookieTokens, sessionCopy.successLabel, buildTokenPayloads(fullCookieTokens));
-        return;
-      }
-
       const secure1Psid = geminiSecure1Psid.trim();
       const secure1Psidts = geminiSecure1Psidts.trim();
 
-      if (!secure1Psid) {
-        toast.error("请填写 __Secure-1PSID，或粘贴完整 Gemini Cookie 行");
+      if (!secure1Psid || !secure1Psidts) {
+        toast.error("请分别填写 __Secure-1PSID 和 __Secure-1PSIDTS 的值");
+        return;
+      }
+      if (secure1Psid.includes("=") || secure1Psid.includes(";") || secure1Psidts.includes("=") || secure1Psidts.includes(";")) {
+        toast.error("只填写等号右侧的 cookie 值，不要包含 cookie 名称或分号");
         return;
       }
 
       const accountPayload = buildGeminiSessionPayload(secure1Psid, secure1Psidts);
-      await submitTokens([accountPayload.access_token], sessionCopy.successLabel, [accountPayload]);
+      await submitTokens([], sessionCopy.successLabel, [accountPayload]);
       return;
     }
 
     if (!sessionCopy.parseJsonAccessToken) {
-      const tokens = splitTokens(sessionInput);
+      const rawTokens = splitTokens(sessionInput);
+      if (hasInvalidGrokImportTokens(rawTokens)) {
+        showInvalidGrokImportToast();
+        return;
+      }
+
+      const tokens = normalizeImportTokens(rawTokens);
       await submitTokens(tokens, sessionCopy.successLabel, buildTokenPayloads(tokens));
       return;
     }
@@ -446,7 +470,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
       );
 
       const accounts = results.flatMap((item) => item.accounts);
-      const tokens = accounts.map((item) => item.access_token);
+      const tokens = accounts.map((item) => item.access_token).filter((token): token is string => Boolean(token));
       const parsedFileCount = results.filter((item) => item.accounts.length > 0).length;
       const errorCount = results.length - parsedFileCount;
 
@@ -616,16 +640,6 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           <div className="grid gap-4 sm:grid-cols-2">
             {importProvider === "gemini" ? (
               <>
-                <div className="space-y-2 sm:col-span-2">
-                  <label className="text-sm font-medium text-stone-700">完整 Gemini Cookie/session 行</label>
-                  <Textarea
-                    placeholder={sessionCopy.placeholder}
-                    value={sessionInput}
-                    onChange={(event) => setSessionInput(event.target.value)}
-                    className="min-h-32 resize-none rounded-xl border-stone-200 font-mono text-xs"
-                  />
-                  <p className="text-xs leading-5 text-stone-500">可直接粘贴一行或多行完整 Cookie；填写此处时会优先按完整 Cookie 列表提交。</p>
-                </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-stone-700">__Secure-1PSID</label>
                   <Input
@@ -644,7 +658,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                     placeholder="只填写 __Secure-1PSIDTS 的值"
                     className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs"
                   />
-                  <p className="text-xs leading-5 text-stone-500">可选；如果没有此 cookie，后端会按可用字段归一化。</p>
+                  <p className="text-xs leading-5 text-stone-500">必填；不要包含 cookie 名称，只粘贴等号右侧的完整值。</p>
                 </div>
               </>
             ) : (
