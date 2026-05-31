@@ -762,10 +762,29 @@ class AccountProviderTests(unittest.TestCase):
     def test_refresh_accounts_attempts_grok_validation(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
-            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常"},
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "异常", "quota": 5},
         ])
 
         with patched_grok_validation(return_value={"rateLimits": []}) as validate:
+            refresh_result = service.refresh_accounts(["grok-token"])
+
+        validate.assert_called_once()
+        self.assertEqual(validate.call_args.args[0], "grok-token")
+        self.assertEqual(refresh_result["refreshed"], 0)
+        self.assertEqual(refresh_result["errors"], [])
+        [account] = service.list_accounts()
+        self.assertEqual(account["status"], "异常")
+        self.assertEqual(account["quota"], 5)
+        self.assertFalse(account["app_chat"])
+
+    def test_refresh_accounts_counts_grok_validation_with_usable_quota(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "异常"},
+        ])
+
+        payload = {"remainingQueries": 17, "totalQueries": 20, "windowSizeSeconds": 7200}
+        with patched_grok_validation(return_value=payload) as validate:
             refresh_result = service.refresh_accounts(["grok-token"])
 
         validate.assert_called_once()
@@ -775,6 +794,15 @@ class AccountProviderTests(unittest.TestCase):
         [account] = service.list_accounts()
         self.assertEqual(account["status"], "正常")
         self.assertTrue(account["app_chat"])
+        self.assertEqual(account["quota"], 17)
+        self.assertEqual(account["quota_console"], {
+            "remaining": 17,
+            "total": 20,
+            "window_seconds": 7200,
+            "reset_at": None,
+        })
+        self.assertEqual(account["rate_limit_window_seconds"], 7200)
+        self.assertEqual(account["tier"], "super")
 
     def test_refresh_accounts_marks_invalid_grok_validation_abnormal(self) -> None:
         service = AccountService(MemoryStorage())
@@ -915,7 +943,7 @@ class AccountProviderTests(unittest.TestCase):
             {"access_token": "sso=grok-token", "provider": "grok", "status": "异常"},
         ])
 
-        with patched_grok_validation(return_value={"rateLimits": [{"remaining": 1}]}) as validate:
+        with patched_grok_validation(return_value={"rateLimits": [{"remainingQueries": 1, "totalQueries": 1, "windowSizeSeconds": 7200}]}) as validate:
             refresh_result = service.refresh_accounts(["grok-token"])
 
         validate.assert_called_once()
@@ -933,7 +961,7 @@ class AccountProviderTests(unittest.TestCase):
         [account] = service.list_accounts(provider=GROK_PROVIDER)
         row_id = provider_registry.account_strategy(GROK_PROVIDER).sanitize_account(account)["row_id"]
 
-        with patched_grok_validation(return_value={"rateLimits": []}) as validate:
+        with patched_grok_validation(return_value={"remainingQueries": 1, "windowSizeSeconds": 7200}) as validate:
             refresh_result = service.refresh_accounts([], provider=GROK_PROVIDER, identifiers=[{"row_id": row_id}])
 
         validate.assert_called_once()
@@ -999,7 +1027,7 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(service.get_account("shared-token", provider=GPT_PROVIDER)["status"], "正常")
         self.assertEqual(service.get_account("shared-token", provider=GROK_PROVIDER)["status"], "禁用")
 
-        with patched_grok_validation(return_value={"rateLimits": []}) as validate:
+        with patched_grok_validation(return_value={"rateLimits": [{"remainingQueries": 1, "totalQueries": 1, "windowSizeSeconds": 7200}]}) as validate:
             refresh_result = service.refresh_accounts(["shared-token"], provider=GROK_PROVIDER)
         validate.assert_called_once()
         self.assertEqual(refresh_result["refreshed"], 1)
