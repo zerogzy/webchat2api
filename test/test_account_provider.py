@@ -79,10 +79,27 @@ if "fastapi.responses" not in sys.modules:
 
 
 class TestGrokConsoleError(RuntimeError):
-    def __init__(self, message: str, status_code: int = 502, upstream_status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        upstream_status: int | None = None,
+        code: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.upstream_status = upstream_status
+        self.code = code
+
+    @property
+    def is_check_unavailable(self) -> bool:
+        return self.code in {
+            "cloudflare_challenge",
+            "invalid_rate_limit_response",
+            "rate_limit_check_unavailable",
+            "rate_limit_network_error",
+            "upstream_transient",
+        }
 
 
 _MISSING = object()
@@ -308,19 +325,53 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(accounts[0]["account_status"], "missing_psid")
         self.assertEqual(service.get_text_access_token(provider=GEMINI_PROVIDER), "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
 
-    def test_gemini_refresh_uses_client_helpers_not_generic_account_refresh(self) -> None:
+    def test_gemini_refresh_by_sanitized_row_id_uses_client_helpers(self) -> None:
         strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
         service = AccountService(MemoryStorage())
         service.add_account_items([
-            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": GEMINI_PROVIDER, "status": "正常"},
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "old-psidts", "provider": GEMINI_PROVIDER, "status": "正常"},
+            {"__Secure-1PSID": "other-psid", "__Secure-1PSIDTS": "other-psidts", "provider": GEMINI_PROVIDER, "status": "正常"},
         ])
+        accounts = service.list_accounts(provider=GEMINI_PROVIDER)
+        row_id = strategy.sanitize_account(accounts[0])["row_id"]
+        client = Mock()
+        client.cookie_header = "__Secure-1PSID=psid; __Secure-1PSIDTS=new-psidts; NID=nid"
+        client.bootstrap_session_token.return_value = "new-at"
+        client_context = Mock()
+        client_context.__enter__ = Mock(return_value=client)
+        client_context.__exit__ = Mock(return_value=None)
 
-        self.assertFalse(strategy.supports_refresh({"__Secure-1PSID": "psid"}))
-        result = service.refresh_accounts([], provider=GEMINI_PROVIDER)
+        with patch("services.providers.gemini.client.GeminiWebClient", return_value=client_context) as client_class:
+            result = service.refresh_accounts([], provider=GEMINI_PROVIDER, identifiers=[{"row_id": row_id}])
 
-        self.assertEqual(result["refreshed"], 0)
+        self.assertTrue(strategy.supports_refresh(accounts[0]))
+        self.assertEqual(result["refreshed"], 1)
         self.assertEqual(result["errors"], [])
-        self.assertEqual(result["items"][0]["account_category"], "psid_psidts")
+        client_class.assert_called_once_with("__Secure-1PSID=psid; __Secure-1PSIDTS=old-psidts", None)
+        client.rotate_psidts.assert_called_once_with()
+        client.bootstrap_session_token.assert_called_once_with()
+        refreshed_accounts = service.list_accounts(provider=GEMINI_PROVIDER)
+        self.assertEqual(refreshed_accounts[0]["__Secure-1PSIDTS"], "new-psidts")
+        self.assertEqual(refreshed_accounts[0]["session_token"], "new-at")
+        self.assertEqual(refreshed_accounts[0]["cookies"], {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "new-psidts", "NID": "nid"})
+        self.assertNotIn("session_token", refreshed_accounts[1])
+
+    def test_gemini_delete_by_sanitized_row_id_without_secret_token(self) -> None:
+        strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts", "provider": GEMINI_PROVIDER, "account_id": "gemini-a"},
+            {"__Secure-1PSID": "other-psid", "__Secure-1PSIDTS": "other-psidts", "provider": GEMINI_PROVIDER, "account_id": "gemini-b"},
+        ])
+        [target, _other] = service.list_accounts(provider=GEMINI_PROVIDER)
+        sanitized = strategy.sanitize_account(target)
+
+        result = service.delete_accounts([], provider=GEMINI_PROVIDER, identifiers=[{"row_id": sanitized["row_id"]}])
+
+        self.assertEqual(result["removed"], 1)
+        remaining = service.list_accounts(provider=GEMINI_PROVIDER)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["account_id"], "gemini-b")
 
     def test_gemini_auth_failure_detection_and_refresh_error_message(self) -> None:
         strategy = provider_registry.account_strategy(GEMINI_PROVIDER)
@@ -385,6 +436,20 @@ class AccountProviderTests(unittest.TestCase):
 
         [account] = service.list_accounts()
         self.assertEqual(account["access_token"], "sso=grok-token ; other=value")
+
+    def test_grok_sso_import_flag_normalizes_prefixed_token_to_bare_value(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_accounts(["sso=grok-simple-cookie-token"], provider=GROK_PROVIDER)
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), ["grok-simple-cookie-token"])
+
+    def test_grok_sso_import_flag_accepts_plain_value_without_dot(self) -> None:
+        service = AccountService(MemoryStorage())
+        result = service.add_accounts(["grok-simple-cookie-token"], provider=GROK_PROVIDER)
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), ["grok-simple-cookie-token"])
 
     def test_grok_account_rejects_plain_token_without_sso_cookie(self) -> None:
         service = AccountService(MemoryStorage())
@@ -720,7 +785,7 @@ class AccountProviderTests(unittest.TestCase):
         previous_auto_remove = account_service_module.config.data.get("auto_remove_invalid_accounts")
         account_service_module.config.data["auto_remove_invalid_accounts"] = False
         try:
-            with patched_grok_validation(side_effect=TestGrokConsoleError("auth failed with sso=secret-cookie", 401, 401)):
+            with patched_grok_validation(side_effect=TestGrokConsoleError("auth failed with sso=secret-cookie", 401, 401, "authentication_failed")):
                 refresh_result = service.refresh_accounts(["grok-token"])
         finally:
             if previous_auto_remove is None:
@@ -730,11 +795,97 @@ class AccountProviderTests(unittest.TestCase):
 
         self.assertEqual(refresh_result["refreshed"], 0)
         self.assertEqual(len(refresh_result["errors"]), 1)
-        self.assertEqual(refresh_result["errors"][0]["error"], "Grok app-chat rate-limit validation failed")
+        self.assertEqual(refresh_result["errors"][0]["error"], "Grok 账号鉴权失败：SSO/Cookie 可能已失效，已按策略标记为异常")
         self.assertNotIn("secret-cookie", refresh_result["errors"][0]["error"])
         [account] = service.list_accounts()
         self.assertEqual(account["status"], "异常")
         self.assertEqual(account["quota"], 0)
+
+    def test_refresh_accounts_keeps_grok_network_failure_status_unchanged(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常", "quota": 9},
+        ])
+
+        with patched_grok_validation(side_effect=TestGrokConsoleError("connect failed with sso=secret-cookie", 502, None, "rate_limit_network_error")):
+            refresh_result = service.refresh_accounts(["grok-token"])
+
+        self.assertEqual(refresh_result["refreshed"], 0)
+        self.assertEqual(refresh_result["errors"], [])
+        [account] = service.list_accounts()
+        self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["quota"], 9)
+
+    def test_refresh_accounts_keeps_grok_invalid_json_status_unchanged(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常", "quota": 4},
+        ])
+
+        with patched_grok_validation(side_effect=TestGrokConsoleError("<html>Just a moment sso=secret-cookie</html>", 502, None, "invalid_rate_limit_response")):
+            refresh_result = service.refresh_accounts(["grok-token"])
+
+        self.assertEqual(refresh_result["refreshed"], 0)
+        self.assertEqual(refresh_result["errors"], [])
+        [account] = service.list_accounts()
+        self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["quota"], 4)
+
+    def test_refresh_accounts_keeps_grok_unknown_403_status_unchanged(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常", "quota": 6},
+        ])
+
+        with patched_grok_validation(side_effect=TestGrokConsoleError("unknown upstream 403 with sso=secret-cookie", 502, 403, "rate_limit_check_unavailable")):
+            refresh_result = service.refresh_accounts(["grok-token"])
+
+        self.assertEqual(refresh_result["refreshed"], 0)
+        self.assertEqual(refresh_result["errors"], [])
+        [account] = service.list_accounts()
+        self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["quota"], 6)
+
+    def test_refresh_accounts_marks_grok_confirmed_invalid_marker_abnormal(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常", "quota": 5},
+        ])
+
+        previous_auto_remove = account_service_module.config.data.get("auto_remove_invalid_accounts")
+        account_service_module.config.data["auto_remove_invalid_accounts"] = False
+        try:
+            with patched_grok_validation(side_effect=TestGrokConsoleError("failed to look up session id for sso=secret-cookie", 401, 401, None)):
+                refresh_result = service.refresh_accounts(["grok-token"])
+        finally:
+            if previous_auto_remove is None:
+                account_service_module.config.data.pop("auto_remove_invalid_accounts", None)
+            else:
+                account_service_module.config.data["auto_remove_invalid_accounts"] = previous_auto_remove
+
+        self.assertEqual(refresh_result["refreshed"], 0)
+        self.assertEqual(len(refresh_result["errors"]), 1)
+        self.assertEqual(refresh_result["errors"][0]["error"], "Grok 账号鉴权失败：SSO/Cookie 可能已失效，已按策略标记为异常")
+        self.assertNotIn("secret-cookie", refresh_result["errors"][0]["error"])
+        [account] = service.list_accounts()
+        self.assertEqual(account["status"], "异常")
+        self.assertEqual(account["quota"], 0)
+
+    def test_refresh_accounts_marks_grok_quota_validation_limited(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常"},
+        ])
+
+        with patched_grok_validation(side_effect=TestGrokConsoleError("limited with sso=secret-cookie", 429, 429, "rate_limit_exceeded")):
+            refresh_result = service.refresh_accounts(["grok-token"])
+
+        self.assertEqual(refresh_result["refreshed"], 0)
+        self.assertEqual(len(refresh_result["errors"]), 1)
+        self.assertEqual(refresh_result["errors"][0]["error"], "Grok 账号配额不足或触发限流，已按策略标记为限流")
+        self.assertNotIn("secret-cookie", refresh_result["errors"][0]["error"])
+        [account] = service.list_accounts()
+        self.assertEqual(account["status"], "限流")
 
     def test_refresh_accounts_keeps_valid_grok_validation_usable(self) -> None:
         service = AccountService(MemoryStorage())
@@ -751,6 +902,22 @@ class AccountProviderTests(unittest.TestCase):
         [account] = service.list_accounts()
         self.assertEqual(account["status"], "正常")
         self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
+
+    def test_refresh_accounts_by_grok_row_id_attempts_validation(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常"},
+        ])
+        [account] = service.list_accounts(provider=GROK_PROVIDER)
+        row_id = provider_registry.account_strategy(GROK_PROVIDER).sanitize_account(account)["row_id"]
+
+        with patched_grok_validation(return_value={"rateLimits": []}) as validate:
+            refresh_result = service.refresh_accounts([], provider=GROK_PROVIDER, identifiers=[{"row_id": row_id}])
+
+        validate.assert_called_once()
+        self.assertEqual(validate.call_args.args[0], "grok-token")
+        self.assertEqual(refresh_result["refreshed"], 1)
+        self.assertEqual(refresh_result["errors"], [])
 
     def test_same_access_token_is_scoped_by_provider(self) -> None:
         storage = MemoryStorage()
@@ -779,13 +946,13 @@ class AccountProviderTests(unittest.TestCase):
         [account] = service.list_accounts(provider=GROK_PROVIDER)
         self.assertTrue(provider_registry.account_strategy(GROK_PROVIDER).sanitize_account(account)["has_sso"])
 
-    def test_add_accounts_rejects_plain_grok_token(self) -> None:
+    def test_add_accounts_accepts_plain_grok_sso_value(self) -> None:
         service = AccountService(MemoryStorage())
 
         result = service.add_accounts(["shared-token"], provider=GROK_PROVIDER)
 
-        self.assertEqual(result["added"], 0)
-        self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), [])
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(service.list_tokens(provider=GROK_PROVIDER), ["shared-token"])
 
     def test_structured_grok_raw_sso_accepts_bare_token(self) -> None:
         service = AccountService(MemoryStorage())
@@ -915,6 +1082,19 @@ class AccountProviderTests(unittest.TestCase):
 
         self.assertEqual(result["removed"], 1)
         self.assertEqual(service.list_accounts(provider=GEMINI_PROVIDER), [])
+
+    def test_grok_account_deletes_by_sanitized_row_id_identifier(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-row-token", "provider": "grok"},
+        ])
+        [account] = service.list_accounts(provider=GROK_PROVIDER)
+        row_id = provider_registry.account_strategy(GROK_PROVIDER).sanitize_account(account)["row_id"]
+
+        result = service.delete_accounts([], provider=GROK_PROVIDER, identifiers=[{"row_id": row_id}])
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_accounts(provider=GROK_PROVIDER), [])
 
     def test_gemini_account_identifier_delete_is_provider_scoped(self) -> None:
         service = AccountService(MemoryStorage())

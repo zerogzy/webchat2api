@@ -279,13 +279,26 @@ def delete_token_matches_account(token: str, account: dict[str, Any]) -> bool:
 
 
 def supports_refresh(account: dict[str, Any]) -> bool:
-    return False
+    return account_category(account) in {"full_session", "psid_psidts"}
 
 
-# Gemini session rotation is implemented in the provider client. The generic
-# account refresh pipeline cannot currently persist those updates without
-# touching shared account-service code, so Gemini must not advertise refresh
-# support there.
+def validate_remote_info(access_token: str, account: dict[str, Any] | None = None) -> dict[str, Any]:
+    from services.providers.gemini.client import GeminiWebClient, account_cookie_header, gemini_session_writeback
+
+    source = dict(account or {})
+    if access_token:
+        source.setdefault("access_token", access_token)
+    cookie_header_value = account_cookie_header(source)
+    with GeminiWebClient(cookie_header_value, source.get("user_agent")) as client:
+        client.rotate_psidts()
+        session_token = client.bootstrap_session_token()
+        return gemini_session_writeback(source, client.cookie_header, session_token)
+
+
+def remote_error_status(exc: Exception) -> int | None:
+    return getattr(exc, "status_code", None)
+
+
 def refresh_error_message(exc: Exception) -> str:
     message = clean_string(exc)
     return message or "Gemini session refresh failed"

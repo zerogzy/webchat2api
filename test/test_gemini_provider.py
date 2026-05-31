@@ -20,6 +20,7 @@ from services.models import resolve_model
 from services.protocol import openai_v1_chat_complete
 from services.providers import gemini
 from services.providers.gemini import models as gemini_models
+from services.providers.gemini import client as gemini_client
 
 
 class GeminiProviderTests(unittest.TestCase):
@@ -258,6 +259,83 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(gemini.session_token_from_response('<script>var at="assignment-token";</script>'), "assignment-token")
         self.assertEqual(gemini.session_token_from_response('<html><body nonce="nonce-token"></body></html>'), "nonce-token")
 
+    def test_rotate_psidts_cookie_sends_accounts_origin_and_keeps_existing_psidts(self) -> None:
+        class FakeResponse:
+            status_code = 200
+            text = ""
+            headers: dict[str, str] = {}
+            cookies: dict[str, str] = {}
+
+        class FakeSession:
+            captured_headers: dict[str, str] = {}
+            captured_data = ""
+
+            def post(self, url: str, headers: dict[str, str], data: str, timeout: int) -> FakeResponse:
+                self.captured_headers = headers
+                self.captured_data = data
+                return FakeResponse()
+
+        session = FakeSession()
+        header = gemini.rotate_psidts_cookie(session, "__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts")
+
+        self.assertEqual(header, "__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts")
+        self.assertEqual(session.captured_headers["origin"], "https://accounts.google.com")
+        self.assertEqual(session.captured_data, '[000,"-0000000000000000000"]')
+
+    def test_rotate_psidts_cookie_requires_retained_psidts(self) -> None:
+        class FakeResponse:
+            status_code = 200
+            text = ""
+            headers: dict[str, str] = {}
+            cookies: dict[str, str] = {}
+
+        class FakeSession:
+            def post(self, url: str, headers: dict[str, str], data: str, timeout: int) -> FakeResponse:
+                return FakeResponse()
+
+        with self.assertRaises(gemini.GeminiWebError) as raised:
+            gemini.rotate_psidts_cookie(FakeSession(), "__Secure-1PSID=psid")
+
+        self.assertEqual(raised.exception.code, "gemini_session_cookie_missing")
+
+    def test_bootstrap_session_token_retries_after_rotation(self) -> None:
+        with mock.patch("services.providers.gemini.client.create_session", return_value=mock.Mock()):
+            client = gemini.GeminiWebClient("__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts")
+        with mock.patch.object(client, "fetch_init_body", side_effect=["<html></html>", '{"SNlM0e":"new-at"}']), \
+             mock.patch.object(client, "rotate_psidts", return_value="__Secure-1PSID=psid; __Secure-1PSIDTS=new-ts") as rotate:
+            self.assertEqual(client.bootstrap_session_token(), "new-at")
+
+        rotate.assert_called_once()
+        self.assertEqual(client.session_token, "new-at")
+
+    def test_fetch_init_body_uses_gemini_app_bootstrap_headers(self) -> None:
+        class FakeResponse:
+            status_code = 200
+            text = '{"SNlM0e":"at"}'
+            headers: dict[str, str] = {}
+            cookies: dict[str, str] = {}
+
+        class FakeSession:
+            calls: list[tuple[str, dict[str, str]]] = []
+
+            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeResponse:
+                self.calls.append((url, headers))
+                return FakeResponse()
+
+            def close(self) -> None:
+                return None
+
+        with mock.patch("services.providers.gemini.client.create_session", return_value=FakeSession()):
+            client = gemini.GeminiWebClient("__Secure-1PSID=psid; __Secure-1PSIDTS=ts")
+        fake_session = client.session
+        self.assertEqual(client.fetch_init_body(), '{"SNlM0e":"at"}')
+
+        self.assertEqual(fake_session.calls[1][0], "https://gemini.google.com/app?hl=en")
+        headers = fake_session.calls[1][1]
+        self.assertEqual(headers["origin"], "https://gemini.google.com")
+        self.assertEqual(headers["referer"], "https://gemini.google.com/")
+        self.assertEqual(headers["x-same-domain"], "1")
+
     def setUp(self) -> None:
         gemini_models.clear_gemini_dynamic_model_cache()
 
@@ -380,6 +458,21 @@ class GeminiProviderTests(unittest.TestCase):
         parsed = gemini.parse_web_response_text(")]}'\n\n123\n" + frame)
 
         self.assertEqual(gemini.extract_completion(parsed).content, full_answer)
+
+    def test_parse_web_response_text_reads_current_wrb_direct_candidate_text(self) -> None:
+        stream_payload = json.dumps([
+            None,
+            ["conversation-id", "response-id"],
+            None,
+            None,
+            [["rc_abc123", ["Hi there"], None]],
+        ])
+        parsed = [["wrb.fr", None, stream_payload, None]]
+
+        completion = gemini.extract_completion(parsed)
+
+        self.assertEqual(completion.content, "Hi there")
+        self.assertEqual(completion.metadata, {"cid": "conversation-id", "rid": "response-id", "rcid": "rc_abc123"})
 
     def test_extract_completion_ignores_numeric_only_null_slot_wrb_metadata(self) -> None:
         stream_payload = json.dumps([
@@ -524,7 +617,8 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(google_call["url"], "https://www.google.com/")
         self.assertNotIn("cookie", google_call["headers"])
         get_call = fake_session.calls[1]
-        self.assertEqual(get_call["url"], "https://gemini.google.com/")
+        self.assertEqual(get_call["url"], "https://gemini.google.com/app?hl=en")
+        self.assertEqual(get_call["headers"]["referer"], "https://gemini.google.com/")
         self.assertEqual(get_call["headers"]["cookie"], "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts; NID=nid")
         self.assertEqual(get_call["headers"]["user-agent"], "Test-UA")
         post_call = fake_session.calls[2]
@@ -535,6 +629,7 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(post_call["headers"]["cookie"], "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts; NID=nid; INIT=init")
         self.assertEqual(post_call["data"]["at"], "boot-token")
         self.assertEqual(post_call["headers"]["user-agent"], "Test-UA")
+        self.assertEqual(post_call["headers"]["referer"], "https://gemini.google.com/")
 
     def test_gemini_web_client_bootstrap_rejects_login_page(self) -> None:
         class FakeGoogleResponse:
@@ -562,6 +657,32 @@ class GeminiProviderTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 401)
         self.assertEqual(raised.exception.code, "gemini_auth_failed")
+
+    def test_gemini_web_client_bootstrap_prefers_session_token_over_incidental_accounts_link(self) -> None:
+        class FakeGoogleResponse:
+            status_code = 200
+            text = ""
+            headers: dict[str, str] = {}
+            cookies = None
+
+        class FakeGetResponse:
+            status_code = 200
+            text = '<html><script>["SNlM0e","boot-token"]</script><a href="https://accounts.google.com/ManageAccount">account</a></html>'
+            headers: dict[str, str] = {}
+            cookies = None
+
+        class FakeSession:
+            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeGetResponse | FakeGoogleResponse:
+                if url == "https://www.google.com/":
+                    return FakeGoogleResponse()
+                return FakeGetResponse()
+
+        with mock.patch("services.providers.gemini.client.create_session", return_value=FakeSession()):
+            client = gemini.GeminiWebClient("__Secure-1PSID=psid; __Secure-1PSIDTS=psidts")
+            token = client.bootstrap_session_token()
+
+        self.assertEqual(token, "boot-token")
+        self.assertEqual(client.session_token, "boot-token")
 
     def test_rotate_psidts_cookie_posts_exact_payload_and_merges_new_cookie(self) -> None:
         class FakeResponse:
@@ -774,6 +895,8 @@ class GeminiProviderTests(unittest.TestCase):
             "cookies": {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "psidts"},
         }
         client = mock.Mock()
+        client.cookie_header = "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts"
+        client.session_token = ""
         client.generate.return_value = [["content", "Gemini success"]]
         client_context = mock.Mock()
         client_context.__enter__ = mock.Mock(return_value=client)
@@ -790,6 +913,188 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(completion.content, "Gemini success")
         account_service.mark_text_used.assert_called_once_with("gemini-token")
         account_service.remove_invalid_token.assert_not_called()
+
+    def test_chat_completion_success_persists_updated_gemini_session(self) -> None:
+        account_service = mock.Mock()
+        account_service.get_text_access_token.return_value = "gemini-token"
+        account_service.get_account.return_value = {
+            "access_token": "gemini-token",
+            "provider": "gemini",
+            "cookies": {"__Secure-1PSID": "old-psid", "__Secure-1PSIDTS": "old-ts"},
+            "session_token": "stored-at",
+        }
+        client = mock.Mock()
+        client.cookie_header = "__Secure-1PSID=new-psid; __Secure-1PSIDTS=new-ts; NID=nid"
+        client.session_token = "stored-at"
+        client.generate.return_value = [["content", "Gemini success"]]
+        client_context = mock.Mock()
+        client_context.__enter__ = mock.Mock(return_value=client)
+        client_context.__exit__ = mock.Mock(return_value=None)
+
+        with mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
+             mock.patch("services.providers.gemini.client.GeminiWebClient", return_value=client_context):
+            completion = gemini.chat_completion(
+                {},
+                resolve_model("gemini-2.5-pro"),
+                [{"role": "user", "content": "Hello"}],
+            )
+
+        self.assertEqual(completion.content, "Gemini success")
+        account_service.update_account.assert_called_once_with(
+            "gemini-token",
+            {
+                "cookies": {"__Secure-1PSID": "new-psid", "__Secure-1PSIDTS": "new-ts", "NID": "nid"},
+                "__Secure-1PSID": "new-psid",
+                "__Secure-1PSIDTS": "new-ts",
+                "session_token": "stored-at",
+                "SNlM0e": "stored-at",
+                "at": "stored-at",
+            },
+            provider="gemini",
+        )
+        account_service.mark_text_used.assert_called_once_with("gemini-token")
+        account_service.remove_invalid_token.assert_not_called()
+
+    def test_chat_completion_success_persists_bootstrapped_gemini_session_token(self) -> None:
+        account_service = mock.Mock()
+        account_service.get_text_access_token.return_value = "gemini-token"
+        account_service.get_account.return_value = {
+            "access_token": "gemini-token",
+            "provider": "gemini",
+            "cookies": {"__Secure-1PSID": "old-psid", "__Secure-1PSIDTS": "old-ts"},
+        }
+        client = mock.Mock()
+        client.cookie_header = "__Secure-1PSID=old-psid; __Secure-1PSIDTS=new-ts"
+        client.session_token = "bootstrapped-at"
+        client.generate.return_value = [["content", "Gemini success"]]
+        client_context = mock.Mock()
+        client_context.__enter__ = mock.Mock(return_value=client)
+        client_context.__exit__ = mock.Mock(return_value=None)
+
+        with mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
+             mock.patch("services.providers.gemini.client.GeminiWebClient", return_value=client_context):
+            gemini.chat_completion(
+                {},
+                resolve_model("gemini-2.5-pro"),
+                [{"role": "user", "content": "Hello"}],
+            )
+
+        account_service.update_account.assert_called_once_with(
+            "gemini-token",
+            {
+                "cookies": {"__Secure-1PSID": "old-psid", "__Secure-1PSIDTS": "new-ts"},
+                "__Secure-1PSID": "old-psid",
+                "__Secure-1PSIDTS": "new-ts",
+                "session_token": "bootstrapped-at",
+                "SNlM0e": "bootstrapped-at",
+                "at": "bootstrapped-at",
+            },
+            provider="gemini",
+        )
+        account_service.remove_invalid_token.assert_not_called()
+
+    def test_fetch_authenticated_init_body_persists_updated_gemini_session(self) -> None:
+        account_service = mock.Mock()
+        account_service.get_text_access_token.return_value = "gemini-token"
+        account_service.get_account.return_value = {
+            "access_token": "gemini-token",
+            "provider": "gemini",
+            "cookies": {"__Secure-1PSID": "old-psid", "__Secure-1PSIDTS": "old-ts"},
+        }
+        client = mock.Mock()
+        client.cookie_header = "__Secure-1PSID=old-psid; __Secure-1PSIDTS=new-ts; NID=nid"
+        client.fetch_init_body.return_value = "gemini init body"
+        client_context = mock.Mock()
+        client_context.__enter__ = mock.Mock(return_value=client)
+        client_context.__exit__ = mock.Mock(return_value=None)
+
+        with mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
+             mock.patch("services.providers.gemini.client.GeminiWebClient", return_value=client_context):
+            body = gemini.fetch_authenticated_init_body()
+
+        self.assertEqual(body, "gemini init body")
+        account_service.update_account.assert_called_once_with(
+            "gemini-token",
+            {
+                "cookies": {"__Secure-1PSID": "old-psid", "__Secure-1PSIDTS": "new-ts", "NID": "nid"},
+                "__Secure-1PSID": "old-psid",
+                "__Secure-1PSIDTS": "new-ts",
+            },
+            provider="gemini",
+        )
+
+    def test_gemini_session_writeback_skips_empty_updates(self) -> None:
+        account_service = mock.Mock()
+
+        gemini_client.persist_gemini_session(account_service, "gemini-token", {}, "")
+
+        account_service.update_account.assert_not_called()
+
+    def test_gemini_web_client_merges_successful_generate_response_cookies(self) -> None:
+        class FakeResponse:
+            status_code = 200
+            text = ")]}'\n\n[[\"content\", \"ok\"]]"
+            headers = {"Set-Cookie": "__Secure-1PSIDTS=new-ts; Path=/; Secure, NID=nid; Path=/"}
+            cookies = None
+
+        class FakeSession:
+            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeResponse:
+                raise AssertionError("explicit session token should not bootstrap")
+
+            def post(self, url: str, headers: dict[str, str], data: dict[str, str], timeout: int) -> FakeResponse:
+                return FakeResponse()
+
+        with mock.patch("services.providers.gemini.client.create_session", return_value=FakeSession()):
+            client = gemini.GeminiWebClient("__Secure-1PSID=psid; __Secure-1PSIDTS=old-ts")
+            parsed = client.generate({"prompt": "hello", "model": "gemini-2.5-pro", "session_token": "at-token"})
+
+        self.assertEqual(gemini.extract_completion(parsed).content, "ok")
+        self.assertEqual(client.cookie_header, "__Secure-1PSID=psid; __Secure-1PSIDTS=new-ts; NID=nid")
+
+    def test_chat_completion_success_persists_generate_response_cookies(self) -> None:
+        class FakeResponse:
+            status_code = 200
+            text = ")]}'\n\n[[\"content\", \"Gemini success\"]]"
+            headers = {"Set-Cookie": "__Secure-1PSIDTS=new-ts; Path=/; Secure, NID=nid; Path=/"}
+            cookies = None
+
+        class FakeSession:
+            def get(self, url: str, headers: dict[str, str], timeout: int) -> FakeResponse:
+                raise AssertionError("explicit session token should not bootstrap")
+
+            def post(self, url: str, headers: dict[str, str], data: dict[str, str], timeout: int) -> FakeResponse:
+                return FakeResponse()
+
+        account_service = mock.Mock()
+        account_service.get_text_access_token.return_value = "gemini-token"
+        account_service.get_account.return_value = {
+            "access_token": "gemini-token",
+            "provider": "gemini",
+            "cookies": {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "old-ts"},
+            "session_token": "stored-at",
+        }
+
+        with mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
+             mock.patch("services.providers.gemini.client.create_session", return_value=FakeSession()):
+            completion = gemini.chat_completion(
+                {},
+                resolve_model("gemini-2.5-pro"),
+                [{"role": "user", "content": "Hello"}],
+            )
+
+        self.assertEqual(completion.content, "Gemini success")
+        account_service.update_account.assert_called_once_with(
+            "gemini-token",
+            {
+                "cookies": {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "new-ts", "NID": "nid"},
+                "__Secure-1PSID": "psid",
+                "__Secure-1PSIDTS": "new-ts",
+                "session_token": "stored-at",
+                "SNlM0e": "stored-at",
+                "at": "stored-at",
+            },
+            provider="gemini",
+        )
 
     def test_gemini_chat_image_without_modalities_is_not_silently_stripped(self) -> None:
         with self.assertRaises(HTTPException) as raised:
