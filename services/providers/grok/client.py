@@ -57,23 +57,26 @@ SEARCH_SOURCES_MARKER = "[webchat2api-sources]: #"
 _GROK_IMAGE_PLACEHOLDER_RE = re.compile(r"@IMAGE(\d+)\b", re.IGNORECASE)
 _SEARCH_SOURCES_BLOCK_RE = re.compile(r"\n{0,2}\[webchat2api-sources\]: #\n+## Sources\n(?:\d+\. \[[^\n\]]*\]\([^\n)]*\)\n?)+\s*", re.MULTILINE)
 _APP_CHAT_AUTH_ERROR_MARKERS = (
-    "unauthenticated",
-    "unauthorized",
-    "bad credentials",
-    "bad_credentials",
+    "invalid-credentials",
+    "invalid_credentials",
     "bad-credentials",
-    "invalid token",
-    "invalid_token",
-    "invalid-token",
-    "expired token",
+    "bad_credentials",
+    "bad credentials",
+    "unauthenticated",
+    "failed to look up session id",
+    "blocked-user",
+    "blocked_user",
+    "email-domain-rejected",
+    "email_domain_rejected",
+    "session not found",
+    "account suspended",
+    "token revoked",
+    "token_revoked",
     "token expired",
     "token_expired",
     "token-expired",
-    "auth token expired",
-    "auth_token_expired",
-    "login required",
-    "login_required",
-    "session expired",
+    "authentication_failed",
+    "authentication failed",
 )
 _APP_CHAT_RATE_LIMIT_MARKERS = (
     "rate_limit_exceeded",
@@ -220,6 +223,16 @@ class GrokConsoleError(RuntimeError):
         self.upstream_status = upstream_status
         self.code = code
         self.extra_detail = extra_detail or {}
+
+    @property
+    def is_check_unavailable(self) -> bool:
+        return self.code in {
+            "cloudflare_challenge",
+            "invalid_rate_limit_response",
+            "rate_limit_check_unavailable",
+            "rate_limit_network_error",
+            "upstream_transient",
+        }
 
     def to_http_detail(self) -> dict[str, Any]:
         detail: dict[str, Any] = {"error": str(self)}
@@ -1595,11 +1608,7 @@ def _is_app_chat_challenge_error(status: int, text: str, structured_text: str = 
 
 def _is_app_chat_auth_error(status: int, text: str, structured_text: str = "") -> bool:
     auth_text = structured_text or text
-    if status == 401:
-        return not auth_text or _app_chat_error_contains(auth_text, _APP_CHAT_AUTH_ERROR_MARKERS)
-    if status == 403:
-        return _app_chat_error_contains(auth_text, _APP_CHAT_AUTH_ERROR_MARKERS)
-    return False
+    return status in _APP_CHAT_AUTH_STATUS_CODES and _app_chat_error_contains(auth_text, _APP_CHAT_AUTH_ERROR_MARKERS)
 
 
 def _is_app_chat_limit_error(status: int, text: str, structured_text: str = "") -> bool:
@@ -1851,7 +1860,7 @@ class GrokAppChatClient:
         deadline = time.monotonic() + 60.0
 
         def on_retry(attempt, status_code, exc):
-            error = "Grok app-chat rate-limit validation failed" if context == "app_chat_rate_limits" and exc else str(exc) if exc else None
+            error = _safe_exception_message(exc) if exc else None
             logger.warning({
                 "event": "grok_app_chat_retry",
                 "context": context,
@@ -1874,15 +1883,35 @@ class GrokAppChatClient:
                 context="app_chat_rate_limits",
             )
         except requests.exceptions.RequestException as exc:
-            raise GrokConsoleError("Grok app-chat rate-limit validation failed", 502) from exc
+            raise GrokConsoleError(
+                "Grok app-chat rate-limit check unavailable",
+                502,
+                code="rate_limit_network_error",
+            ) from exc
         if response.status_code >= 400:
-            raise classify_app_chat_upstream_error(int(response.status_code), self.access_token, response)
+            error = classify_app_chat_upstream_error(int(response.status_code), self.access_token, response)
+            if error.upstream_status in {401, 403} and error.code is None:
+                raise GrokConsoleError(
+                    f"Grok app-chat rate-limit check unavailable (HTTP {error.upstream_status})",
+                    502,
+                    error.upstream_status,
+                    "rate_limit_check_unavailable",
+                ) from error
+            raise error
         try:
             data = response.json()
         except Exception as exc:
-            raise GrokConsoleError("Grok app-chat rate-limit validation returned an invalid response", 502) from exc
+            raise GrokConsoleError(
+                "Grok app-chat rate-limit validation returned an invalid response",
+                502,
+                code="invalid_rate_limit_response",
+            ) from exc
         if not isinstance(data, dict):
-            raise GrokConsoleError("Grok app-chat rate-limit validation returned an invalid response", 502)
+            raise GrokConsoleError(
+                "Grok app-chat rate-limit validation returned an invalid response",
+                502,
+                code="invalid_rate_limit_response",
+            )
         try:
             from services.account_service import account_service
 

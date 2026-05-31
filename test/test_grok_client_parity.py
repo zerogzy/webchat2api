@@ -102,6 +102,179 @@ class GrokClientParityTests(unittest.TestCase):
             {"app_chat": True, "quota": 3, "status": "正常", "rate_limit_window_seconds": 7200, "tier": "super"},
         )
 
+    def test_validate_rate_limits_cloudflare_html_is_check_unavailable(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+
+        class FakeResponse:
+            status_code = 403
+            text = "<html><title>Just a moment...</title><script src='/cdn-cgi/challenge-platform/h/b'></script></html>"
+
+            def json(self) -> object:
+                raise ValueError("not json")
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": _account_service_module(account_service)}),
+            mock.patch.object(grok.config, "data", {}),
+            mock.patch("curl_cffi.requests.Session", FakeSession),
+        ):
+            client = grok.GrokAppChatClient("secret-token")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                client.validate_rate_limits()
+
+        self.assertEqual(ctx.exception.code, "cloudflare_challenge")
+        self.assertTrue(ctx.exception.is_check_unavailable)
+        account_service.update_account.assert_not_called()
+
+    def test_validate_rate_limits_unknown_403_is_check_unavailable(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+
+        class FakeResponse:
+            status_code = 403
+            text = '{"message":"request blocked"}'
+
+            def json(self) -> object:
+                return {"message": "request blocked"}
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": _account_service_module(account_service)}),
+            mock.patch.object(grok.config, "data", {}),
+            mock.patch("curl_cffi.requests.Session", FakeSession),
+        ):
+            client = grok.GrokAppChatClient("secret-token")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                client.validate_rate_limits()
+
+        self.assertEqual(ctx.exception.code, "rate_limit_check_unavailable")
+        self.assertTrue(ctx.exception.is_check_unavailable)
+        account_service.update_account.assert_not_called()
+
+    def test_validate_rate_limits_bare_401_is_check_unavailable(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+
+        class FakeResponse:
+            status_code = 401
+            text = ""
+
+            def json(self) -> object:
+                raise ValueError("not json")
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": _account_service_module(account_service)}),
+            mock.patch.object(grok.config, "data", {}),
+            mock.patch("curl_cffi.requests.Session", FakeSession),
+        ):
+            client = grok.GrokAppChatClient("secret-token")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                client.validate_rate_limits()
+
+        self.assertEqual(ctx.exception.code, "rate_limit_check_unavailable")
+        self.assertTrue(ctx.exception.is_check_unavailable)
+        account_service.update_account.assert_not_called()
+
+    def test_validate_rate_limits_confirmed_invalid_marker_is_auth_failure(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+
+        class FakeResponse:
+            status_code = 403
+            text = '{"code":"invalid-credentials"}'
+
+            def json(self) -> object:
+                return {"code": "invalid-credentials"}
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": _account_service_module(account_service)}),
+            mock.patch.object(grok.config, "data", {}),
+            mock.patch("curl_cffi.requests.Session", FakeSession),
+        ):
+            client = grok.GrokAppChatClient("secret-token")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                client.validate_rate_limits()
+
+        self.assertEqual(ctx.exception.code, "authentication_failed")
+        account_service.update_account.assert_called_once_with("secret-token", {"status": "异常"})
+
+    def test_validate_rate_limits_429_is_rate_limited(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+
+        class FakeResponse:
+            status_code = 429
+            text = '{"message":"rate limited"}'
+
+            def json(self) -> object:
+                return {"message": "rate limited"}
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": _account_service_module(account_service)}),
+            mock.patch.object(grok.config, "data", {}),
+            mock.patch("curl_cffi.requests.Session", FakeSession),
+        ):
+            client = grok.GrokAppChatClient("secret-token")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                client.validate_rate_limits()
+
+        self.assertEqual(ctx.exception.code, "rate_limit_exceeded")
+        account_service.update_account.assert_called_once_with("secret-token", {"status": "限流"})
+
     def test_app_chat_line_events_handles_raw_json_data_prefixes_embedded_blocks_and_done(self) -> None:
         events = list(grok.app_chat_line_events([
             b'{"token":"raw"}',

@@ -23,6 +23,7 @@ from services.providers.base import (
 )
 from services.providers.registry import account_strategy, normalize_account_provider, normalize_provider
 from services.providers.gemini.accounts import account_row_id as gemini_account_row_id
+from services.providers.grok.accounts import account_row_id as grok_account_row_id
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
@@ -77,8 +78,16 @@ def _matched_delete_tokens_for_provider(target_set: set[str], accounts: dict[str
     return matched_tokens
 
 
-def _matched_delete_identifiers_for_provider(identifiers: list[dict[str, str]], accounts: dict[str, dict], provider: str | None) -> set[str]:
-    if provider != GEMINI_PROVIDER or not identifiers:
+def _account_row_id_for_provider(account: dict[str, Any], provider: str | None) -> str:
+    if provider == GEMINI_PROVIDER:
+        return gemini_account_row_id(account)
+    if provider == GROK_PROVIDER:
+        return grok_account_row_id(account)
+    return ""
+
+
+def _matched_account_tokens_by_identifiers(identifiers: list[dict[str, str]], accounts: dict[str, dict], provider: str | None) -> set[str]:
+    if provider not in {GEMINI_PROVIDER, GROK_PROVIDER} or not identifiers:
         return set()
     account_ids = {
         _clean_string(identifier.get("account_id"))
@@ -96,8 +105,15 @@ def _matched_delete_identifiers_for_provider(identifiers: list[dict[str, str]], 
         account_token
         for account_token, account in accounts.items()
         if (account_ids and _clean_string(account.get("account_id")) in account_ids)
-        or (row_ids and gemini_account_row_id(account) in row_ids)
+        or (row_ids and _account_row_id_for_provider(account, provider) in row_ids)
     }
+
+
+class _UnchangedRemoteInfo(dict[str, Any]):
+    pass
+
+
+UNCHANGED_REMOTE_INFO = _UnchangedRemoteInfo()
 
 
 class AccountService:
@@ -500,7 +516,7 @@ class AccountService:
             tokens = list(dict.fromkeys(
                 normalized
                 for token in tokens
-                if (normalized := _normalize_access_token_for_provider({"access_token": token, "provider": target_provider}, target_provider))
+                if (normalized := _normalize_access_token_for_provider({"access_token": token, "provider": target_provider, "_grok_sso_import": True}, target_provider))
             ))
         if not tokens:
             return {"added": 0, "skipped": 0, "items": self.list_accounts()}
@@ -666,7 +682,7 @@ class AccountService:
                 provider_accounts,
                 target_provider,
             )
-            matched_tokens.update(_matched_delete_identifiers_for_provider(identifiers or [], provider_accounts, target_provider))
+            matched_tokens.update(_matched_account_tokens_by_identifiers(identifiers or [], provider_accounts, target_provider))
             target_set.update(matched_tokens)
             removed = sum(self._pop_accounts_by_token_locked(token, target_provider) for token in target_set)
             for token in target_set:
@@ -768,6 +784,8 @@ class AccountService:
         account_provider = normalize_provider(account.get("provider"))
         if account_provider == GROK_PROVIDER:
             return self.fetch_grok_remote_info(access_token, event, provider=account_provider)
+        if account_provider == GEMINI_PROVIDER:
+            return self.fetch_gemini_remote_info(access_token, event, provider=account_provider)
         if account_provider != GPT_PROVIDER:
             return dict(account) if account else None
         from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
@@ -780,6 +798,13 @@ class AccountService:
             raise
         return self.update_account(access_token, result, provider=account_provider)
 
+    def fetch_gemini_remote_info(self, access_token: str, event: str = "fetch_gemini_remote_info", provider: str | None = None) -> dict[str, Any] | None:
+        provider_filter = provider or GEMINI_PROVIDER
+        account = self.get_account(access_token, provider=provider_filter) or {}
+        strategy = cast(RemoteAccountValidator, account_strategy(GEMINI_PROVIDER))
+        payload = strategy.validate_remote_info(access_token, account)
+        return self.update_account(access_token, payload, provider=provider_filter)
+
     def fetch_grok_remote_info(self, access_token: str, event: str = "fetch_grok_remote_info", provider: str | None = None) -> dict[str, Any] | None:
         provider_filter = provider or GROK_PROVIDER
         account = self.get_account(access_token, provider=provider_filter) or {}
@@ -788,12 +813,17 @@ class AccountService:
         try:
             payload = strategy.validate_remote_info(access_token, account)
         except Exception as exc:
+            code = _clean_string(getattr(exc, "code", ""))
+            if code in {"cloudflare_challenge", "invalid_rate_limit_response", "rate_limit_check_unavailable", "rate_limit_network_error", "upstream_transient"} or bool(getattr(exc, "is_check_unavailable", False)):
+                return UNCHANGED_REMOTE_INFO
             status = strategy.remote_error_status(exc)
-            decision = self._state_decision(account, status_code=status)
-            if decision.auth_failed:
-                self.remove_invalid_token(access_token, event)
-            elif decision.rate_limited:
+            if status in {402, 429}:
+                decision = self._state_decision(account, status_code=status)
                 self.update_account(access_token, decision.writeback, provider=provider_filter)
+                raise
+            if status in {400, 401, 403} and strategy.is_auth_failure_payload({"code": code, "message": str(exc)}):
+                self.remove_invalid_token(access_token, event)
+                raise
             raise
         decision = self._state_decision(account, payload=payload)
         if decision.auth_failed:
@@ -807,10 +837,32 @@ class AccountService:
         account = self.get_account(access_token, provider=provider) or {}
         return _account_strategy(account.get("provider")).refresh_error_message(exc)
 
-    def refresh_accounts(self, access_tokens: list[str], provider: str | None = None) -> dict[str, Any]:
+    def _resolve_identifier_tokens_locked(self, identifiers: list[dict[str, str]] | None = None, provider_filter: str | None = None) -> list[str]:
+        if not identifiers:
+            return []
+        target_tokens: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        candidate_providers = [provider_filter] if provider_filter else [GEMINI_PROVIDER, GROK_PROVIDER]
+        for candidate_provider in candidate_providers:
+            if not candidate_provider:
+                continue
+            for token in _matched_account_tokens_by_identifiers(
+                identifiers,
+                self._accounts.get(candidate_provider, {}),
+                candidate_provider,
+            ):
+                account_key = (candidate_provider, token)
+                if account_key not in seen:
+                    target_tokens.append(token)
+                    seen.add(account_key)
+        return target_tokens
+
+    def refresh_accounts(self, access_tokens: list[str], provider: str | None = None, identifiers: list[dict[str, str]] | None = None) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         provider_filter = self._provider_filter(provider)
         with self._lock:
+            identifier_tokens = self._resolve_identifier_tokens_locked(identifiers, provider_filter)
+            access_tokens = list(dict.fromkeys([*access_tokens, *identifier_tokens]))
             if not access_tokens:
                 access_tokens = self._list_account_tokens_locked(provider_filter)
             refresh_targets = [
@@ -838,6 +890,8 @@ class AccountService:
                 except Exception as exc:
                     errors.append({"token": anonymize_token(token), "error": self._refresh_error_message(token, exc, target_provider)})
                     continue
+                if account is UNCHANGED_REMOTE_INFO:
+                    continue
                 if account is not None:
                     refreshed += 1
 
@@ -847,9 +901,15 @@ class AccountService:
             "items": self.list_accounts(provider_filter),
         }
 
-    def _requested_export_accounts_locked(self, requested_tokens: list[str], provider_filter: str | None) -> list[dict]:
+    def _requested_export_accounts_locked(
+        self,
+        requested_tokens: list[str],
+        provider_filter: str | None,
+        identifiers: list[dict[str, str]] | None = None,
+    ) -> list[dict]:
         accounts: list[dict] = []
         seen_keys: set[tuple[str, str]] = set()
+        requested_tokens = list(dict.fromkeys([*requested_tokens, *self._resolve_identifier_tokens_locked(identifiers, provider_filter)]))
         for token in requested_tokens:
             account = self._get_account_locked(token, provider_filter)
             if account is None:
@@ -876,14 +936,19 @@ class AccountService:
                 seen_keys.add(account_key)
         return accounts
 
-    def build_export_items(self, access_tokens: list[str] | None = None, provider: str | None = None) -> list[dict[str, str]]:
+    def build_export_items(
+        self,
+        access_tokens: list[str] | None = None,
+        provider: str | None = None,
+        identifiers: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
         requested_tokens = [token for token in dict.fromkeys(access_tokens or []) if token]
         provider_filter = normalize_provider(provider) if provider else None
         if provider_filter not in {None, GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER}:
             return []
         with self._lock:
-            if requested_tokens:
-                accounts = self._requested_export_accounts_locked(requested_tokens, provider_filter)
+            if requested_tokens or identifiers:
+                accounts = self._requested_export_accounts_locked(requested_tokens, provider_filter, identifiers)
             else:
                 accounts = self._list_account_items_locked(provider_filter)
 
