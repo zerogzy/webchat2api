@@ -27,6 +27,7 @@ from services.storage.base import StorageBackend
 GEMINI_TOKEN = "__Secure-1PSID=psid; __Secure-1PSIDTS=psidts"
 AUTH_HEADERS = {"Authorization": "Bearer webchat2api"}
 SECRET_KEYS = ("access_token", "cookies", "__Secure-1PSID", "__Secure-1PSIDTS")
+GEMINI_SECRET_FRAGMENTS = (GEMINI_TOKEN, "__Secure-1PSID=psid", "__Secure-1PSIDTS=psidts")
 GPT_TOKEN = "gpt-token-for-admin-operations"
 GROK_TOKEN = "grok-token-for-admin-operations"
 
@@ -97,6 +98,7 @@ class GeminiAccountApiSanitizationTests(unittest.TestCase):
         self.patchers = [
             mock.patch.object(accounts_module, "account_service", self.account_service),
             mock.patch.object(accounts_module, "require_admin", lambda authorization: {"role": "admin"}),
+            mock.patch("services.log_service.log_service.add"),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -107,8 +109,8 @@ class GeminiAccountApiSanitizationTests(unittest.TestCase):
 
     def assert_no_gemini_secrets(self, payload: object) -> None:
         text = str(payload)
-        self.assertNotIn("psid", text)
-        self.assertNotIn(GEMINI_TOKEN, text)
+        for secret in GEMINI_SECRET_FRAGMENTS:
+            self.assertNotIn(secret, text)
         if isinstance(payload, dict):
             for key in SECRET_KEYS:
                 self.assertNotIn(key, payload)
@@ -121,16 +123,24 @@ class GeminiAccountApiSanitizationTests(unittest.TestCase):
         body = cast(dict[str, Any], response.json())
         self.assert_no_gemini_secrets(body["items"][0])
 
-    def test_gpt_and_grok_tokens_remain_available_as_current_admin_identifiers(self) -> None:
-        for provider, token in (("gpt", GPT_TOKEN), ("grok", GROK_TOKEN)):
-            sanitized = accounts_module.sanitize_account({
-                "provider": provider,
-                "access_token": token,
-                "status": "正常",
-                "type": "free",
-            })
+    def test_gpt_keeps_access_token_for_admin_identifier_and_grok_redacts_it(self) -> None:
+        gpt_sanitized = accounts_module.sanitize_account({
+            "provider": "gpt",
+            "access_token": GPT_TOKEN,
+            "status": "正常",
+            "type": "free",
+        })
+        grok_sanitized = accounts_module.sanitize_account({
+            "provider": "grok",
+            "access_token": GROK_TOKEN,
+            "status": "正常",
+            "type": "free",
+        })
 
-            self.assertEqual(sanitized["access_token"], token)
+        self.assertEqual(gpt_sanitized["access_token"], GPT_TOKEN)
+        self.assertNotIn("access_token", grok_sanitized)
+        self.assertTrue(grok_sanitized["has_access_token"])
+        self.assertNotIn(GROK_TOKEN, str(grok_sanitized))
 
     def test_create_accounts_sanitizes_gemini_credentials(self) -> None:
         response = self.client.post(
@@ -267,6 +277,7 @@ class GrokAccountApiImportTests(unittest.TestCase):
         self.patchers = [
             mock.patch.object(accounts_module, "account_service", self.account_service),
             mock.patch.object(accounts_module, "require_admin", lambda authorization: {"role": "admin"}),
+            mock.patch("services.log_service.log_service.add"),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -274,6 +285,15 @@ class GrokAccountApiImportTests(unittest.TestCase):
         app = FastAPI()
         app.include_router(accounts_module.create_router())
         self.client = TestClient(app)
+
+
+    def assert_grok_items_redacted(self, items: list[dict[str, Any]]) -> None:
+        self.assertEqual([item["has_access_token"] for item in items], [True, True, True])
+        text = str(items)
+        for secret in ("dev-raw-sso-token", "dev-cookie-sso-token", "dev-cookie-dict-token"):
+            self.assertNotIn(secret, text)
+        for item in items:
+            self.assertNotIn("access_token", item)
 
     def test_create_accounts_imports_grok_sso_alias_payloads(self) -> None:
         response = self.client.post(
@@ -293,7 +313,8 @@ class GrokAccountApiImportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = cast(dict[str, Any], response.json())
         self.assertEqual(body["added"], 3)
-        self.assertEqual([item["access_token"] for item in body["items"]], [
+        self.assert_grok_items_redacted(body["items"])
+        self.assertEqual(self.account_service.list_tokens(provider="grok"), [
             "dev-raw-sso-token",
             "sso=dev-cookie-sso-token; other=value",
             "dev-cookie-dict-token",
@@ -307,7 +328,8 @@ class GrokAccountApiImportTests(unittest.TestCase):
         list_response = self.client.get("/api/accounts?provider=grok", headers=AUTH_HEADERS)
         self.assertEqual(list_response.status_code, 200)
         list_body = cast(dict[str, Any], list_response.json())
-        self.assertEqual([item["access_token"] for item in list_body["items"]], [
+        self.assert_grok_items_redacted(list_body["items"])
+        self.assertEqual(self.account_service.list_tokens(provider="grok"), [
             "dev-raw-sso-token",
             "sso=dev-cookie-sso-token; other=value",
             "dev-cookie-dict-token",
@@ -346,7 +368,8 @@ class GrokAccountApiImportTests(unittest.TestCase):
         self.assertEqual(body["refreshed"], 0)
         self.assertEqual(body["errors"], [])
         self.assertEqual(self.refreshed, [])
-        self.assertEqual([item["access_token"] for item in body["items"]], [
+        self.assert_grok_items_redacted(body["items"])
+        self.assertEqual(self.account_service.list_tokens(provider="grok"), [
             "dev-raw-sso-token",
             "sso=dev-cookie-sso-token; other=value",
             "dev-cookie-dict-token",
@@ -355,7 +378,8 @@ class GrokAccountApiImportTests(unittest.TestCase):
         list_response = self.client.get("/api/accounts?provider=grok", headers=AUTH_HEADERS)
         self.assertEqual(list_response.status_code, 200)
         list_body = cast(dict[str, Any], list_response.json())
-        self.assertEqual([item["access_token"] for item in list_body["items"]], [
+        self.assert_grok_items_redacted(list_body["items"])
+        self.assertEqual(self.account_service.list_tokens(provider="grok"), [
             "dev-raw-sso-token",
             "sso=dev-cookie-sso-token; other=value",
             "dev-cookie-dict-token",

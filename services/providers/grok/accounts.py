@@ -517,7 +517,18 @@ def build_export_item(account: dict[str, Any]) -> dict[str, str] | None:
     }
 
 
-GROK_SECRET_KEYS = {"access_token", "accessToken", "sso", "sso_token", "id_token", "refresh_token", "cookies"}
+GROK_SECRET_KEYS = {
+    "access_token",
+    "accessToken",
+    "sso",
+    "raw_sso",
+    "rawSso",
+    "sso_token",
+    "ssoToken",
+    "id_token",
+    "refresh_token",
+    "cookies",
+}
 
 
 def sanitize_account(item: dict[str, Any]) -> dict[str, Any]:

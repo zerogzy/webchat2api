@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import os
 import time
 import unittest
 from unittest import mock
@@ -25,7 +26,7 @@ from services.providers.base import ModelSpec
 from services.providers.gemini.client import GeminiCompletion
 from services.protocol import openai_v1_response
 
-AUTH_KEY = "webchat2api"
+AUTH_KEY = os.getenv("LOGIN_SECRET")
 BASE_URL = "http://localhost:83"
 TEXT_MODEL = "auto"
 IMAGE_MODEL = "gpt-image-2"
@@ -67,6 +68,7 @@ class ResponseRoutingUnitTests(unittest.TestCase):
 
 
 @unittest.skipIf(requests is None, "requests is not installed")
+@unittest.skipIf(not AUTH_KEY, "LOGIN_SECRET is required for live HTTP auth")
 class ResponsesTests(unittest.TestCase):
     @staticmethod
     def _iter_sse_payloads(response: Any):
