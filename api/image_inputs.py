@@ -6,7 +6,7 @@ import json
 import mimetypes
 import re
 from pathlib import PurePosixPath
-from typing import Any, TypeGuard
+from typing import Any, TypeGuard, cast
 from urllib.parse import unquote, unquote_to_bytes, urlparse
 
 from curl_cffi import requests
@@ -17,7 +17,7 @@ from starlette.datastructures import UploadFile
 from services.proxy_service import proxy_settings
 
 ImageInput = tuple[bytes, str, str]
-ImageSource = str | UploadFile | ImageInput
+ImageSource = str | UploadFile | ImageInput | list[object]
 
 MAX_IMAGE_REFERENCE_BYTES = 50 * 1024 * 1024
 IMAGE_REFERENCE_FIELDS = {"image", "image[]", "images", "images[]", "image_url", "image_url[]"}
@@ -32,6 +32,22 @@ def _clean(value: object, default: str = "") -> str:
 def _is_upload(value: object) -> TypeGuard[UploadFile]:
     """识别上传文件：兼容 Starlette 表单返回的 UploadFile。"""
     return isinstance(value, UploadFile)
+
+
+def _is_image_input(value: object) -> TypeGuard[ImageInput]:
+    if not isinstance(value, tuple) or len(value) != 3:
+        return False
+    data, filename, mime_type = value
+    return isinstance(data, bytes) and isinstance(filename, str) and isinstance(mime_type, str)
+
+
+def _image_input_from_list(value: list[object]) -> ImageInput | None:
+    if len(value) != 3:
+        return None
+    data, filename, mime_type = value
+    if isinstance(data, bytes) and isinstance(filename, str) and isinstance(mime_type, str):
+        return data, filename, mime_type
+    return None
 
 
 def _parse_bool(value: object) -> bool | None:
@@ -50,8 +66,10 @@ def _parse_bool(value: object) -> bool | None:
 
 def _parse_count(value: object) -> int:
     """解析生成数量：保持图片接口的 1 到 4 限制。"""
+    if value is None or value == "":
+        value = 1
     try:
-        count = int(value or 1)
+        count = int(cast(Any, value))
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail={"error": "n must be an integer"}) from exc
     if count < 1 or count > 4:
@@ -105,7 +123,7 @@ def _decode_base64_image(value: object, filename: str, mime_type: str) -> ImageI
 def _source_from_object(value: dict[str, Any]) -> list[ImageSource]:
     """提取图片引用对象：支持 image_url 或 url，明确拒绝 file_id。"""
     has_url = "image_url" in value or "url" in value
-    if value.get("file_id"):
+    if "file_id" in value:
         raise HTTPException(
             status_code=400,
             detail={"error": "file_id image references are not supported; use image_url instead"},
@@ -128,6 +146,8 @@ def _sources_from_value(value: object) -> list[ImageSource]:
     value = _json_reference_value(value)
     if _is_upload(value):
         return [value]
+    if _is_image_input(value):
+        return [value]
     if isinstance(value, str):
         text = value.strip()
         if not text:
@@ -136,6 +156,9 @@ def _sources_from_value(value: object) -> list[ImageSource]:
             return [text]
         return [_decode_base64_image(text, "image.png", "image/png")]
     if isinstance(value, list):
+        image_input = _image_input_from_list(value)
+        if image_input is not None:
+            return [image_input]
         sources: list[ImageSource] = []
         for item in value:
             sources.extend(_sources_from_value(item))
@@ -271,12 +294,37 @@ def _download_image_url(url: str) -> ImageInput:
     return data, _filename_from_url(parsed.path, mime_type), mime_type
 
 
+def resolve_inline_image_reference(value: object) -> ImageInput | None:
+    """Resolve non-network image references synchronously for sync protocol paths."""
+    sources = _sources_from_value(value)
+    if not sources:
+        return None
+    source = sources[0]
+    if _is_image_input(source):
+        return source
+    if isinstance(source, list):
+        image_input = _image_input_from_list(source)
+        if image_input is not None:
+            return image_input
+    if isinstance(source, str):
+        text = source.strip()
+        if text.startswith("data:"):
+            return _decode_data_url(text)
+    return None
+
+
 async def read_image_sources(sources: list[ImageSource]) -> list[ImageInput]:
     """读取图片来源：上传文件直接读取，URL 下载后统一返回图片元组。"""
     images: list[ImageInput] = []
     for source in sources:
-        if isinstance(source, tuple):
+        if _is_image_input(source):
             images.append(source)
+            continue
+        if isinstance(source, list):
+            image_input = _image_input_from_list(source)
+            if image_input is None:
+                raise HTTPException(status_code=400, detail={"error": "invalid image reference"})
+            images.append(image_input)
             continue
         if _is_upload(source):
             try:
@@ -287,7 +335,7 @@ async def read_image_sources(sources: list[ImageSource]) -> list[ImageInput]:
                 raise HTTPException(status_code=400, detail={"error": "image file is empty"})
             images.append((image_data, source.filename or "image.png", source.content_type or "image/png"))
             continue
-        images.append(await run_in_threadpool(_download_image_url, source))
+        images.append(await run_in_threadpool(_download_image_url, cast(str, source)))
     if not images:
         raise HTTPException(status_code=400, detail={"error": "image file or image_url is required"})
     return images
