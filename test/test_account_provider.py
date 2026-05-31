@@ -846,6 +846,28 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(account["status"], "正常")
         self.assertEqual(account["quota"], 6)
 
+    def test_refresh_accounts_keeps_grok_unconfirmed_bare_upstream_failures_unchanged(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token-1", "provider": GROK_PROVIDER, "status": "正常", "quota": 6},
+            {"access_token": "sso=grok-token-2", "provider": GROK_PROVIDER, "status": "限流", "quota": 3},
+        ])
+
+        def validation_failure(access_token: str, _account: dict[str, Any]) -> None:
+            if access_token == "grok-token-1":
+                raise TestGrokConsoleError("bare upstream 403 with sso=secret-cookie-1", 502, 403, None)
+            raise TestGrokConsoleError("unknown validation failed with sso=secret-cookie-2", 502, None, "mystery_failure")
+
+        with patched_grok_validation(side_effect=validation_failure) as validate:
+            refresh_result = service.refresh_accounts([], provider=GROK_PROVIDER)
+
+        self.assertEqual(validate.call_count, 2)
+        self.assertEqual(refresh_result["refreshed"], 0)
+        self.assertEqual(refresh_result["errors"], [])
+        accounts = service.list_accounts(provider=GROK_PROVIDER)
+        self.assertEqual([account["status"] for account in accounts], ["正常", "限流"])
+        self.assertEqual([account["quota"] for account in accounts], [6, 3])
+
     def test_refresh_accounts_marks_grok_confirmed_invalid_marker_abnormal(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([
