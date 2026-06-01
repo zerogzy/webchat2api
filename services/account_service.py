@@ -35,6 +35,37 @@ def _clean_string(value: Any) -> str:
     return str(value).strip()
 
 
+def _safe_validation_error_message(exc: Exception) -> str:
+    code = _clean_string(getattr(exc, "code", ""))
+    status = getattr(exc, "upstream_status", None) or getattr(exc, "status_code", None)
+    parts: list[str] = []
+    if code:
+        parts.append(code)
+    if status is not None:
+        parts.append(f"HTTP {status}")
+    if not parts:
+        parts.append(type(exc).__name__)
+    return "Grok app-chat validation failed: " + ", ".join(parts)
+
+
+def _grok_validation_payload() -> tuple[ModelSpec, dict[str, Any], list[dict[str, Any]]]:
+    from services.providers.grok.models import GROK_MODEL_SPECS
+
+    spec = next((item for item in GROK_MODEL_SPECS if item.capability == "chat" and item.model_tier == "basic"), GROK_MODEL_SPECS[0])
+    messages = [{"role": "user", "content": "ping"}]
+    body = {"model": spec.id, "stream": True, "prompt": "ping"}
+    return spec, body, messages
+
+
+def _run_grok_app_chat_validation(access_token: str, account: dict[str, Any]):
+    from services.providers.grok.client import GrokAppChatClient, build_app_chat_payload
+
+    spec, body, messages = _grok_validation_payload()
+    payload = build_app_chat_payload(spec, body, messages)
+    with GrokAppChatClient(access_token, account) as client:
+        yield from client.stream_events(payload)
+
+
 def _account_strategy(provider: Any):
     return account_strategy(provider)
 
@@ -864,6 +895,60 @@ class AccountService:
                     target_tokens.append(token)
                     seen.add(account_key)
         return target_tokens
+
+    def _validate_grok_account(self, access_token: str, account: dict[str, Any]) -> dict[str, Any]:
+        strategy = cast(RemoteAccountValidator, account_strategy(GROK_PROVIDER))
+        token_label = anonymize_token(access_token)
+        try:
+            for event in _run_grok_app_chat_validation(access_token, account):
+                if isinstance(event, dict):
+                    self.update_account(access_token, {"status": "正常", "app_chat": True}, provider=GROK_PROVIDER)
+                    return {"token": token_label, "status": "valid", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat validation succeeded"}
+            self.update_account(access_token, {"status": "正常", "app_chat": True}, provider=GROK_PROVIDER)
+            return {"token": token_label, "status": "valid", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat validation completed"}
+        except Exception as exc:
+            code = _clean_string(getattr(exc, "code", ""))
+            status = strategy.remote_error_status(exc)
+            if status in {402, 429} or code == "rate_limit_exceeded":
+                self.update_account(access_token, {"status": "限流"}, provider=GROK_PROVIDER)
+                return {"token": token_label, "status": "limited", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat rate limited"}
+            if status in {400, 401, 403} and strategy.is_auth_failure_payload({"code": code, "message": str(exc)}):
+                self.remove_invalid_token(access_token, "validate_accounts")
+                return {"token": token_label, "status": "invalid", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat credential invalid"}
+            return {"token": token_label, "status": "unverified", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": _safe_validation_error_message(exc)}
+
+    def validate_accounts(self, access_tokens: list[str], provider: str | None = None, identifiers: list[dict[str, str]] | None = None) -> dict[str, Any]:
+        provider_filter = self._provider_filter(provider) or GROK_PROVIDER
+        if provider_filter != GROK_PROVIDER:
+            raise ValueError("unsupported provider for account validation")
+        requested_tokens = list(dict.fromkeys(token for token in access_tokens if token))
+        with self._lock:
+            requested_tokens = list(dict.fromkeys([*requested_tokens, *self._resolve_identifier_tokens_locked(identifiers, provider_filter)]))
+            if not requested_tokens:
+                requested_tokens = self._list_account_tokens_locked(provider_filter)
+            targets = [
+                (token, dict(account))
+                for token in requested_tokens
+                if (account := self._get_account_locked(token, provider_filter))
+            ]
+        results = [self._validate_grok_account(token, account) for token, account in targets]
+        counts = {"valid": 0, "invalid": 0, "limited": 0, "unverified": 0}
+        for result in results:
+            status = str(result.get("status") or "")
+            if status in counts:
+                counts[status] += 1
+        errors = [
+            {"token": result.get("token"), "error": result.get("message")}
+            for result in results
+            if result.get("status") in {"invalid", "limited", "unverified"}
+        ]
+        return {
+            "checked": len(results),
+            **counts,
+            "errors": errors,
+            "results": results,
+            "items": self.list_accounts(provider_filter),
+        }
 
     def refresh_accounts(self, access_tokens: list[str], provider: str | None = None, identifiers: list[dict[str, str]] | None = None) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))

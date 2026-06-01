@@ -56,12 +56,7 @@ if "tiktoken" not in sys.modules:
 
 if "fastapi" not in sys.modules:
     fastapi = types.ModuleType("fastapi")
-
-    class HTTPException(Exception):
-        def __init__(self, status_code: int, detail: object = None) -> None:
-            super().__init__(detail)
-            self.status_code = status_code
-            self.detail = detail
+    from test.optional_stubs import StubHTTPException as HTTPException
 
     fastapi.HTTPException = HTTPException
     sys.modules["fastapi"] = fastapi
@@ -133,6 +128,13 @@ def patched_grok_validation(return_value: object = None, side_effect: Exception 
                     pass
             else:
                 setattr(services_providers, "grok", previous_attr)
+
+
+@contextmanager
+def patched_grok_app_chat_validation(events: list[dict[str, Any]] | None = None, side_effect: Exception | None = None):
+    validation = Mock(return_value=iter(events if events is not None else [{"result": {"response": {"token": "pong"}}}]), side_effect=side_effect)
+    with patch.object(account_service_module, "_run_grok_app_chat_validation", validation):
+        yield validation
 
 
 from services.account_service import AccountService
@@ -952,6 +954,94 @@ class AccountProviderTests(unittest.TestCase):
         [account] = service.list_accounts()
         self.assertEqual(account["status"], "正常")
         self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
+
+    def test_validate_accounts_by_grok_row_id_uses_app_chat(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "异常", "quota": 5},
+        ])
+        [account] = service.list_accounts(provider=GROK_PROVIDER)
+        row_id = provider_registry.account_strategy(GROK_PROVIDER).sanitize_account(account)["row_id"]
+
+        with patched_grok_app_chat_validation() as validate:
+            result = service.validate_accounts([], provider=GROK_PROVIDER, identifiers=[{"row_id": row_id}])
+
+        validate.assert_called_once()
+        self.assertEqual(validate.call_args.args[0], "grok-token")
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["valid"], 1)
+        self.assertEqual(result["invalid"], 0)
+        self.assertEqual(result["limited"], 0)
+        self.assertEqual(result["unverified"], 0)
+        self.assertEqual(result["errors"], [])
+        [updated] = service.list_accounts(provider=GROK_PROVIDER)
+        self.assertEqual(updated["status"], "正常")
+        self.assertTrue(updated["app_chat"])
+        self.assertEqual(updated["quota"], 5)
+
+    def test_validate_accounts_marks_invalid_grok_abnormal(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常", "quota": 5},
+        ])
+        previous_auto_remove = account_service_module.config.data.get("auto_remove_invalid_accounts")
+        account_service_module.config.data["auto_remove_invalid_accounts"] = False
+        try:
+            with patched_grok_app_chat_validation(side_effect=TestGrokConsoleError("auth failed with sso=secret-cookie", 401, 401, "authentication_failed")):
+                result = service.validate_accounts(["grok-token"], provider=GROK_PROVIDER)
+        finally:
+            if previous_auto_remove is None:
+                account_service_module.config.data.pop("auto_remove_invalid_accounts", None)
+            else:
+                account_service_module.config.data["auto_remove_invalid_accounts"] = previous_auto_remove
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["invalid"], 1)
+        self.assertNotIn("secret-cookie", str(result))
+        [account] = service.list_accounts(provider=GROK_PROVIDER)
+        self.assertEqual(account["status"], "异常")
+        self.assertEqual(account["quota"], 0)
+
+    def test_validate_accounts_marks_limited_grok_limited(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常", "quota": 5},
+        ])
+
+        with patched_grok_app_chat_validation(side_effect=TestGrokConsoleError("limited with sso=secret-cookie", 429, 429, "rate_limit_exceeded")):
+            result = service.validate_accounts(["grok-token"], provider=GROK_PROVIDER)
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["limited"], 1)
+        self.assertNotIn("secret-cookie", str(result))
+        [account] = service.list_accounts(provider=GROK_PROVIDER)
+        self.assertEqual(account["status"], "限流")
+        self.assertEqual(account["quota"], 5)
+
+    def test_validate_accounts_keeps_transient_grok_unverified(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "正常", "quota": 5},
+        ])
+
+        with patched_grok_app_chat_validation(side_effect=TestGrokConsoleError("cloudflare blocked sso=secret-cookie", 502, 403, "cloudflare_challenge")):
+            result = service.validate_accounts(["grok-token"], provider=GROK_PROVIDER)
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["unverified"], 1)
+        self.assertNotIn("secret-cookie", str(result))
+        [account] = service.list_accounts(provider=GROK_PROVIDER)
+        self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["quota"], 5)
+
+    def test_validate_accounts_rejects_non_grok_provider(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "gpt-token", "provider": GPT_PROVIDER, "status": "正常"},
+        ])
+
+        with self.assertRaises(ValueError):
+            service.validate_accounts(["gpt-token"], provider=GPT_PROVIDER)
 
     def test_refresh_accounts_by_grok_row_id_attempts_validation(self) -> None:
         service = AccountService(MemoryStorage())

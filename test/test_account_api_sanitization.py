@@ -5,7 +5,7 @@ import unittest
 from typing import Any, cast
 from unittest import mock
 
-from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_pydantic_stub, install_starlette_stub, install_tiktoken_stub
+from test.optional_stubs import StubHTTPException, install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_pydantic_stub, install_starlette_stub, install_tiktoken_stub
 
 install_curl_cffi_stub()
 install_fastapi_stubs()
@@ -71,6 +71,14 @@ class FakeAccountService:
     ) -> dict[str, Any]:
         return {"refreshed": 0, "errors": [], "items": self.list_accounts(provider=provider)}
 
+    def validate_accounts(
+        self,
+        access_tokens: list[str],
+        provider: str | None = None,
+        identifiers: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        return {"checked": 0, "valid": 0, "invalid": 0, "limited": 0, "unverified": 0, "errors": [], "results": [], "items": self.list_accounts(provider=provider)}
+
     def update_account(self, access_token: str, updates: dict[str, Any], provider: str | None = None) -> dict[str, Any] | None:
         if provider and provider != self.account.get("provider"):
             return None
@@ -104,6 +112,7 @@ class FakeAccountService:
 
 class GeminiAccountApiSanitizationTests(unittest.TestCase):
     def setUp(self) -> None:
+        sys.modules.pop("services.providers.grok", None)
         self.account_service = FakeAccountService()
         self.patchers = [
             mock.patch.object(accounts_module, "account_service", self.account_service),
@@ -614,6 +623,83 @@ class GrokAccountApiImportTests(unittest.TestCase):
         self.assertEqual(response.json(), {"error": "tokens is required"})
         self.assertEqual(self.account_service.list_accounts(provider="gpt"), [])
         self.assertEqual(self.refreshed, [])
+
+
+class AccountValidateApiSanitizationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        sys.modules.pop("services.providers.grok", None)
+        self.account_service = FakeAccountService()
+        self.patchers = [
+            mock.patch.object(accounts_module, "account_service", self.account_service),
+            mock.patch.object(accounts_module, "require_admin", lambda authorization: {"role": "admin"}),
+            mock.patch("services.log_service.log_service.add"),
+        ]
+        for patcher in self.patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        app = FastAPI()
+        app.include_router(accounts_module.create_router())
+        self.client = TestClient(app)
+
+    def test_validate_accounts_rejects_unsupported_provider(self) -> None:
+        response = self.client.post(
+            "/api/accounts/validate",
+            headers=AUTH_HEADERS,
+            json={"provider": "gemini", "access_tokens": [GEMINI_TOKEN]},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unsupported", str(response.json()).lower())
+        self.assertNotIn(GEMINI_TOKEN, str(response.json()))
+        self.assertIs(accounts_module.HTTPException, StubHTTPException)
+
+    def test_validate_accounts_sanitizes_grok_result(self) -> None:
+        self.account_service.account = {
+            "access_token": GROK_TOKEN,
+            "provider": "grok",
+            "status": "正常",
+            "type": "free",
+            "account_id": "grok-account-1",
+            "raw_sso": "raw-sso-token",
+        }
+
+        def validate_accounts(
+            access_tokens: list[str],
+            provider: str | None = None,
+            identifiers: list[dict[str, str]] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "checked": 1,
+                "valid": 0,
+                "invalid": 1,
+                "limited": 0,
+                "unverified": 0,
+                "errors": [{"token": "token:redacted", "error": "Grok app-chat credential invalid"}],
+                "results": [{"token": "token:redacted", "status": "invalid", "message": "Grok app-chat credential invalid"}],
+                "items": [{
+                    "access_token": GROK_TOKEN,
+                    "provider": "grok",
+                    "status": "异常",
+                    "raw_sso": "raw-sso-token",
+                    "account_id": "grok-account-1",
+                }],
+            }
+
+        self.account_service.validate_accounts = validate_accounts  # type: ignore[method-assign]
+        response = self.client.post(
+            "/api/accounts/validate",
+            headers=AUTH_HEADERS,
+            json={"provider": "grok", "access_tokens": [GROK_TOKEN]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = cast(dict[str, Any], response.json())
+        self.assertEqual(body["checked"], 1)
+        self.assertEqual(body["invalid"], 1)
+        self.assertNotIn(GROK_TOKEN, str(body))
+        self.assertNotIn("raw-sso-token", str(body))
+        self.assertNotIn("access_token", body["items"][0])
+        self.assertTrue(body["items"][0]["has_access_token"])
 
 
 if __name__ == "__main__":
