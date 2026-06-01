@@ -67,6 +67,12 @@ class AccountRefreshRequest(BaseModel):
     provider: Literal["gpt", "grok", "gemini"] | None = None
 
 
+class AccountValidateRequest(BaseModel):
+    access_tokens: list[str] = Field(default_factory=list)
+    identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
+    provider: Literal["gpt", "grok", "gemini"] | None = None
+
+
 class AccountExportRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
@@ -436,6 +442,20 @@ def create_router() -> APIRouter:
         if not access_tokens and not identifiers:
             raise HTTPException(status_code=400, detail={"error": "access_tokens or identifiers is required"})
         return sanitize_account_result(account_service.refresh_accounts(access_tokens, provider=body.provider, identifiers=identifiers))
+
+    @router.post("/api/accounts/validate")
+    async def validate_accounts(body: AccountValidateRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        provider = normalize_account_provider(body.provider or GROK_PROVIDER)
+        if provider != GROK_PROVIDER:
+            raise HTTPException(status_code=400, detail={"error": "unsupported provider for account validation"})
+        access_tokens = [str(token or "").strip() for token in body.access_tokens if str(token or "").strip()]
+        identifiers = _delete_identifiers(body.identifiers)
+        if not access_tokens and not identifiers:
+            access_tokens = account_service.list_tokens(provider=provider)
+        if not access_tokens and not identifiers:
+            raise HTTPException(status_code=400, detail={"error": "access_tokens or identifiers is required"})
+        return sanitize_account_result(account_service.validate_accounts(access_tokens, provider=provider, identifiers=identifiers))
 
     @router.post("/api/accounts/export")
     async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):
