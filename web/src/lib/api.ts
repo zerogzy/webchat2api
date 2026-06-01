@@ -55,6 +55,19 @@ type AccountRefreshResponse = {
   errors: Array<{ access_token: string; error: string }>;
 };
 
+type AccountValidationError = string | { access_token?: string; identifier?: AccountDeleteIdentifier; error?: string; message?: string };
+
+type AccountValidationResponse = {
+  items: Account[];
+  checked: number;
+  valid: number;
+  invalid: number;
+  limited: number;
+  unverified: number;
+  errors: AccountValidationError[];
+  results: unknown[];
+};
+
 type AccountUpdateResponse = {
   item: Account;
   items: Account[];
@@ -346,6 +359,17 @@ export async function deleteLimitedAccounts(provider?: AccountExportProvider) {
 
 export async function refreshAccounts(payload: AccountSelectionPayload, provider?: AccountExportProvider) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
+    method: "POST",
+    body: {
+      access_tokens: payload.tokens,
+      ...(payload.identifiers.length > 0 ? { identifiers: payload.identifiers } : {}),
+      ...(provider ? { provider } : {}),
+    },
+  });
+}
+
+export async function validateAccounts(payload: AccountSelectionPayload, provider?: AccountExportProvider) {
+  return httpRequest<AccountValidationResponse>("/api/accounts/validate", {
     method: "POST",
     body: {
       access_tokens: payload.tokens,
