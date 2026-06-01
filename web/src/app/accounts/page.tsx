@@ -46,6 +46,7 @@ import {
   fetchAccounts,
   refreshAccounts,
   updateAccount,
+  validateAccounts,
   type Account,
   type AccountDeleteIdentifier,
   type AccountDeletePayload,
@@ -290,6 +291,11 @@ function accountSelectionCount(payload: AccountSelectionPayload) {
   return payload.tokens.length + payload.identifiers.length;
 }
 
+function validationErrorMessage(error: string | { error?: string; message?: string } | undefined) {
+  if (typeof error === "string") return error;
+  return error?.error ?? error?.message ?? "";
+}
+
 function accountHasDeleteIdentifier(account: Account) {
   return Boolean(accountToken(account) || accountDeleteIdentifier(account));
 }
@@ -335,6 +341,7 @@ function ProviderAccountSection({
   startIndex,
   isLoading,
   isRefreshing,
+  isValidating,
   isDeleting,
   isExporting,
   isUpdating,
@@ -342,6 +349,7 @@ function ProviderAccountSection({
   onPageChange,
   onSelectChange,
   onRefresh,
+  onValidate,
   onDelete,
   onDeleteLimited,
   onExport,
@@ -360,6 +368,7 @@ function ProviderAccountSection({
   startIndex: number;
   isLoading: boolean;
   isRefreshing: boolean;
+  isValidating: boolean;
   isDeleting: boolean;
   isExporting: boolean;
   isUpdating: boolean;
@@ -367,6 +376,7 @@ function ProviderAccountSection({
   onPageChange: (page: number) => void;
   onSelectChange: (ids: string[]) => void;
   onRefresh: (payload: AccountSelectionPayload) => void;
+  onValidate: (payload: AccountSelectionPayload) => void;
   onDelete: (payload: AccountDeletePayload) => void;
   onDeleteLimited: () => void;
   onExport: (payload: AccountSelectionPayload) => void;
@@ -378,6 +388,8 @@ function ProviderAccountSection({
   const selectedTokens = selectedPayloads.tokens;
   const selectedRefreshPayload = provider.refresh.enabled ? selectedPayloads : { tokens: [], identifiers: [] };
   const selectedRefreshCount = accountSelectionCount(selectedRefreshPayload);
+  const canValidateProvider = provider.id === "grok";
+  const selectedValidateCount = canValidateProvider ? accountSelectionCount(selectedPayloads) : 0;
   const selectedDeleteCount = accountSelectionCount(selectedPayloads);
   const limitedTokens = accountTokens(accounts.filter((item) => item.status === "限流"));
   const typeOptions = [
@@ -473,6 +485,17 @@ function ProviderAccountSection({
           {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
           {provider.refresh.selectedButtonLabel ?? provider.refresh.rowTitle}
         </Button>
+        {canValidateProvider ? (
+          <Button
+            variant="ghost"
+            className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
+            onClick={() => onValidate(selectedPayloads)}
+            disabled={selectedValidateCount === 0 || isValidating}
+          >
+            {isValidating ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
+            验证所选 Grok 账号
+          </Button>
+        ) : null}
         <Button
           variant="ghost"
           className="h-8 rounded-lg px-3 text-amber-700 hover:bg-amber-50 hover:text-amber-800"
@@ -698,6 +721,7 @@ function AccountsPageContent() {
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isValidating, setIsValidating] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -861,6 +885,35 @@ function AccountsPageContent() {
     }
   };
 
+  const handleValidateAccounts = async (provider: ProviderId, payload: AccountSelectionPayload) => {
+    if (provider !== "grok") {
+      toast.error("当前仅支持验证 Grok 账号");
+      return;
+    }
+    if (accountSelectionCount(payload) === 0) {
+      toast.error("请先选择要验证的 Grok 账号");
+      return;
+    }
+
+    setIsValidating(true);
+    try {
+      const data = await validateAccounts(payload, provider);
+      handleProviderMutationResult(provider, data.items);
+      const summary = `检查 ${data.checked} 个，正常 ${data.valid} 个，异常 ${data.invalid} 个，限流 ${data.limited} 个，未验证 ${data.unverified} 个`;
+      const firstError = validationErrorMessage(data.errors[0]);
+      if (data.errors.length > 0) {
+        toast.error(`${summary}${firstError ? `，首个错误：${firstError}` : ""}`);
+      } else {
+        toast.success(summary);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "验证 Grok 账号失败";
+      toast.error(message);
+    } finally {
+      setIsValidating(false);
+    }
+  };
+
   const openEditDialog = (account: Account) => {
     setEditingAccount(account);
     setEditStatus(account.status);
@@ -928,7 +981,7 @@ function AccountsPageContent() {
               variant="outline"
               className="h-10 rounded-xl border-stone-200 bg-white/85 px-4 text-stone-700 shadow-sm hover:bg-white"
               onClick={() => void loadAccounts()}
-              disabled={isLoading || isRefreshing || isDeleting}
+              disabled={isLoading || isRefreshing || isValidating || isDeleting}
             >
               <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
               刷新全部
@@ -937,13 +990,13 @@ function AccountsPageContent() {
               variant="outline"
               className="h-10 rounded-xl border-stone-200 bg-white/85 px-4 text-stone-700 shadow-sm hover:bg-white"
               onClick={() => void handleRefreshAccounts(activeProvider, accountSelectionPayload(activeRows.accounts))}
-              disabled={!activeDefinition.refresh.enabled || isLoading || isRefreshing || isDeleting || accountSelectionCount(accountSelectionPayload(activeRows.accounts)) === 0}
+              disabled={!activeDefinition.refresh.enabled || isLoading || isRefreshing || isValidating || isDeleting || accountSelectionCount(accountSelectionPayload(activeRows.accounts)) === 0}
             >
               <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
               {activeDefinition.refresh.buttonLabel ?? activeDefinition.refresh.rowTitle}
             </Button>
             <AccountImportDialog
-              disabled={isLoading || isRefreshing || isDeleting}
+              disabled={isLoading || isRefreshing || isValidating || isDeleting}
               onImported={(items, provider) => {
                 handleProviderMutationResult(provider, items);
                 setProviderSelection(provider, []);
@@ -1071,6 +1124,7 @@ function AccountsPageContent() {
             startIndex={activeRows.startIndex}
             isLoading={isLoading}
             isRefreshing={isRefreshing}
+            isValidating={isValidating}
             isDeleting={isDeleting}
             isExporting={isExporting}
             isUpdating={isUpdating}
@@ -1078,6 +1132,7 @@ function AccountsPageContent() {
             onPageChange={(nextPage) => setProviderPage(activeProvider, nextPage)}
             onSelectChange={(ids) => setProviderSelection(activeProvider, ids)}
             onRefresh={(payload) => void handleRefreshAccounts(activeProvider, payload)}
+            onValidate={(payload) => void handleValidateAccounts(activeProvider, payload)}
             onDelete={(payload) => void handleDeleteTokens(activeProvider, payload)}
             onDeleteLimited={() => void handleDeleteLimitedAccounts(activeProvider)}
             onExport={(payload) => void handleExportAccounts(activeProvider, payload)}
