@@ -39,7 +39,7 @@ type ImportProvider = ProviderId;
 
 type AccountImportDialogProps = {
   disabled?: boolean;
-  onImported: (items: Account[], provider: ImportProvider) => void;
+  onImported: (items: Account[], provider: ImportProvider) => void | Promise<void>;
 };
 
 type PendingCpaImport = {
@@ -301,7 +301,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     try {
       const data = await createAccounts(normalizedTokens, accountPayloads, importProvider);
       const refreshText = providerDefinition.refresh.enabled ? `已自动刷新 ${providerDefinition.label} 账号信息` : "按提交内容加入号池";
-      onImported(data.items, importProvider);
+      await onImported(data.items, importProvider);
       setOpen(false);
       resetState();
 

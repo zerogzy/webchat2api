@@ -25,7 +25,7 @@
 - 管理接口：提供 `/api/settings`、`/api/auth/users`、`/api/accounts`、`/api/cpa/*`、`/api/sub2api/*`、`/api/remote-account/*`、`/api/image-tasks/*`、`/api/images*`、`/api/logs`、`/api/proxy/test`、`/api/storage/info`、`/api/backups*`、`/api/backup/test`、`/api/image-storage/*` 等后台能力
 - 远程账号注入：管理员可配置远程账号来源、手动同步来源，或通过 `/api/remote-account/inject` 注入账号；响应会隐藏来源鉴权 Token 和账号凭据
 - 账号服务商：账号 `provider` 选择 `gpt`、`grok` 或 `gemini`，账号 `type` 仍表示套餐或订阅类型；账号导入、刷新、导出和脱敏逻辑按服务商模块处理。Gemini `account_status` 中的 `psid_psidts`、`missing_psid`、`usable_gemini_session` 等值是派生诊断标签，不包含实际 cookie 值。
-- 试验页：`/`、`/image`、`/image-manager`、`/accounts`、`/logs`、`/settings`、`/login` 覆盖文生文聊天、文本模型批量可用性测试、文生图/图生图切换、图片队列、图片历史、图片管理、账号导入导出和系统设置；`/image` 的文本和图片测试可按 GPT/Grok/Gemini provider 过滤模型与账号
+- 试验页：`/`、`/image`、`/image-manager`、`/accounts`、`/logs`、`/settings`、`/login` 覆盖文生文聊天、文本模型批量可用性测试、文生图/图生图切换、图片队列、图片历史、图片管理、账号导入导出和系统设置；`/image` 的文本和图片测试可按 GPT/Grok/Gemini provider 过滤模型与账号，且 `/image` 提供 inline prompt/settings 组合式图片输入框，支持选择预设图片比例（包含未指定选项）以及可收起的紧凑输入栏（便于查看生成结果）
 - 文生文聊天历史：保存在浏览器本地，刷新页面后仍保留
 - 图片账号轮换：图片生成/编辑遇到失效账号时，会跳过该账号并尝试下一个可用账号
 - 网络配置：ChatGPT Web、Grok Console 与 Grok app-chat 请求使用可配置网络 profile，支持独立的指纹、TLS impersonate、超时、代理和 Cloudflare Cookie

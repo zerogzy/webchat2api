@@ -2,16 +2,14 @@
 
 import {
   ArrowUp,
-  Check,
-  ChevronDown,
   ImagePlus,
   LoaderCircle,
   X,
+  Minimize2,
+  Maximize2,
 } from "lucide-react";
 import {
-  useEffect,
   useMemo,
-  useRef,
   useState,
   type ClipboardEvent,
   type RefObject,
@@ -28,7 +26,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { cn } from "@/lib/utils";
 
 type ImageComposerProps = {
   prompt: string;
@@ -84,14 +81,9 @@ export function ImageComposer({
   onReferenceImageChange,
   onRemoveReferenceImage,
 }: ImageComposerProps) {
+  const [isCollapsed, setIsCollapsed] = useState(false);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
-  const [isSizeMenuOpen, setIsSizeMenuOpen] = useState(false);
-  const [sizeMenuPos, setSizeMenuPos] = useState<{ top: number; left: number }>(
-    { top: 0, left: 0 },
-  );
-  const sizeMenuRef = useRef<HTMLDivElement>(null);
-  const sizeMenuBtnRef = useRef<HTMLButtonElement>(null);
   const lightboxImages = useMemo(
     () =>
       referenceImages.map((image, index) => ({
@@ -105,31 +97,13 @@ export function ImageComposer({
   const imageModelPlaceholder =
     imageModels.length === 0 ? "暂无可用模型" : "请选择模型";
   const imageSizeOptions = [
-    { value: "", label: "未指定" },
+    { value: "__unset__", label: "未指定" },
     { value: "1:1", label: "1:1 (正方形)" },
     { value: "16:9", label: "16:9 (横版)" },
     { value: "4:3", label: "4:3 (横版)" },
     { value: "3:4", label: "3:4 (竖版)" },
     { value: "9:16", label: "9:16 (竖版)" },
   ];
-  const imageSizeLabel =
-    imageSizeOptions.find((option) => option.value === imageSize)?.label ||
-    "未指定";
-
-  useEffect(() => {
-    if (!isSizeMenuOpen) {
-      return;
-    }
-    const handlePointerDown = (event: MouseEvent) => {
-      if (!sizeMenuRef.current?.contains(event.target as Node)) {
-        setIsSizeMenuOpen(false);
-      }
-    };
-    window.addEventListener("mousedown", handlePointerDown);
-    return () => {
-      window.removeEventListener("mousedown", handlePointerDown);
-    };
-  }, [isSizeMenuOpen]);
 
   const handleTextareaPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const imageFiles = Array.from(event.clipboardData.files).filter((file) =>
@@ -157,13 +131,13 @@ export function ImageComposer({
           }}
         />
 
-        {imageModeUnavailableMessage ? (
+        {imageModeUnavailableMessage && !isCollapsed ? (
           <p className="mb-2 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-2 text-xs leading-5 text-amber-700 sm:mb-3">
             {imageModeUnavailableMessage}
           </p>
         ) : null}
 
-        {referenceImages.length > 0 ? (
+        {referenceImages.length > 0 && !isCollapsed ? (
           <div className="mb-2 border-b border-stone-200/80 pb-2 sm:mb-3 sm:pb-3">
             <div className="mb-2 flex items-center justify-between gap-2 px-1">
               <span className="text-[11px] font-semibold tracking-[0.14em] text-stone-500 uppercase">
@@ -211,13 +185,53 @@ export function ImageComposer({
           </div>
         ) : null}
 
-        <div className="overflow-hidden rounded-2xl border border-stone-200/80 bg-white/72 transition focus-within:border-stone-300">
+        <div
+          className={`relative overflow-hidden rounded-2xl border border-stone-200/80 bg-white/72 transition focus-within:border-stone-300 ${
+            isCollapsed
+              ? "cursor-pointer px-3 py-2 hover:bg-white sm:px-4 sm:py-3"
+              : ""
+          }`}
+        >
           <div
-            className="relative cursor-text"
+            className={`relative ${
+              isCollapsed ? "flex items-center justify-between" : "cursor-text"
+            }`}
             onClick={() => {
-              textareaRef.current?.focus();
+              if (isCollapsed) {
+                setIsCollapsed(false);
+                setTimeout(() => textareaRef.current?.focus(), 0);
+              } else {
+                textareaRef.current?.focus();
+              }
             }}
           >
+            {isCollapsed ? (
+              <div className="flex w-full items-center justify-between gap-3">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="shrink-0 rounded-full bg-stone-100 px-2.5 py-1 text-[10px] font-semibold text-stone-600 sm:text-xs">
+                    {referenceImages.length > 0 ? "编辑模式" : "生成模式"}
+                  </span>
+                  <p className="truncate text-sm font-medium text-stone-600 sm:text-[15px]">
+                    {prompt || "输入想要生成的画面..."}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setIsCollapsed(false);
+                      setTimeout(() => textareaRef.current?.focus(), 0);
+                    }}
+                    className="inline-flex size-8 items-center justify-center rounded-full text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-700"
+                    aria-label="展开输入框"
+                  >
+                    <Maximize2 className="size-4" />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
             <ImageLightbox
               images={lightboxImages}
               currentIndex={lightboxIndex}
@@ -241,11 +255,11 @@ export function ImageComposer({
                   void onSubmit();
                 }
               }}
-              className="min-h-[112px] resize-none rounded-none border-0 bg-transparent px-4 pt-4 pb-3 text-[15px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[160px] sm:px-5 sm:pt-5 sm:pb-24 sm:leading-7"
+              className="min-h-[160px] resize-none rounded-none border-0 bg-transparent px-4 pt-4 pb-4 text-[15px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[180px] sm:px-5 sm:pt-5 sm:pb-5 sm:leading-7"
             />
 
             <div
-              className="border-t border-stone-200/70 bg-stone-50/70 px-3 pt-3 pb-3 sm:absolute sm:inset-x-4 sm:bottom-4 sm:rounded-xl sm:border sm:border-stone-200/80 sm:bg-white/92 sm:px-4"
+              className="border-t border-stone-200/70 bg-stone-50/70 px-3 py-3 sm:px-4 sm:py-4"
               onClick={(event) => event.stopPropagation()}
             >
               <div className="mb-2 hidden items-center justify-between gap-2 text-[11px] font-semibold tracking-[0.14em] text-stone-500 uppercase sm:flex">
@@ -298,78 +312,33 @@ export function ImageComposer({
                       className="h-7 w-[40px] border-0 bg-transparent px-0 text-center text-xs font-medium text-stone-700 shadow-none focus-visible:ring-0 sm:h-8 sm:w-[64px] sm:text-sm"
                     />
                   </div>
-                  <div className="relative flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2 py-0.5 text-[11px] sm:h-auto sm:gap-2 sm:px-3 sm:py-1 sm:text-[13px]">
+                  <div className="relative flex h-9 min-w-[150px] shrink-0 items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2 py-0.5 text-[11px] sm:h-auto sm:min-w-[150px] sm:gap-2 sm:px-3 sm:py-1 sm:text-[13px]">
                     <span className="hidden font-medium text-stone-700 sm:inline sm:text-sm">
                       比例
                     </span>
-                    <button
-                      ref={sizeMenuBtnRef}
-                      type="button"
-                      className="flex h-7 w-[78px] items-center justify-between bg-transparent text-left text-xs font-bold text-stone-700 min-[390px]:w-[96px] sm:h-8 sm:w-[132px]"
-                      onClick={() => {
-                        if (!isSizeMenuOpen && sizeMenuBtnRef.current) {
-                          const rect =
-                            sizeMenuBtnRef.current.getBoundingClientRect();
-                          const menuWidth = Math.min(
-                            186,
-                            window.innerWidth - 32,
-                          );
-                          setSizeMenuPos({
-                            top: rect.top - 8,
-                            left: Math.max(
-                              16,
-                              Math.min(
-                                rect.left,
-                                window.innerWidth - menuWidth - 16,
-                              ),
-                            ),
-                          });
-                        }
-                        setIsSizeMenuOpen((open) => !open);
-                      }}
+                    <Select
+                      value={imageSize === "" ? "__unset__" : imageSize}
+                      onValueChange={(val) =>
+                        onImageSizeChange(val === "__unset__" ? "" : val)
+                      }
                     >
-                      <span className="truncate">{imageSizeLabel}</span>
-                      <ChevronDown
-                        className={cn(
-                          "size-4 shrink-0 opacity-60 transition",
-                          isSizeMenuOpen && "rotate-180",
-                        )}
-                      />
-                    </button>
-                    {isSizeMenuOpen ? (
-                      <div
-                        ref={sizeMenuRef}
-                        className="fixed z-[80] max-h-[45dvh] overflow-y-auto rounded-3xl border border-white/80 bg-white p-2 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)]"
-                        style={{
-                          top: sizeMenuPos.top,
-                          left: sizeMenuPos.left,
-                          transform: "translateY(-100%)",
-                          width: "min(186px, calc(100vw - 2rem))",
-                        }}
+                      <SelectTrigger
+                        aria-label="图片比例"
+                        className="h-8 min-w-0 flex-1 rounded-full border-0 bg-transparent px-0 text-xs font-bold text-stone-700 shadow-none focus:ring-0 sm:text-sm"
                       >
-                        {imageSizeOptions.map((option) => {
-                          const active = option.value === imageSize;
-                          return (
-                            <button
-                              key={option.label}
-                              type="button"
-                              className={cn(
-                                "flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-sm text-stone-700 transition hover:bg-stone-100",
-                                active &&
-                                  "bg-stone-100 font-medium text-stone-950",
-                              )}
-                              onClick={() => {
-                                onImageSizeChange(option.value);
-                                setIsSizeMenuOpen(false);
-                              }}
-                            >
-                              <span>{option.label}</span>
-                              {active ? <Check className="size-4" /> : null}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : null}
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {imageSizeOptions.map((option) => (
+                          <SelectItem
+                            key={option.value}
+                            value={option.value}
+                          >
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div className="flex h-9 min-w-[150px] shrink-0 items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2 py-0.5 sm:h-auto sm:min-w-[178px] sm:gap-2 sm:px-3 sm:py-1">
                     <span className="hidden text-[11px] font-medium text-stone-700 sm:inline sm:text-sm">
@@ -452,7 +421,22 @@ export function ImageComposer({
                 </button>
               </div>
             </div>
+            </>
+            )}
           </div>
+          {!isCollapsed && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                setIsCollapsed(true);
+              }}
+              className="absolute top-3 right-3 z-10 inline-flex size-8 items-center justify-center rounded-full text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 sm:top-4 sm:right-4"
+              aria-label="收起输入框"
+            >
+              <Minimize2 className="size-4" />
+            </button>
+          )}
         </div>
       </div>
     </div>
