@@ -17,7 +17,7 @@
 | `x-api-key` 兼容鉴权 | ✅ | 仅 `/v1/models`、`/v1/chat/completions`、`/v1/completions`、`/v1/complete`、`/v1/responses` 和 `/v1/messages` 支持 `x-api-key`；图片生成和图片编辑接口仍使用 Bearer Token。 |
 | 后台管理接口 | ✅ | 已提供 `/api/settings`、`/api/auth/users`、`/api/accounts`、`/api/cpa/*`、`/api/sub2api/*`、`/api/remote-account/*`、`/api/image-tasks/*`、`/api/images*`、`/api/logs`、`/api/proxy/test`、`/api/storage/info`、`/api/backups*`、`/api/backup/test`、`/api/image-storage/*`。 |
 | 前端管理后台 | ✅ | 已支持 `/`、`/accounts`、`/image`、`/image-manager`、`/logs`、`/settings`、`/login`，覆盖账号池、用户 API Key、代理、日志、图片任务、图片文件、备份、图片存储和系统配置管理。 |
-| 前端试验页 | ✅ | 已支持文生文聊天、文本模型批量可用性测试、文生图、图生图、图片队列和图片历史。 |
+| 前端试验页 | ✅ | 已支持文生文聊天、文本模型批量可用性测试、文生图、图生图、图片队列和图片历史；支持可折叠的组合式图片输入框（ImageComposer），具备生成模式与编辑模式提示、提示词预览、额度与任务数和状态控制，以及提供服务商与模型过滤能力。 |
 | 文生文聊天历史 | ✅ | 浏览器本地保存，刷新页面后仍保留。 |
 | 账号池管理 | ✅ | 已支持列表、筛选、批量操作、导入、导出、手动编辑、刷新和删除。 |
 | 账号导出 | ✅ | 仅导出 TXT，并按 GPT/Grok/Gemini 服务商分别下载为 `webchat2api-gpt.txt` / `webchat2api_grok.txt` / `webchat2api_gemini.txt`；文件内容每行一个对应服务商的可导出凭据。 |
@@ -44,5 +44,5 @@
 | 测试命令 | ✅ | 后端使用 `python3 -m unittest discover -s test -t .`；前端使用 `cd web && npm run typecheck` 和 `cd web && npm run build`；存储脚本为 `python scripts/test_storage.py`。 |
 | 更高级的 Token 调度策略 | ⚠️ | 当前已有基础轮询、tier/capabilities 路由、限流记录和恢复检查，更复杂的调度策略仍在完善中。 |
 | Render / Vercel 等部署表述 | ⚠️ | 当前主要以 Docker 部署为主，其他平台部署方式暂未重点说明。 |
-| 图片尺寸参数 | ✅ | 接口已接收 `size`，并将其作为宽高比或提示词提示传给图片生成链路。 |
+| 图片尺寸参数 | ✅ | 接口已接收 `size`，并将其作为宽高比或提示词提示传给图片生成链路；前端支持下拉选择预设图片比例（未指定、1:1、16:9、4:3、3:4、9:16），后端仍支持将尺寸参数转发至图片生成与编辑链路。 |
 | `rt_token` 刷新 | ❌ | 暂不纳入常规 GPT/Grok 账号导入或刷新处理（非当前接入范围），后续若提供支持，将另行定义其凭据格式与安全隔离边界。 |
