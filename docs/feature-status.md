@@ -24,7 +24,7 @@
 | 远程账号注入与来源同步 | ✅ | 管理员可配置远程来源、手动同步或直接注入 payload；已验证 merge、来源范围 replace 和响应脱敏。 |
 | GPT 账号额度刷新与恢复时间同步 | ✅ | 已支持账号信息刷新，限流账号也会自动继续检查。 |
 | Gemini 账号状态诊断 | ✅ | `account_status` 中的 `psid_psidts`、`missing_psid`、`usable_gemini_session` 等值是根据账号字段派生的诊断标签，用于判断 cookie/session 形态，不暴露实际 `__Secure-1PSID` 或 `__Secure-1PSIDTS` 值。 |
-| Grok 账号导入与状态优先级机制 | ✅ | 支持 token/cookie 导入并归入 Grok 账号池，不声明官方 xAI API Key 接入；`tier` 支持 basic、super、heavy 路由，`capabilities` 可限制用途。Grok 账号状态优先级已支持：24 小时内真实业务成功调用最高优（标记为 `valid_by_call`），可覆盖后续 403 probe 或 WAF 探测失败；超出 24 小时后，陈旧成功不再覆盖状态，再次遇 403 会正常转为 `unverified` 并记录为 `cloudflare_or_forbidden`；相关探针和退避元数据仍会记录。 |
+| Grok 账号导入与状态优先级机制 | ✅ | 支持 token/cookie 导入并归入 Grok 账号池，不声明官方 xAI API Key 接入；`tier` 支持 basic、super、heavy 路由，`capabilities` 可限制用途。Grok 账号状态优先级已支持：24 小时内真实业务成功调用最高优（标记为 `valid_by_call`），可覆盖后续 403 probe 或 WAF 探测失败；此时将清空 UI 面向用户的临时/瞬态故障字段（如 `state_reason`、`last_check_error` 与 `last_check_http_status`），即 `last_check_http_status` 不再保留该被覆盖的 403 状态。超出 24 小时后，陈旧成功不再覆盖状态，再次遇 403 会正常转为 `unverified` 并记录为 `cloudflare_or_forbidden`；相关调度和退避元数据（如 `last_check_at`、`last_refresh_attempt_at` 以及 `refresh_backoff_until`）仍会记录。 |
 | 失效 Token 自动清理 | ✅ | `auto_remove_invalid_accounts` 默认开启，已支持自动移除失效 Token；`auto_remove_rate_limited_accounts` 默认关闭。 |
 | CPA 连接管理与导入 | ✅ | 已支持连接新增、修改、查询、删除、远程文件浏览、勾选导入和进度跟踪。 |
 | `sub2api` 连接管理与导入 | ✅ | 已支持连接管理、账号浏览和 OpenAI OAuth 账号批量导入。 |
@@ -45,4 +45,4 @@
 | 更高级的 Token 调度策略 | ⚠️ | 当前已有基础轮询、tier/capabilities 路由、限流记录和恢复检查，更复杂的调度策略仍在完善中。 |
 | Render / Vercel 等部署表述 | ⚠️ | 当前主要以 Docker 部署为主，其他平台部署方式暂未重点说明。 |
 | 图片尺寸参数 | ✅ | 接口已接收 `size`，并将其作为宽高比或提示词提示传给图片生成链路。 |
-| `rt_token` 刷新 | ❌ | 待实现。 |
+| `rt_token` 刷新 | ❌ | 暂不纳入常规 GPT/Grok 账号导入或刷新处理（非当前接入范围），后续若提供支持，将另行定义其凭据格式与安全隔离边界。 |

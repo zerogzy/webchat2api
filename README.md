@@ -35,7 +35,7 @@
 - Grok 防护处理：支持手动 `cf_clearance`、FlareSolverr clearance 刷新，以及可选 Browser Bridge 浏览器路径；这些都是尽力而为，不保证绕过所有 Cloudflare/WAF 挑战
 - GPT Turnstile：默认启用 `enable_turnstile_solver`，会在 ChatGPT 返回 Turnstile 要求时尝试生成 Sentinel Turnstile Token；该能力依赖上游挑战和求解结果，真实 GPT Turnstile 仍可能失败
 - 账号导出：仅导出 TXT，并按 GPT/Grok/Gemini 服务商分别下载为 `webchat2api-gpt.txt` / `webchat2api_grok.txt` / `webchat2api_gemini.txt`；文件内容每行一个 `access_token`、`sso` 或 Gemini cookie/session 凭据
-- 账号导入：账号导入弹窗按 GPT/Grok/Gemini provider 显示对应提示；GPT 支持 Access Token、Session JSON、CPA、远程 CPA 与 Sub2API，Grok 支持 token/cookie、CPA、远程 CPA 与 Sub2API，Gemini 支持包含 `__Secure-1PSID` 的 cookie/session、CPA、远程 CPA 与 Sub2API
+- 账号导入：账号导入弹窗按 GPT/Grok/Gemini provider 显示对应提示；GPT 支持 Access Token、Session JSON、CPA、远程 CPA 与 Sub2API，Grok 支持 token/cookie、CPA、远程 CPA 与 Sub2API（需要注意，前端手动与 TXT 导入仅接受裸 SSO 值或单行 `sso=<值>`，不支持分号、完整 Cookie 请求头、`sso-rw` 或其他 cookie 键值对；API 或远程注入路径拥有其各自的校验规则，用户必须遵循对应的端点 schema，不应假设前端接受完整 cookie 头部），Gemini 支持包含 `__Secure-1PSID` 的 cookie/session、CPA、远程 CPA 与 Sub2API
 - 部署方式：Docker CLI、Docker Compose
 
 ## Provider 模块边界
@@ -212,9 +212,9 @@ Grok Console 与 grok.com app-chat 是不同上游路径。本项目没有接入
 
 ### Grok 账号生命周期与状态优先级机制
 系统实现了一套 Grok 账号生命周期状态优先级逻辑，用于应对偶发的 WAF 或探针波动：
-- **真实业务调用优先（`valid_by_call`）**：24 小时内若有成功的真实 Grok 业务调用（可通过 `last_success_at` 判断），其优先级高于后续 Cloudflare 质询或 403 探针（Probe）故障。在此期间，UI 呈现的账号状态会恢复或保持为“正常”，同时清空 `state_reason`、`last_check_error`、`last_check_http_status` 等临时故障标记。
+- **真实业务调用优先（`valid_by_call`）**：24 小时内若有成功的真实 Grok 业务调用（可通过 `last_success_at` 判断），其优先级高于后续 Cloudflare 质询或 403 探针（Probe）故障。在此期间，UI 呈现的账号状态会恢复或保持为“正常”，同时清空 `state_reason`、`last_check_error`、`last_check_http_status` 等临时故障标记（即 `last_check_http_status` 不再保留该被覆盖的 403 错误）。而调度和退避控制属性（例如 `last_check_at`、`last_refresh_attempt_at` 与 `refresh_backoff_until`）仍能记录和体现相应的探测与重试时间，用以控制底层的调度与间隔。
 - **陈旧成功过期**：当最后一次真实调用成功时间超出 24 小时（即 `GROK_RECENT_SUCCESS_TTL_SECONDS` 超期），陈旧的成功不再起覆盖作用。若探针再次遇到 Cloudflare 或 403，账号会转为未验证 `unverified` 并记录为 `cloudflare_or_forbidden`。
-- **探测元数据与退避机制**：无论状态优先级是否覆盖临时探测错误，探针的实际 HTTP 状态、最近探测时间与退避标记（例如 `refresh_backoff_until`）仍会写入账号元数据。
+- **调度元数据与退避机制**：无论状态优先级是否覆盖临时探测错误，最近探测时间与退避标记（例如 `last_check_at`、`last_refresh_attempt_at`、`refresh_backoff_until`）仍可写入账号元数据，用于控制后续刷新和重试间隔。
 
 如配置 `flaresolverr_url`，直接 app-chat 请求遇到 Cloudflare 或 403 时会尝试通过 FlareSolverr 刷新 clearance 并重试。Browser Bridge 是独立浏览器路径；显式配置 `browser_bridge_url` 时，后端会优先使用该 Bridge。未配置时，app-chat 默认先走直接请求；直接请求遇到 `408`、`502`、`503`、`504` 时，才会尝试探测并回退到 `http://127.0.0.1:3080/health` 对应的 Browser Bridge。直接 app-chat 返回 `403` 会原样返回给调用方，不会自动回退到 Browser Bridge，也不会把账号标记为异常；`401` 会标记账号异常，`429` 会标记账号限流。Browser Bridge 的接口是 `POST /api/chat {sso,payload}` 和 `GET /health`，请求会经真实 Chromium 页面发往 grok.com。Docker 入口脚本会在 `BRIDGE_PORT` 上启动 `services/browser_bridge/server.js`，默认 `3080`；页面池可用 `BRIDGE_MAX_PAGES` 和 `BRIDGE_PAGE_IDLE_MS` 控制。Bridge 如果没有拿到 `x-userid` Cookie，会快速返回 `sso_unavailable`，避免继续使用未鉴权页面。
 

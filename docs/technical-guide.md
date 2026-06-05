@@ -323,14 +323,14 @@ GPT 图片编辑约束：
 1. **真实调用优先（Call Precedence Over Probe）**
    - 24 小时内成功的真实 Grok 业务调用（具有 `last_success_at` 的有效记录）优先级最高，能够覆盖后续 Cloudflare 质询错误或 403 probe 故障。
    - 只要账号在 24 小时内有成功调用，即使后续探针（Probe）遭遇临时 Cloudflare 或 403 故障，UI 面向用户的健康字段也会恢复并维持为正常状态。
-   - 该状态在内部通过 `last_check_status: "valid_by_call"` 表示，且 `state_reason`、`last_check_error` 与 `last_check_http_status` 会被清空或重置为 null，确保调用链路仍能继续重试或复用该账号。
+   - 该状态在内部通过 `last_check_status: "valid_by_call"` 表示，此时将清空 UI 面向用户的临时/瞬态故障字段（如 `state_reason`、`last_check_error` 与 `last_check_http_status`），即 `last_check_http_status` 不再保留该被覆盖的 403 状态，确保调用链路仍能继续重试或复用该账号。
 
 2. **陈旧成功转为未验证（Stale Success Expiration）**
    - 如果成功的真实调用时间超出 24 小时（由 `GROK_RECENT_SUCCESS_TTL_SECONDS` 控制），该陈旧成功不再具备状态覆盖优先级。
    - 此时，该账号若再次在 Probe 探测中遇到 Cloudflare 质询或 HTTP 403 错误，其状态将恢复正常评估，可能降级或转为 `unverified`（未验证）状态，并在 `state_reason` 中记录为 `cloudflare_or_forbidden`。
 
-3. **探针/退避元数据记录（Probe/Backoff Metadata）**
-   - 无论是否触发真实调用优先级覆盖，探针执行过程中的元数据与退避控制（如 `refresh_backoff_until`、`last_check_at` 以及探测返回的 HTTP 状态码）仍会记录到账号元数据中。这保证底层调度与异常重试间隔机制仍能读取探测实况。
+3. **调度与退避元数据记录（Scheduling/Backoff Metadata）**
+   - 无论是否触发真实调用优先级覆盖，探针执行过程中的调度与退避控制属性仍能记录和体现相应的探测实况。例如，`last_check_at`、`last_refresh_attempt_at` 以及 `refresh_backoff_until` 仍会记录探针与刷新的执行时间及退避控制，用于协调底层的重试间隔与调度频率。
 
 app-chat 错误语义：
 
@@ -578,7 +578,7 @@ curl http://localhost:8083/health
 管理后台能力：
 
 - 账号池列表、搜索、筛选、刷新、删除和状态编辑。
-- 账号导入：账号导入弹窗从 `web/src/providers/` 读取 provider 文案和可用方式。GPT 支持 Access Token、Session JSON、本地 CPA、远程 CPA 与 Sub2API；Grok 支持 token/cookie、本地 CPA、远程 CPA 与 Sub2API，`sso=` 前缀可选；Gemini 支持包含 `__Secure-1PSID` 的 cookie/session、本地 CPA、远程 CPA 与 Sub2API，可附带 `__Secure-1PSIDTS`。
+- 账号导入：账号导入弹窗从 `web/src/providers/` 读取 provider 文案和可用方式。GPT 支持 Access Token、Session JSON、本地 CPA、远程 CPA 与 Sub2API；Grok 支持 token/cookie、本地 CPA、远程 CPA 与 Sub2API（需要注意，前端手动与 TXT 导入仅接受裸 SSO 值或单行 `sso=<值>`，不支持分号、完整 Cookie 请求头、`sso-rw` 或其他 cookie 键值对；API 或远程注入路径拥有其各自的校验规则，用户必须遵循对应的端点 schema，不应假设前端接受完整 cookie 头部）；Gemini 支持包含 `__Secure-1PSID` 的 cookie/session、本地 CPA、远程 CPA 与 Sub2API，可附带 `__Secure-1PSIDTS`。
 - 管理后台可按服务商 `provider` 和套餐 `type` 分别筛选账号。
 - 账号导出：按 GPT/Grok/Gemini 服务商分别下载 TXT，文件名为 `webchat2api-gpt.txt`、`webchat2api_grok.txt`、`webchat2api_gemini.txt`。
 - 用户 API Key 管理。
