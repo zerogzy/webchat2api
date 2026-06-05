@@ -34,6 +34,18 @@ export type Account = {
   success: number;
   fail: number;
   last_used_at?: string | null;
+  state_reason?: string | null;
+  last_check_status?: string | null;
+  last_check_error?: string | null;
+  last_check_http_status?: number | null;
+  last_check_at?: string | null;
+  last_success_at?: string | null;
+  last_refresh_attempt_at?: string | null;
+  last_refresh_success_at?: string | null;
+  refresh_backoff_until?: string | null;
+  cooldown_until?: string | null;
+  expired_reason?: string | null;
+  expired_at?: string | null;
 };
 
 type AccountListResponse = {
@@ -46,13 +58,32 @@ type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
+  checked?: number;
+  unchanged?: number;
+  failed?: number;
   errors?: Array<{ access_token: string; error: string }>;
 };
 
 type AccountRefreshResponse = {
   items: Account[];
   refreshed: number;
+  checked?: number;
+  unchanged?: number;
+  failed?: number;
   errors: Array<{ access_token: string; error: string }>;
+};
+
+type AccountValidationError = string | { access_token?: string; identifier?: AccountDeleteIdentifier; error?: string; message?: string };
+
+type AccountValidationResponse = {
+  items: Account[];
+  checked: number;
+  valid: number;
+  invalid: number;
+  limited: number;
+  unverified: number;
+  errors: AccountValidationError[];
+  results: unknown[];
 };
 
 type AccountUpdateResponse = {
@@ -61,7 +92,7 @@ type AccountUpdateResponse = {
 };
 
 export type AccountImportPayload = {
-  access_token: string;
+  access_token?: string;
   accessToken?: string;
   type?: string;
   provider?: AccountProvider;
@@ -87,6 +118,8 @@ export type AccountDeletePayload = {
   tokens: string[];
   identifiers: AccountDeleteIdentifier[];
 };
+
+export type AccountSelectionPayload = AccountDeletePayload;
 
 export type SettingsConfig = {
   proxy: string;
@@ -342,11 +375,23 @@ export async function deleteLimitedAccounts(provider?: AccountExportProvider) {
   });
 }
 
-export async function refreshAccounts(accessTokens: string[], provider?: AccountExportProvider) {
+export async function refreshAccounts(payload: AccountSelectionPayload, provider?: AccountExportProvider) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
     body: {
-      access_tokens: accessTokens,
+      access_tokens: payload.tokens,
+      ...(payload.identifiers.length > 0 ? { identifiers: payload.identifiers } : {}),
+      ...(provider ? { provider } : {}),
+    },
+  });
+}
+
+export async function validateAccounts(payload: AccountSelectionPayload, provider?: AccountExportProvider) {
+  return httpRequest<AccountValidationResponse>("/api/accounts/validate", {
+    method: "POST",
+    body: {
+      access_tokens: payload.tokens,
+      ...(payload.identifiers.length > 0 ? { identifiers: payload.identifiers } : {}),
       ...(provider ? { provider } : {}),
     },
   });
@@ -366,13 +411,14 @@ function accountExportFallbackFilename(provider: AccountExportProvider) {
   return getAccountProviderDefinition(provider).exportFilename;
 }
 
-export async function exportAccounts(provider: AccountExportProvider, accessTokens: string[] = []) {
+export async function exportAccounts(provider: AccountExportProvider, payload: AccountSelectionPayload = { tokens: [], identifiers: [] }) {
   const response = await request.request<Blob>({
     url: "/api/accounts/export",
     method: "POST",
     data: {
       provider,
-      access_tokens: accessTokens,
+      access_tokens: payload.tokens,
+      ...(payload.identifiers.length > 0 ? { identifiers: payload.identifiers } : {}),
     },
     responseType: "blob",
   });

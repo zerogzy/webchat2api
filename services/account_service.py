@@ -2,18 +2,29 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Condition, Lock
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from services.config import config
 from services.log_service import (
     LOG_TYPE_ACCOUNT,
     log_service,
 )
-from services.models import GEMINI_PROVIDER, GPT_PROVIDER, GROK_PROVIDER, ModelSpec, normalize_account_provider, normalize_provider
-from services.providers.registry import account_strategy
+from services.providers.base import (
+    GEMINI_PROVIDER,
+    GPT_PROVIDER,
+    GROK_PROVIDER,
+    AccountStateDecision,
+    AccountStateDecisionInput,
+    ModelSpec,
+    RemoteAccountValidator,
+    decide_account_state,
+)
+from services.providers.registry import account_strategy, normalize_account_provider, normalize_provider
 from services.providers.gemini.accounts import account_row_id as gemini_account_row_id
+from services.providers.grok.accounts import account_row_id as grok_account_row_id, normalize_app_chat_rate_limit_payload
+from services.providers.grok.client import grok_rate_limit_account_hints
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
@@ -22,6 +33,37 @@ def _clean_string(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _safe_validation_error_message(exc: Exception) -> str:
+    code = _clean_string(getattr(exc, "code", ""))
+    status = getattr(exc, "upstream_status", None) or getattr(exc, "status_code", None)
+    parts: list[str] = []
+    if code:
+        parts.append(code)
+    if status is not None:
+        parts.append(f"HTTP {status}")
+    if not parts:
+        parts.append(type(exc).__name__)
+    return "Grok app-chat validation failed: " + ", ".join(parts)
+
+
+def _grok_validation_payload() -> tuple[ModelSpec, dict[str, Any], list[dict[str, Any]]]:
+    from services.providers.grok.models import GROK_MODEL_SPECS
+
+    spec = next((item for item in GROK_MODEL_SPECS if item.capability == "chat" and item.model_tier == "basic"), GROK_MODEL_SPECS[0])
+    messages = [{"role": "user", "content": "ping"}]
+    body = {"model": spec.id, "stream": True, "prompt": "ping"}
+    return spec, body, messages
+
+
+def _run_grok_app_chat_validation(access_token: str, account: dict[str, Any]):
+    from services.providers.grok.client import GrokAppChatClient, build_app_chat_payload
+
+    spec, body, messages = _grok_validation_payload()
+    payload = build_app_chat_payload(spec, body, messages)
+    with GrokAppChatClient(access_token, account) as client:
+        yield from client.stream_events(payload)
 
 
 def _account_strategy(provider: Any):
@@ -68,8 +110,16 @@ def _matched_delete_tokens_for_provider(target_set: set[str], accounts: dict[str
     return matched_tokens
 
 
-def _matched_delete_identifiers_for_provider(identifiers: list[dict[str, str]], accounts: dict[str, dict], provider: str | None) -> set[str]:
-    if provider != GEMINI_PROVIDER or not identifiers:
+def _account_row_id_for_provider(account: dict[str, Any], provider: str | None) -> str:
+    if provider == GEMINI_PROVIDER:
+        return gemini_account_row_id(account)
+    if provider == GROK_PROVIDER:
+        return grok_account_row_id(account)
+    return ""
+
+
+def _matched_account_tokens_by_identifiers(identifiers: list[dict[str, str]], accounts: dict[str, dict], provider: str | None) -> set[str]:
+    if provider not in {GEMINI_PROVIDER, GROK_PROVIDER} or not identifiers:
         return set()
     account_ids = {
         _clean_string(identifier.get("account_id"))
@@ -87,8 +137,16 @@ def _matched_delete_identifiers_for_provider(identifiers: list[dict[str, str]], 
         account_token
         for account_token, account in accounts.items()
         if (account_ids and _clean_string(account.get("account_id")) in account_ids)
-        or (row_ids and gemini_account_row_id(account) in row_ids)
+        or (row_ids and _account_row_id_for_provider(account, provider) in row_ids)
     }
+
+
+class _UnchangedRemoteInfo(dict[str, Any]):
+    pass
+
+
+UNCHANGED_REMOTE_INFO = _UnchangedRemoteInfo()
+GROK_RECENT_SUCCESS_TTL_SECONDS = 86400
 
 
 class AccountService:
@@ -159,6 +217,80 @@ class AccountService:
     def _set_account_locked(self, account: dict) -> None:
         provider = account["provider"]
         self._provider_accounts_locked(provider)[account["access_token"]] = account
+
+    def _state_decision(self, account: dict, *, spec: ModelSpec | None = None, payload: Any = None, status_code: int | None = None) -> AccountStateDecision:
+        return decide_account_state(
+            AccountStateDecisionInput(
+                account=account,
+                adapter=_account_strategy(account.get("provider")),
+                spec=spec,
+                payload=payload,
+                status_code=status_code,
+                current_time=self._now(),
+            )
+        )
+
+    def _timestamp_string(self, offset_seconds: int = 0) -> str:
+        value = datetime.fromtimestamp(self._now(), timezone.utc).replace(tzinfo=None) + timedelta(seconds=offset_seconds)
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _grok_transient_state_reason(code: str, http_status: int | None) -> str:
+        if http_status == 403 or code in {"cloudflare_challenge", "rate_limit_check_unavailable"}:
+            return "cloudflare_or_forbidden"
+        return "temporary_failure"
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime | None:
+        text = _clean_string(value)
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+    def _has_recent_grok_success(self, account: dict[str, Any], now: datetime | None = None) -> bool:
+        if _clean_string(account.get("status")) in {"禁用", "异常", "限流"}:
+            return False
+        last_success_at = self._parse_timestamp(account.get("last_success_at"))
+        if last_success_at is None:
+            return False
+        current = now or datetime.fromtimestamp(self._now(), timezone.utc).replace(tzinfo=None)
+        age = current - last_success_at
+        return timedelta(0) <= age <= timedelta(seconds=GROK_RECENT_SUCCESS_TTL_SECONDS)
+
+    def _grok_clear_transient_metadata(self, now: str) -> dict[str, Any]:
+        return {
+            "state_reason": "",
+            "last_check_error": "",
+            "last_check_http_status": None,
+            "last_check_at": now,
+            "refresh_backoff_until": None,
+        }
+
+    def _grok_transient_metadata(self, code: str, http_status: int | None, *, include_refresh_attempt: bool = False) -> dict[str, Any]:
+        now = self._timestamp_string()
+        updates: dict[str, Any] = {
+            "state_reason": self._grok_transient_state_reason(code, http_status),
+            "last_check_status": "unverified",
+            "last_check_error": code or "check_unavailable",
+            "last_check_http_status": http_status,
+            "last_check_at": now,
+            "refresh_backoff_until": self._timestamp_string(300),
+        }
+        if include_refresh_attempt:
+            updates["last_refresh_attempt_at"] = now
+        return updates
+
+    def _grok_transient_metadata_for_account(self, account: dict[str, Any], code: str, http_status: int | None, *, include_refresh_attempt: bool = False) -> dict[str, Any]:
+        updates = self._grok_transient_metadata(code, http_status, include_refresh_attempt=include_refresh_attempt)
+        if self._has_recent_grok_success(account):
+            updates["state_reason"] = ""
+            updates["last_check_status"] = "valid_by_call"
+            updates["last_check_error"] = ""
+            updates["last_check_http_status"] = None
+        return updates
 
     def _pop_account_locked(self, access_token: str, provider: str | None = None) -> dict | None:
         if provider_filter := self._provider_filter(provider):
@@ -324,7 +456,7 @@ class AccountService:
             candidates = [
                 token
                 for account in self._all_accounts_locked()
-                if account.get("status") not in {"禁用", "异常", "限流"}
+                if not self._state_decision(account).unavailable
                    and normalize_provider(account.get("provider")) == target_provider
                    and (token := account.get("access_token") or "")
                    and token not in excluded
@@ -387,16 +519,15 @@ class AccountService:
                 account
                 for account in self._all_accounts_locked()
                 if normalize_provider(account.get("provider")) == GROK_PROVIDER
-                   and account.get("status") not in account_strategy(GROK_PROVIDER).UNAVAILABLE_STATUSES
                    and account.get("access_token")
                    and account.get("access_token") not in excluded
-                   and account_strategy(GROK_PROVIDER).account_has_capability(account, spec)
+                   and not self._state_decision(account, spec=spec).skip_for_selection
             ]
             for requested_tier in requested_tiers:
                 tiered_candidates = [
                     account.get("access_token") or ""
                     for account in accounts
-                    if account_strategy(GROK_PROVIDER).tier_matches(account_strategy(GROK_PROVIDER).normalize_tier(account.get("tier") or account.get("model_tier")), requested_tier)
+                    if self._state_decision(account, spec=spec).matches_tier(requested_tier)
                 ]
                 token = self._next_text_token([candidate for candidate in tiered_candidates if candidate])
                 if token:
@@ -413,6 +544,11 @@ class AccountService:
                 return
             next_item = dict(current)
             next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if provider == GROK_PROVIDER:
+                now = self._timestamp_string()
+                next_item.update({"app_chat": True, "last_check_status": "valid_by_call", "last_success_at": now, **self._grok_clear_transient_metadata(now)})
+                if next_item.get("status") != "禁用":
+                    next_item["status"] = "正常"
             account = self._normalize_account(next_item)
             if account is None:
                 return
@@ -429,7 +565,11 @@ class AccountService:
             next_item = dict(current)
             next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if success:
+                now = self._timestamp_string()
                 next_item["success"] = int(next_item.get("success") or 0) + 1
+                next_item.update({"last_check_status": "valid_by_call", "last_success_at": now, **self._grok_clear_transient_metadata(now)})
+                if next_item.get("status") != "禁用":
+                    next_item["status"] = "正常"
             else:
                 next_item["fail"] = int(next_item.get("fail") or 0) + 1
             account = self._normalize_account(next_item)
@@ -476,6 +616,12 @@ class AccountService:
     def add_accounts(self, tokens: list[str], provider: str | None = None) -> dict:
         target_provider = self._provider_filter(provider) or GPT_PROVIDER
         tokens = list(dict.fromkeys(token for token in tokens if token))
+        if target_provider == GROK_PROVIDER:
+            tokens = list(dict.fromkeys(
+                normalized
+                for token in tokens
+                if (normalized := _normalize_access_token_for_provider({"access_token": token, "provider": target_provider, "_grok_sso_import": True}, target_provider))
+            ))
         if not tokens:
             return {"added": 0, "skipped": 0, "items": self.list_accounts()}
 
@@ -486,14 +632,15 @@ class AccountService:
             for access_token in tokens:
                 current = provider_accounts.get(access_token)
                 current_payload = current or {}
-                account = self._normalize_account(
-                    {
-                        **current_payload,
-                        "access_token": access_token,
-                        "type": str(current_payload.get("type") or "free"),
-                        "provider": target_provider,
-                    }
-                )
+                payload = {
+                    **current_payload,
+                    "access_token": access_token,
+                    "type": str(current_payload.get("type") or "free"),
+                    "provider": target_provider,
+                }
+                if target_provider == GROK_PROVIDER:
+                    payload["_grok_sso_import"] = True
+                account = self._normalize_account(payload)
                 if account is not None:
                     if current is None:
                         added += 1
@@ -639,7 +786,7 @@ class AccountService:
                 provider_accounts,
                 target_provider,
             )
-            matched_tokens.update(_matched_delete_identifiers_for_provider(identifiers or [], provider_accounts, target_provider))
+            matched_tokens.update(_matched_account_tokens_by_identifiers(identifiers or [], provider_accounts, target_provider))
             target_set.update(matched_tokens)
             removed = sum(self._pop_accounts_by_token_locked(token, target_provider) for token in target_set)
             for token in target_set:
@@ -741,6 +888,8 @@ class AccountService:
         account_provider = normalize_provider(account.get("provider"))
         if account_provider == GROK_PROVIDER:
             return self.fetch_grok_remote_info(access_token, event, provider=account_provider)
+        if account_provider == GEMINI_PROVIDER:
+            return self.fetch_gemini_remote_info(access_token, event, provider=account_provider)
         if account_provider != GPT_PROVIDER:
             return dict(account) if account else None
         from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
@@ -753,33 +902,167 @@ class AccountService:
             raise
         return self.update_account(access_token, result, provider=account_provider)
 
+    def fetch_gemini_remote_info(self, access_token: str, event: str = "fetch_gemini_remote_info", provider: str | None = None) -> dict[str, Any] | None:
+        provider_filter = provider or GEMINI_PROVIDER
+        account = self.get_account(access_token, provider=provider_filter) or {}
+        strategy = cast(RemoteAccountValidator, account_strategy(GEMINI_PROVIDER))
+        payload = strategy.validate_remote_info(access_token, account)
+        return self.update_account(access_token, payload, provider=provider_filter)
+
     def fetch_grok_remote_info(self, access_token: str, event: str = "fetch_grok_remote_info", provider: str | None = None) -> dict[str, Any] | None:
         provider_filter = provider or GROK_PROVIDER
         account = self.get_account(access_token, provider=provider_filter) or {}
-        from services.providers.grok import GrokConsoleError, validate_grok_access_token
+        strategy = cast(RemoteAccountValidator, account_strategy(GROK_PROVIDER))
+        refresh_attempt_at = self._timestamp_string()
+        self.update_account(access_token, {"last_refresh_attempt_at": refresh_attempt_at}, provider=provider_filter)
 
         try:
-            payload = validate_grok_access_token(access_token, account)
-        except GrokConsoleError as exc:
-            status = exc.upstream_status or exc.status_code
-            if status in {401, 403} or any(marker in str(exc).lower() for marker in ("auth", "login", "session", "token")):
+            payload = strategy.validate_remote_info(access_token, account)
+        except Exception as exc:
+            code = _clean_string(getattr(exc, "code", ""))
+            status = strategy.remote_error_status(exc)
+            if code in {"cloudflare_challenge", "invalid_rate_limit_response", "rate_limit_check_unavailable", "rate_limit_network_error", "upstream_transient"} or bool(getattr(exc, "is_check_unavailable", False)):
+                self.update_account(access_token, self._grok_transient_metadata_for_account(account, code, status, include_refresh_attempt=True), provider=provider_filter)
+                return UNCHANGED_REMOTE_INFO
+            if status in {402, 429}:
+                decision = self._state_decision(account, status_code=status)
+                self.update_account(access_token, decision.writeback, provider=provider_filter)
+                raise
+            if status in {400, 401, 403} and strategy.is_auth_failure_payload({"code": code, "message": str(exc)}):
                 self.remove_invalid_token(access_token, event)
-            elif status in {402, 429}:
-                self.update_account(access_token, {"status": "限流"}, provider=provider_filter)
-            raise
-        if account_strategy(GROK_PROVIDER).is_auth_failure_payload(payload):
+                raise
+            self.update_account(access_token, self._grok_transient_metadata_for_account(account, code, status, include_refresh_attempt=True), provider=provider_filter)
+            return UNCHANGED_REMOTE_INFO
+        decision = self._state_decision(account, payload=payload)
+        if decision.auth_failed:
             self.remove_invalid_token(access_token, event)
             raise RuntimeError("Grok app-chat authentication failed")
-        return self.update_account(access_token, {"status": "正常", "app_chat": True}, provider=provider_filter)
+        hints = grok_rate_limit_account_hints(payload) if isinstance(payload, dict) else {}
+        usable_hint_keys = {"quota", "quota_total", "rate_limit_window_seconds", "tier"}
+        now = self._timestamp_string()
+        if not (usable_hint_keys & hints.keys()):
+            valid_updates = self._grok_clear_transient_metadata(now)
+            valid_updates["last_check_status"] = "valid"
+            self.update_account(access_token, valid_updates, provider=provider_filter)
+            return UNCHANGED_REMOTE_INFO
+        updates = dict(decision.writeback)
+        quota_payload = normalize_app_chat_rate_limit_payload(payload)
+        if quota_payload:
+            updates["quota_console"] = quota_payload
+        updates.update(hints)
+        updates.update(self._grok_clear_transient_metadata(now))
+        updates["last_check_status"] = "valid"
+        updates["last_refresh_success_at"] = now
+        return self.update_account(access_token, updates, provider=provider_filter)
 
     def _refresh_error_message(self, access_token: str, exc: Exception, provider: str | None = None) -> str:
         account = self.get_account(access_token, provider=provider) or {}
         return _account_strategy(account.get("provider")).refresh_error_message(exc)
 
-    def refresh_accounts(self, access_tokens: list[str], provider: str | None = None) -> dict[str, Any]:
+    def _resolve_identifier_tokens_locked(self, identifiers: list[dict[str, str]] | None = None, provider_filter: str | None = None) -> list[str]:
+        if not identifiers:
+            return []
+        target_tokens: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        candidate_providers = [provider_filter] if provider_filter else [GEMINI_PROVIDER, GROK_PROVIDER]
+        for candidate_provider in candidate_providers:
+            if not candidate_provider:
+                continue
+            for token in _matched_account_tokens_by_identifiers(
+                identifiers,
+                self._accounts.get(candidate_provider, {}),
+                candidate_provider,
+            ):
+                account_key = (candidate_provider, token)
+                if account_key not in seen:
+                    target_tokens.append(token)
+                    seen.add(account_key)
+        return target_tokens
+
+    def _validate_grok_account(self, access_token: str, account: dict[str, Any]) -> dict[str, Any]:
+        strategy = cast(RemoteAccountValidator, account_strategy(GROK_PROVIDER))
+        token_label = anonymize_token(access_token)
+        try:
+            for event in _run_grok_app_chat_validation(access_token, account):
+                if isinstance(event, dict):
+                    now = self._timestamp_string()
+                    updates = {"status": "正常", "app_chat": True, "last_check_status": "valid", "last_success_at": now, **self._grok_clear_transient_metadata(now)}
+                    self.update_account(access_token, updates, provider=GROK_PROVIDER)
+                    return {"token": token_label, "status": "valid", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat validation succeeded"}
+            now = self._timestamp_string()
+            updates = {"status": "正常", "app_chat": True, "last_check_status": "valid", "last_success_at": now, **self._grok_clear_transient_metadata(now)}
+            self.update_account(access_token, updates, provider=GROK_PROVIDER)
+            return {"token": token_label, "status": "valid", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat validation completed"}
+        except Exception as exc:
+            code = _clean_string(getattr(exc, "code", ""))
+            status = strategy.remote_error_status(exc)
+            if status in {402, 429} or code == "rate_limit_exceeded":
+                now = self._timestamp_string()
+                self.update_account(access_token, {
+                    "status": "限流",
+                    "state_reason": "rate_limited",
+                    "last_check_status": "limited",
+                    "last_check_error": "rate_limit_exceeded",
+                    "last_check_http_status": status,
+                    "last_check_at": now,
+                    "cooldown_until": self._timestamp_string(900),
+                }, provider=GROK_PROVIDER)
+                return {"token": token_label, "status": "limited", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat rate limited"}
+            if status in {400, 401, 403} and strategy.is_auth_failure_payload({"code": code, "message": str(exc)}):
+                now = self._timestamp_string()
+                self.update_account(access_token, {
+                    "state_reason": "invalid_credentials",
+                    "last_check_status": "invalid",
+                    "last_check_error": "invalid_credentials",
+                    "last_check_http_status": status,
+                    "last_check_at": now,
+                    "expired_reason": "invalid_credentials",
+                    "expired_at": now,
+                }, provider=GROK_PROVIDER)
+                self.remove_invalid_token(access_token, "validate_accounts")
+                return {"token": token_label, "status": "invalid", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat credential invalid"}
+            self.update_account(access_token, self._grok_transient_metadata_for_account(account, code, status), provider=GROK_PROVIDER)
+            return {"token": token_label, "status": "unverified", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": _safe_validation_error_message(exc)}
+
+    def validate_accounts(self, access_tokens: list[str], provider: str | None = None, identifiers: list[dict[str, str]] | None = None) -> dict[str, Any]:
+        provider_filter = self._provider_filter(provider) or GROK_PROVIDER
+        if provider_filter != GROK_PROVIDER:
+            raise ValueError("unsupported provider for account validation")
+        requested_tokens = list(dict.fromkeys(token for token in access_tokens if token))
+        with self._lock:
+            requested_tokens = list(dict.fromkeys([*requested_tokens, *self._resolve_identifier_tokens_locked(identifiers, provider_filter)]))
+            if not requested_tokens:
+                requested_tokens = self._list_account_tokens_locked(provider_filter)
+            targets = [
+                (token, dict(account))
+                for token in requested_tokens
+                if (account := self._get_account_locked(token, provider_filter))
+            ]
+        results = [self._validate_grok_account(token, account) for token, account in targets]
+        counts = {"valid": 0, "invalid": 0, "limited": 0, "unverified": 0}
+        for result in results:
+            status = str(result.get("status") or "")
+            if status in counts:
+                counts[status] += 1
+        errors = [
+            {"token": result.get("token"), "error": result.get("message")}
+            for result in results
+            if result.get("status") in {"invalid", "limited", "unverified"}
+        ]
+        return {
+            "checked": len(results),
+            **counts,
+            "errors": errors,
+            "results": results,
+            "items": self.list_accounts(provider_filter),
+        }
+
+    def refresh_accounts(self, access_tokens: list[str], provider: str | None = None, identifiers: list[dict[str, str]] | None = None) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         provider_filter = self._provider_filter(provider)
         with self._lock:
+            identifier_tokens = self._resolve_identifier_tokens_locked(identifiers, provider_filter)
+            access_tokens = list(dict.fromkeys([*access_tokens, *identifier_tokens]))
             if not access_tokens:
                 access_tokens = self._list_account_tokens_locked(provider_filter)
             refresh_targets = [
@@ -789,9 +1072,10 @@ class AccountService:
                    and _account_strategy(account.get("provider")).supports_refresh(account)
             ]
         if not refresh_targets:
-            return {"refreshed": 0, "errors": [], "items": self.list_accounts(provider_filter)}
+            return {"checked": 0, "refreshed": 0, "unchanged": 0, "failed": 0, "errors": [], "items": self.list_accounts(provider_filter)}
 
         refreshed = 0
+        unchanged = 0
         errors = []
         max_workers = min(10, len(refresh_targets))
 
@@ -807,27 +1091,69 @@ class AccountService:
                 except Exception as exc:
                     errors.append({"token": anonymize_token(token), "error": self._refresh_error_message(token, exc, target_provider)})
                     continue
+                if account is UNCHANGED_REMOTE_INFO:
+                    unchanged += 1
+                    continue
                 if account is not None:
                     refreshed += 1
 
         return {
+            "checked": len(refresh_targets),
             "refreshed": refreshed,
+            "unchanged": unchanged,
+            "failed": len(errors),
             "errors": errors,
             "items": self.list_accounts(provider_filter),
         }
 
-    def build_export_items(self, access_tokens: list[str] | None = None, provider: str | None = None) -> list[dict[str, str]]:
+    def _requested_export_accounts_locked(
+        self,
+        requested_tokens: list[str],
+        provider_filter: str | None,
+        identifiers: list[dict[str, str]] | None = None,
+    ) -> list[dict]:
+        accounts: list[dict] = []
+        seen_keys: set[tuple[str, str]] = set()
+        requested_tokens = list(dict.fromkeys([*requested_tokens, *self._resolve_identifier_tokens_locked(identifiers, provider_filter)]))
+        for token in requested_tokens:
+            account = self._get_account_locked(token, provider_filter)
+            if account is None:
+                candidate_providers = [provider_filter] if provider_filter else list(self._accounts.keys())
+                for candidate_provider in candidate_providers:
+                    if not candidate_provider:
+                        continue
+                    provider_strategy = _account_strategy(candidate_provider)
+                    for candidate in self._accounts.get(candidate_provider, {}).values():
+                        if provider_strategy.delete_token_matches_account(token, candidate):
+                            account = candidate
+                            break
+                    if account is not None:
+                        break
+            if account is None:
+                continue
+            provider = normalize_provider(account.get("provider"))
+            access_token = _clean_string(account.get("access_token"))
+            account_key = (provider, access_token)
+            if access_token and account_key in seen_keys:
+                continue
+            accounts.append(dict(account))
+            if access_token:
+                seen_keys.add(account_key)
+        return accounts
+
+    def build_export_items(
+        self,
+        access_tokens: list[str] | None = None,
+        provider: str | None = None,
+        identifiers: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
         requested_tokens = [token for token in dict.fromkeys(access_tokens or []) if token]
         provider_filter = normalize_provider(provider) if provider else None
         if provider_filter not in {None, GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER}:
             return []
         with self._lock:
-            if requested_tokens:
-                accounts = [
-                    dict(account)
-                    for token in requested_tokens
-                    if (account := self._get_account_locked(token, provider_filter)) is not None
-                ]
+            if requested_tokens or identifiers:
+                accounts = self._requested_export_accounts_locked(requested_tokens, provider_filter, identifiers)
             else:
                 accounts = self._list_account_items_locked(provider_filter)
 

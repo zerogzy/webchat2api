@@ -128,22 +128,149 @@ class FailingReplaceStorage(MemoryStorage):
 
 
 class RemoteAccountServiceTests(unittest.TestCase):
-    def test_normalizes_gpt_token_strings_and_grok_account_dicts(self) -> None:
+    def test_normalizes_gpt_token_strings_and_grok_flowpilot_account_dicts(self) -> None:
         gpt_accounts = normalize_remote_account_payload({"tokens": [" gpt-token ", ""]})
+        self.assertEqual(gpt_accounts, [{"access_token": "gpt-token", "provider": GPT_PROVIDER, "remote_injected_at": gpt_accounts[0]["remote_injected_at"]}])
+
         grok_accounts = normalize_remote_account_payload(
-            {"accounts": [{"token": "grok-token", "provider": "grok", "type": "basic", "metadata": {"team": "x"}}]},
-            provider_default=GPT_PROVIDER,
+            {"accounts": [{"token": "flowpilot-sso", "provider": "grok", "type": "sso"}]},
+            provider_default=GROK_PROVIDER,
             source_id="source-1",
             source_name="Remote",
             injected_at="2026-01-01T00:00:00+00:00",
         )
 
-        self.assertEqual(gpt_accounts, [{"access_token": "gpt-token", "provider": GPT_PROVIDER, "remote_injected_at": gpt_accounts[0]["remote_injected_at"]}])
-        self.assertEqual(grok_accounts[0]["access_token"], "grok-token")
-        self.assertEqual(grok_accounts[0]["provider"], GROK_PROVIDER)
-        self.assertEqual(grok_accounts[0]["type"], "basic")
-        self.assertEqual(grok_accounts[0]["metadata"], {"team": "x"})
-        self.assertEqual(grok_accounts[0]["remote_source_id"], "source-1")
+        self.assertEqual(
+            grok_accounts,
+            [
+                {
+                    "access_token": "flowpilot-sso",
+                    "provider": GROK_PROVIDER,
+                    "_grok_sso_import": True,
+                    "remote_source_id": "source-1",
+                    "remote_source_name": "Remote",
+                    "remote_injected_at": "2026-01-01T00:00:00+00:00",
+                }
+            ],
+        )
+
+    def test_remote_inject_grok_bare_sso_adds_and_stores_bare_sso(self) -> None:
+        account_pool = AccountService(MemoryStorage())
+        service = RemoteAccountService(account_pool)
+
+        result = service.inject_payload({"tokens": ["bare-sso"]}, provider_default=GROK_PROVIDER)
+
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(account_pool.list_tokens(provider=GROK_PROVIDER), ["bare-sso"])
+        [stored] = account_pool.storage.accounts
+        self.assertEqual(stored["access_token"], "bare-sso")
+        self.assertNotIn("_grok_sso_import", stored)
+
+    def test_remote_inject_grok_sso_prefixed_token_adds_and_stores_bare_sso(self) -> None:
+        account_pool = AccountService(MemoryStorage())
+        service = RemoteAccountService(account_pool)
+
+        result = service.inject_payload({"tokens": ["sso=bare-sso"]}, provider_default=GROK_PROVIDER)
+
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(account_pool.list_tokens(provider=GROK_PROVIDER), ["bare-sso"])
+        [stored] = account_pool.storage.accounts
+        self.assertEqual(stored["access_token"], "bare-sso")
+
+    def test_remote_inject_grok_flowpilot_account_adds_and_stores_bare_sso(self) -> None:
+        account_pool = AccountService(MemoryStorage())
+        service = RemoteAccountService(account_pool)
+
+        result = service.inject_payload(
+            {"accounts": [{"token": "flowpilot-sso", "provider": "grok", "type": "sso"}]},
+            provider_default=GROK_PROVIDER,
+        )
+
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(account_pool.list_tokens(provider=GROK_PROVIDER), ["flowpilot-sso"])
+        [stored] = account_pool.storage.accounts
+        self.assertEqual(stored["access_token"], "flowpilot-sso")
+        self.assertNotIn("_grok_sso_import", stored)
+
+    def test_remote_inject_grok_flowpilot_account_accepts_access_token_and_sso_fields(self) -> None:
+        accounts = normalize_remote_account_payload(
+            {
+                "accounts": [
+                    {"access_token": "sso=access-token-sso", "provider": "grok", "type": "sso"},
+                    {"sso": "field-sso", "provider": "grok", "type": "sso"},
+                ]
+            },
+            provider_default=GROK_PROVIDER,
+            injected_at="2026-01-01T00:00:00+00:00",
+        )
+
+        self.assertEqual([account["access_token"] for account in accounts], ["access-token-sso", "field-sso"])
+        self.assertTrue(all(account["provider"] == GROK_PROVIDER for account in accounts))
+
+    def test_remote_inject_grok_duplicate_sso_forms_reports_skipped_like_gpt(self) -> None:
+        account_pool = AccountService(MemoryStorage())
+        service = RemoteAccountService(account_pool)
+
+        first = service.inject_payload({"tokens": ["bare-sso"]}, provider_default=GROK_PROVIDER)
+        second = service.inject_payload({"tokens": ["sso=bare-sso"]}, provider_default=GROK_PROVIDER)
+
+        self.assertEqual(first["total"], 1)
+        self.assertEqual(first["added"], 1)
+        self.assertEqual(first["skipped"], 0)
+        self.assertEqual(second["total"], 1)
+        self.assertEqual(second["added"], 0)
+        self.assertEqual(second["skipped"], 1)
+        self.assertEqual(account_pool.list_tokens(provider=GROK_PROVIDER), ["bare-sso"])
+
+    def test_remote_inject_grok_rejects_invalid_token_shapes_and_payloads(self) -> None:
+        service = RemoteAccountService(AccountService(MemoryStorage()))
+
+        invalid_payloads = [
+            {"tokens": ["sso-rw=unsafe-rw-token"]},
+            {"tokens": ["other=unsafe-token"]},
+            {"tokens": ["sso=unsafe-token; sso-rw=unsafe-rw-token"]},
+            {"accounts": [{"access_token": "sso-rw=unsafe-rw-token", "provider": "grok"}]},
+            {"accounts": [{"access_token": "sso=unsafe-token; sso-rw=unsafe-rw-token", "provider": "grok"}]},
+            {"accounts": [{"token": "other=unsafe-token", "provider": "grok"}]},
+            {"accounts": [{"cookies": {"sso": "bare-sso"}, "provider": "grok"}]},
+            {"payload": {"cookies": {"sso": "bare-sso"}}},
+        ]
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    service.inject_payload(payload, provider_default=GROK_PROVIDER)
+
+    def test_remote_inject_grok_empty_tokens_normalizes_to_zero_total(self) -> None:
+        account_pool = AccountService(MemoryStorage())
+        service = RemoteAccountService(account_pool)
+
+        result = service.inject_payload({"tokens": ["", "   "]}, provider_default=GROK_PROVIDER)
+
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(account_pool.list_accounts(provider=GROK_PROVIDER), [])
+
+    def test_remote_inject_gpt_token_behavior_remains_unchanged(self) -> None:
+        account_pool = AccountService(MemoryStorage())
+        service = RemoteAccountService(account_pool)
+
+        first = service.inject_payload({"tokens": ["gpt-token"]}, provider_default=GPT_PROVIDER)
+        second = service.inject_payload({"tokens": ["gpt-token"]}, provider_default=GPT_PROVIDER)
+
+        self.assertEqual(first["total"], 1)
+        self.assertEqual(first["added"], 1)
+        self.assertEqual(first["skipped"], 0)
+        self.assertEqual(second["total"], 1)
+        self.assertEqual(second["added"], 0)
+        self.assertEqual(second["skipped"], 1)
+        self.assertEqual(account_pool.list_tokens(provider=GPT_PROVIDER), ["gpt-token"])
 
     def test_merge_preserves_existing_mutable_fields_when_omitted(self) -> None:
         account_pool = AccountService(MemoryStorage([

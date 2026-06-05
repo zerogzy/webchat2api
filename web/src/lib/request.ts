@@ -8,7 +8,7 @@ type RequestConfig = AxiosRequestConfig & {
 };
 
 type ErrorPayload = {
-    detail?: string | { error?: string | { message?: string } };
+    detail?: string | { error?: string | { message?: string }; code?: string };
     error?: string | { message?: string };
     message?: string;
 };
@@ -26,6 +26,15 @@ function errorMessageFromValue(value: unknown): string {
         return item.message;
     }
     return errorMessageFromValue(item.error);
+}
+
+function authSessionFailureMessage(payload: ErrorPayload | undefined): string {
+    const message =
+        errorMessageFromValue(payload?.detail) ||
+        errorMessageFromValue(payload?.error) ||
+        payload?.message ||
+        "";
+    return message.includes("密钥无效") || message.includes("已失效") || message.includes("重新登录") ? message : "";
 }
 
 export const request = axios.create({
@@ -49,8 +58,9 @@ request.interceptors.response.use(
     (response) => response,
     async (error: AxiosError<ErrorPayload>) => {
         const status = error.response?.status;
+        const payload = error.response?.data;
         const shouldRedirect = (error.config as RequestConfig | undefined)?.redirectOnUnauthorized !== false;
-        if (status === 401 && shouldRedirect && typeof window !== "undefined") {
+        if (status === 401 && shouldRedirect && authSessionFailureMessage(payload) && typeof window !== "undefined") {
             // Avoid redirect loop — only redirect if not already on /login
             if (!window.location.pathname.startsWith("/login")) {
                 await clearStoredAuthSession();
@@ -61,7 +71,6 @@ request.interceptors.response.use(
             }
         }
 
-        const payload = error.response?.data;
         const message =
             errorMessageFromValue(payload?.detail) ||
             errorMessageFromValue(payload?.error) ||

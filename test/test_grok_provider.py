@@ -1743,7 +1743,7 @@ class GrokProviderTests(unittest.TestCase):
 
     def test_app_chat_error_classification_is_specific(self) -> None:
         cases = {
-            401: (401, "authentication failed"),
+            401: (401, "upstream error"),
             402: (429, "rate limited"),
             403: (403, "forbidden"),
             429: (429, "rate limited"),
@@ -1921,7 +1921,9 @@ class GrokProviderTests(unittest.TestCase):
             with self.assertRaises(grok.GrokConsoleError) as ctx:
                 client.validate_rate_limits()
 
-        self.assertEqual(str(ctx.exception), "Grok app-chat rate-limit validation failed")
+        self.assertEqual(str(ctx.exception), "Grok app-chat rate-limit check unavailable")
+        self.assertEqual(ctx.exception.code, "rate_limit_network_error")
+        self.assertTrue(ctx.exception.is_check_unavailable)
         self.assertNotIn("secret-token", str(ctx.exception))
 
     def test_grok_app_chat_validate_rate_limits_sanitizes_invalid_json(self) -> None:
@@ -1949,6 +1951,8 @@ class GrokProviderTests(unittest.TestCase):
                 client.validate_rate_limits()
 
         self.assertEqual(str(ctx.exception), "Grok app-chat rate-limit validation returned an invalid response")
+        self.assertEqual(ctx.exception.code, "invalid_rate_limit_response")
+        self.assertTrue(ctx.exception.is_check_unavailable)
         self.assertNotIn("secret-token", str(ctx.exception))
 
     def test_grok_app_chat_client_uses_account_impersonate_without_leaking_to_console_headers(self) -> None:
@@ -2424,7 +2428,6 @@ class GrokProviderTests(unittest.TestCase):
                     self.assertEqual(error.status_code, expected_status)
 
         self.assertEqual(account_service.update_account.mock_calls, [
-            mock.call("token-value", {"status": "异常"}),
             mock.call("token-value", {"status": "限流"}),
             mock.call("token-value", {"status": "限流"}),
         ])

@@ -6,8 +6,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from services.models import GPT_PROVIDER, normalize_provider
-from services.providers.base import ModelSpec
+from services.providers.base import GPT_PROVIDER, ModelSpec
+from services.providers.registry import normalize_provider
 
 EXPORT_TIMEZONE = timezone(timedelta(hours=8))
 UNAVAILABLE_STATUSES = {"禁用", "限流", "异常", "disabled", "limited", "abnormal"}

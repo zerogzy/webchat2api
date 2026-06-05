@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.models import GPT_PROVIDER, GPT_IMAGE_MODEL_IDS, gpt_fallback_model_metadata, gpt_image_model_metadata, grok_model_metadata, gemini_model_metadata
+from services.providers.base import GPT_PROVIDER
+from services.providers.gemini.models import gemini_model_metadata
+from services.providers.gpt.models import GPT_IMAGE_MODEL_IDS, gpt_fallback_model_metadata, gpt_image_model_metadata
+from services.providers.grok.models import grok_model_metadata
 
 
 def _append_model(data: list[dict[str, Any]], seen: set[str], item: dict[str, Any]) -> None:
