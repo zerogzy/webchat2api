@@ -62,7 +62,6 @@ _APP_CHAT_AUTH_ERROR_MARKERS = (
     "bad-credentials",
     "bad_credentials",
     "bad credentials",
-    "unauthenticated",
     "failed to look up session id",
     "blocked-user",
     "blocked_user",
@@ -75,8 +74,6 @@ _APP_CHAT_AUTH_ERROR_MARKERS = (
     "token expired",
     "token_expired",
     "token-expired",
-    "authentication_failed",
-    "authentication failed",
 )
 _APP_CHAT_RATE_LIMIT_MARKERS = (
     "rate_limit_exceeded",
@@ -122,7 +119,7 @@ _APP_CHAT_MAX_ACCOUNT_ATTEMPTS = 3
 _APP_CHAT_PUBLIC_ERROR_PREFIX = "Grok app-chat upstream error"
 _APP_CHAT_CLEARANCE_LOCK = threading.Lock()
 
-GROK_RATE_LIMIT_MODEL_NAME = "grok-4-1-thinking-1129"
+GROK_RATE_LIMIT_MODEL_NAME = "auto"
 GROK_SUPER_WINDOW_THRESHOLD_SECONDS = 14400
 
 
@@ -151,14 +148,11 @@ def _rate_limit_model_name(account: dict[str, Any] | None = None) -> str:
             value = str(account.get(key) or "").strip()
             if value:
                 return value
-    for spec in GROK_MODEL_SPECS:
-        if spec.mode_id and (spec.upstream_model or spec.id):
-            return spec.upstream_model or spec.id
     return GROK_RATE_LIMIT_MODEL_NAME
 
 
 def build_grok_rate_limits_payload(account: dict[str, Any] | None = None) -> dict[str, str]:
-    return {"requestKind": "DEFAULT", "modelName": _rate_limit_model_name(account)}
+    return {"modelName": _rate_limit_model_name(account)}
 
 
 def extract_grok_rate_limit_value(payload: dict[str, Any], keys: tuple[str, ...]) -> int | None:
@@ -172,7 +166,11 @@ def extract_grok_rate_limit_value(payload: dict[str, Any], keys: tuple[str, ...]
 
 
 def extract_grok_rate_limit_remaining(payload: dict[str, Any]) -> int | None:
-    return extract_grok_rate_limit_value(payload, ("remainingTokens", "remaining_tokens", "remainingQueries", "remaining_queries"))
+    return extract_grok_rate_limit_value(payload, ("remainingQueries", "remaining_queries", "remaining_tokens", "remainingTokens"))
+
+
+def extract_grok_rate_limit_total(payload: dict[str, Any]) -> int | None:
+    return extract_grok_rate_limit_value(payload, ("totalQueries", "total_queries", "totalTokens", "total_tokens"))
 
 
 def extract_grok_rate_limit_window_seconds(payload: dict[str, Any]) -> int | None:
@@ -185,6 +183,9 @@ def grok_rate_limit_account_hints(payload: dict[str, Any]) -> dict[str, Any]:
     if remaining is not None:
         updates["quota"] = max(0, remaining)
         updates["status"] = "正常" if remaining > 0 else "限流"
+    total = extract_grok_rate_limit_total(payload)
+    if total is not None:
+        updates["quota_total"] = max(0, total)
     window_seconds = extract_grok_rate_limit_window_seconds(payload)
     if window_seconds is not None:
         updates["rate_limit_window_seconds"] = window_seconds
@@ -1645,7 +1646,7 @@ def classify_app_chat_upstream_error(upstream_status: int, access_token: str | N
     if is_transient:
         return GrokConsoleError(f"Grok app-chat transient upstream error (HTTP {status})", 502, status, "upstream_transient")
     if status == 403:
-        return GrokConsoleError("Grok app-chat forbidden (HTTP 403)", 403, status)
+        return GrokConsoleError("Grok app-chat forbidden (HTTP 403)", 502, status, "rate_limit_check_unavailable")
     return GrokConsoleError(f"{_APP_CHAT_PUBLIC_ERROR_PREFIX} (HTTP {status})", _openai_status(status), status)
 
 
@@ -1914,8 +1915,12 @@ class GrokAppChatClient:
             )
         try:
             from services.account_service import account_service
+            from services.providers.grok.accounts import normalize_app_chat_rate_limit_payload
 
             updates = grok_rate_limit_account_hints(data)
+            quota_payload = normalize_app_chat_rate_limit_payload(data)
+            if quota_payload:
+                updates["quota_console"] = quota_payload
             if updates:
                 account_service.update_account(self.access_token, updates)
         except Exception:
@@ -2426,6 +2431,7 @@ def console_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: lis
     if not completion.content and not completion.reasoning_content:
         account_service.mark_grok_console_used(access_token, success=False)
         raise HTTPException(status_code=502, detail={"error": "Grok upstream response did not contain text"})
+    account_service.mark_grok_console_used(access_token, success=True)
     return completion
 
 
@@ -2443,6 +2449,7 @@ def console_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messag
     except GrokConsoleError as exc:
         account_service.mark_grok_console_used(access_token, success=False)
         raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
+    account_service.mark_grok_console_used(access_token, success=True)
 
 
 def chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> str:

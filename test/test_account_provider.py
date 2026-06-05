@@ -4,6 +4,7 @@ import sys
 import types
 import unittest
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 from typing import Any
 
@@ -564,6 +565,8 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(account["access_token"], "grok-token")
         self.assertEqual(account["cf_cookies"], "")
         self.assertIsNone(account["user_agent"])
+        self.assertIsNone(account["last_check_status"])
+        self.assertIsNone(account["expired_at"])
         self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
 
     def test_grok_console_quota_normalizes_defaults_and_persists(self) -> None:
@@ -645,8 +648,78 @@ class AccountProviderTests(unittest.TestCase):
         grok_account = service.get_account("grok-token")
         gpt_account = service.get_account("gpt-token")
         self.assertEqual(grok_account["quota_console"]["remaining"], 30)
+        self.assertEqual(grok_account["status"], "正常")
+        self.assertTrue(grok_account["app_chat"])
+        self.assertEqual(grok_account["last_check_status"], "valid_by_call")
+        self.assertIsNotNone(grok_account["last_success_at"])
         self.assertNotIn("quota_console", gpt_account)
         self.assertEqual(gpt_account["quota"], 0)
+
+    def test_grok_sanitization_preserves_lifecycle_metadata(self) -> None:
+        sanitized = provider_registry.account_strategy(GROK_PROVIDER).sanitize_account({
+            "access_token": "sso=secret",
+            "sso": "secret",
+            "cf_clearance": "cf-secret",
+            "state_reason": "cloudflare_or_forbidden",
+            "last_check_status": "unverified",
+            "last_check_http_status": 403,
+        })
+        self.assertNotIn("access_token", sanitized)
+        self.assertNotIn("sso", sanitized)
+        self.assertEqual(sanitized["state_reason"], "cloudflare_or_forbidden")
+        self.assertEqual(sanitized["last_check_status"], "unverified")
+        self.assertEqual(sanitized["last_check_http_status"], 403)
+
+    def test_mark_text_used_keeps_disabled_grok_disabled(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "禁用"},
+        ])
+
+        service.mark_text_used("grok-token")
+
+        account = service.get_account("grok-token", provider=GROK_PROVIDER)
+        self.assertEqual(account["status"], "禁用")
+        self.assertTrue(account["app_chat"])
+        self.assertEqual(account["last_check_status"], "valid_by_call")
+
+    def test_grok_console_usage_updates_lifecycle_health(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {
+                "access_token": "sso=grok-token",
+                "provider": "grok",
+                "status": "正常",
+                "state_reason": "cloudflare_or_forbidden",
+                "last_check_status": "unverified",
+                "last_check_error": "rate_limit_check_unavailable",
+                "refresh_backoff_until": "2099-01-01 00:00:00",
+            },
+        ])
+
+        service.mark_grok_console_used("grok-token", success=True)
+
+        account = service.get_account("grok-token", provider=GROK_PROVIDER)
+        self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["success"], 1)
+        self.assertEqual(account["last_check_status"], "valid_by_call")
+        self.assertEqual(account["last_check_error"], "")
+        self.assertEqual(account["state_reason"], "")
+        self.assertIsNone(account["refresh_backoff_until"])
+        self.assertIsNotNone(account["last_success_at"])
+
+    def test_grok_console_usage_keeps_disabled_grok_disabled(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"access_token": "sso=grok-token", "provider": "grok", "status": "禁用"},
+        ])
+
+        service.mark_grok_console_used("grok-token", success=True)
+
+        account = service.get_account("grok-token", provider=GROK_PROVIDER)
+        self.assertEqual(account["status"], "禁用")
+        self.assertEqual(account["last_check_status"], "valid_by_call")
+        self.assertIsNotNone(account["last_success_at"])
 
     def test_selects_grok_app_chat_token_by_tier_semantics(self) -> None:
         basic_service = AccountService(MemoryStorage())
@@ -815,7 +888,7 @@ class AccountProviderTests(unittest.TestCase):
         previous_auto_remove = account_service_module.config.data.get("auto_remove_invalid_accounts")
         account_service_module.config.data["auto_remove_invalid_accounts"] = False
         try:
-            with patched_grok_validation(side_effect=TestGrokConsoleError("auth failed with sso=secret-cookie", 401, 401, "authentication_failed")):
+            with patched_grok_validation(side_effect=TestGrokConsoleError("failed to look up session id for sso=secret-cookie", 401, 401, None)):
                 refresh_result = service.refresh_accounts(["grok-token"])
         finally:
             if previous_auto_remove is None:
@@ -871,10 +944,107 @@ class AccountProviderTests(unittest.TestCase):
             refresh_result = service.refresh_accounts(["grok-token"])
 
         self.assertEqual(refresh_result["refreshed"], 0)
+        self.assertEqual(refresh_result["checked"], 1)
+        self.assertEqual(refresh_result["unchanged"], 1)
+        self.assertEqual(refresh_result["failed"], 0)
         self.assertEqual(refresh_result["errors"], [])
         [account] = service.list_accounts()
         self.assertEqual(account["status"], "正常")
         self.assertEqual(account["quota"], 6)
+        self.assertEqual(account["last_check_status"], "unverified")
+        self.assertEqual(account["state_reason"], "cloudflare_or_forbidden")
+        self.assertEqual(account["last_check_error"], "rate_limit_check_unavailable")
+        self.assertEqual(account["last_check_http_status"], 403)
+        self.assertIsNotNone(account["last_refresh_attempt_at"])
+        self.assertIsNotNone(account["refresh_backoff_until"])
+
+    def test_refresh_accounts_preserves_recent_grok_success_on_probe_403(self) -> None:
+        now = datetime(2026, 6, 5, 3, 0, 0, tzinfo=timezone.utc)
+        service = AccountService(MemoryStorage(), now=lambda: now.timestamp())
+        service.add_account_items([
+            {
+                "access_token": "sso=grok-token",
+                "provider": "grok",
+                "status": "正常",
+                "quota": 6,
+                "last_check_status": "valid_by_call",
+                "last_success_at": (now - timedelta(minutes=10)).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        ])
+
+        with patched_grok_validation(side_effect=TestGrokConsoleError("unknown upstream 403 with sso=secret-cookie", 502, 403, "rate_limit_check_unavailable")):
+            refresh_result = service.refresh_accounts(["grok-token"])
+
+        self.assertEqual(refresh_result["checked"], 1)
+        self.assertEqual(refresh_result["unchanged"], 1)
+        self.assertEqual(refresh_result["errors"], [])
+        [account] = service.list_accounts()
+        self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["quota"], 6)
+        self.assertEqual(account["last_check_status"], "valid_by_call")
+        self.assertEqual(account["state_reason"], "")
+        self.assertEqual(account["last_check_error"], "")
+        self.assertIsNone(account["last_check_http_status"])
+        self.assertEqual(account["last_check_at"], now.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S"))
+        self.assertIsNotNone(account["last_refresh_attempt_at"])
+        self.assertIsNotNone(account["refresh_backoff_until"])
+
+    def test_refresh_accounts_recovers_recent_success_after_prior_unverified_probe(self) -> None:
+        now = datetime(2026, 6, 5, 3, 0, 0, tzinfo=timezone.utc)
+        service = AccountService(MemoryStorage(), now=lambda: now.timestamp())
+        service.add_account_items([
+            {
+                "access_token": "sso=grok-token",
+                "provider": "grok",
+                "status": "正常",
+                "quota": 6,
+                "state_reason": "cloudflare_or_forbidden",
+                "last_check_status": "unverified",
+                "last_check_error": "cloudflare_challenge",
+                "last_check_http_status": 403,
+                "last_success_at": (now - timedelta(minutes=10)).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        ])
+
+        with patched_grok_validation(side_effect=TestGrokConsoleError("unknown upstream 403 with sso=secret-cookie", 502, 403, "rate_limit_check_unavailable")):
+            refresh_result = service.refresh_accounts(["grok-token"])
+
+        self.assertEqual(refresh_result["checked"], 1)
+        self.assertEqual(refresh_result["unchanged"], 1)
+        [account] = service.list_accounts()
+        self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["last_check_status"], "valid_by_call")
+        self.assertEqual(account["state_reason"], "")
+        self.assertEqual(account["last_check_error"], "")
+        self.assertIsNone(account["last_check_http_status"])
+        self.assertEqual(account["last_check_at"], now.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S"))
+        self.assertIsNotNone(account["refresh_backoff_until"])
+
+    def test_refresh_accounts_allows_unverified_when_grok_success_is_stale(self) -> None:
+        now = datetime(2026, 6, 5, 3, 0, 0, tzinfo=timezone.utc)
+        service = AccountService(MemoryStorage(), now=lambda: now.timestamp())
+        service.add_account_items([
+            {
+                "access_token": "sso=grok-token",
+                "provider": "grok",
+                "status": "正常",
+                "quota": 6,
+                "last_check_status": "valid_by_call",
+                "last_success_at": (now - timedelta(days=2)).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        ])
+
+        with patched_grok_validation(side_effect=TestGrokConsoleError("unknown upstream 403 with sso=secret-cookie", 502, 403, "rate_limit_check_unavailable")):
+            refresh_result = service.refresh_accounts(["grok-token"])
+
+        self.assertEqual(refresh_result["checked"], 1)
+        self.assertEqual(refresh_result["unchanged"], 1)
+        [account] = service.list_accounts()
+        self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["last_check_status"], "unverified")
+        self.assertEqual(account["state_reason"], "cloudflare_or_forbidden")
+        self.assertEqual(account["last_check_error"], "rate_limit_check_unavailable")
+        self.assertEqual(account["last_check_http_status"], 403)
 
     def test_refresh_accounts_keeps_grok_unconfirmed_bare_upstream_failures_unchanged(self) -> None:
         service = AccountService(MemoryStorage())
@@ -892,7 +1062,10 @@ class AccountProviderTests(unittest.TestCase):
             refresh_result = service.refresh_accounts([], provider=GROK_PROVIDER)
 
         self.assertEqual(validate.call_count, 2)
+        self.assertEqual(refresh_result["checked"], 2)
         self.assertEqual(refresh_result["refreshed"], 0)
+        self.assertEqual(refresh_result["unchanged"], 2)
+        self.assertEqual(refresh_result["failed"], 0)
         self.assertEqual(refresh_result["errors"], [])
         accounts = service.list_accounts(provider=GROK_PROVIDER)
         self.assertEqual([account["status"] for account in accounts], ["正常", "限流"])
@@ -950,9 +1123,16 @@ class AccountProviderTests(unittest.TestCase):
 
         validate.assert_called_once()
         self.assertEqual(refresh_result["refreshed"], 1)
+        self.assertEqual(refresh_result["checked"], 1)
+        self.assertEqual(refresh_result["unchanged"], 0)
+        self.assertEqual(refresh_result["failed"], 0)
         self.assertEqual(refresh_result["errors"], [])
         [account] = service.list_accounts()
         self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["last_check_status"], "valid")
+        self.assertEqual(account["last_check_error"], "")
+        self.assertIsNone(account["refresh_backoff_until"])
+        self.assertEqual(account["last_refresh_attempt_at"], account["last_refresh_success_at"])
         self.assertEqual(service.get_text_access_token(provider=GROK_PROVIDER), "grok-token")
 
     def test_validate_accounts_by_grok_row_id_uses_app_chat(self) -> None:
@@ -978,6 +1158,9 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(updated["status"], "正常")
         self.assertTrue(updated["app_chat"])
         self.assertEqual(updated["quota"], 5)
+        self.assertEqual(updated["last_check_status"], "valid")
+        self.assertIsNotNone(updated["last_success_at"])
+        self.assertEqual(updated["last_check_error"], "")
 
     def test_validate_accounts_marks_invalid_grok_abnormal(self) -> None:
         service = AccountService(MemoryStorage())
@@ -987,7 +1170,7 @@ class AccountProviderTests(unittest.TestCase):
         previous_auto_remove = account_service_module.config.data.get("auto_remove_invalid_accounts")
         account_service_module.config.data["auto_remove_invalid_accounts"] = False
         try:
-            with patched_grok_app_chat_validation(side_effect=TestGrokConsoleError("auth failed with sso=secret-cookie", 401, 401, "authentication_failed")):
+            with patched_grok_app_chat_validation(side_effect=TestGrokConsoleError("failed to look up session id for sso=secret-cookie", 401, 401, None)):
                 result = service.validate_accounts(["grok-token"], provider=GROK_PROVIDER)
         finally:
             if previous_auto_remove is None:
@@ -1017,6 +1200,11 @@ class AccountProviderTests(unittest.TestCase):
         [account] = service.list_accounts(provider=GROK_PROVIDER)
         self.assertEqual(account["status"], "限流")
         self.assertEqual(account["quota"], 5)
+        self.assertEqual(account["state_reason"], "rate_limited")
+        self.assertEqual(account["last_check_status"], "limited")
+        self.assertEqual(account["last_check_error"], "rate_limit_exceeded")
+        self.assertEqual(account["last_check_http_status"], 429)
+        self.assertIsNotNone(account["cooldown_until"])
 
     def test_validate_accounts_keeps_transient_grok_unverified(self) -> None:
         service = AccountService(MemoryStorage())
@@ -1033,6 +1221,41 @@ class AccountProviderTests(unittest.TestCase):
         [account] = service.list_accounts(provider=GROK_PROVIDER)
         self.assertEqual(account["status"], "正常")
         self.assertEqual(account["quota"], 5)
+        self.assertEqual(account["state_reason"], "cloudflare_or_forbidden")
+        self.assertEqual(account["last_check_status"], "unverified")
+        self.assertEqual(account["last_check_error"], "cloudflare_challenge")
+        self.assertEqual(account["last_check_http_status"], 403)
+        self.assertIsNotNone(account["refresh_backoff_until"])
+
+    def test_validate_accounts_preserves_recent_grok_success_on_probe_403(self) -> None:
+        now = datetime(2026, 6, 5, 3, 0, 0, tzinfo=timezone.utc)
+        service = AccountService(MemoryStorage(), now=lambda: now.timestamp())
+        service.add_account_items([
+            {
+                "access_token": "sso=grok-token",
+                "provider": "grok",
+                "status": "正常",
+                "quota": 5,
+                "last_check_status": "valid_by_call",
+                "last_success_at": (now - timedelta(minutes=10)).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        ])
+
+        with patched_grok_app_chat_validation(side_effect=TestGrokConsoleError("cloudflare blocked sso=secret-cookie", 502, 403, "cloudflare_challenge")):
+            result = service.validate_accounts(["grok-token"], provider=GROK_PROVIDER)
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["unverified"], 1)
+        self.assertNotIn("secret-cookie", str(result))
+        [account] = service.list_accounts(provider=GROK_PROVIDER)
+        self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["quota"], 5)
+        self.assertEqual(account["last_check_status"], "valid_by_call")
+        self.assertEqual(account["state_reason"], "")
+        self.assertEqual(account["last_check_error"], "")
+        self.assertIsNone(account["last_check_http_status"])
+        self.assertEqual(account["last_check_at"], now.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S"))
+        self.assertIsNotNone(account["refresh_backoff_until"])
 
     def test_validate_accounts_rejects_non_grok_provider(self) -> None:
         service = AccountService(MemoryStorage())

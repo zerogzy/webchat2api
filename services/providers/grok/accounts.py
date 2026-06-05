@@ -124,6 +124,20 @@ CONSOLE_QUOTA_WINDOW_SECONDS = 900
 APP_CHAT_BASIC_WINDOW_SECONDS = 86400
 APP_CHAT_SUPER_WINDOW_SECONDS = 7200
 EXPORT_FILENAME = "webchat2api_grok.txt"
+LIFECYCLE_FIELDS = (
+    "state_reason",
+    "last_check_status",
+    "last_check_error",
+    "last_check_http_status",
+    "last_check_at",
+    "last_success_at",
+    "last_refresh_attempt_at",
+    "last_refresh_success_at",
+    "refresh_backoff_until",
+    "cooldown_until",
+    "expired_reason",
+    "expired_at",
+)
 
 
 def clean_string(value: Any) -> str:
@@ -403,6 +417,8 @@ def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
     account["sec_ch_ua"] = clean_string(account.get("sec_ch_ua") or account.get("sec-ch-ua")) or None
     account["sec_ch_ua_mobile"] = clean_string(account.get("sec_ch_ua_mobile") or account.get("sec-ch-ua-mobile")) or None
     account["sec_ch_ua_platform"] = clean_string(account.get("sec_ch_ua_platform") or account.get("sec-ch-ua-platform")) or None
+    for field in LIFECYCLE_FIELDS:
+        account[field] = account.get(field) if field in account else None
     return account
 
 
@@ -505,7 +521,6 @@ GROK_CONFIRMED_INVALID_MARKERS = (
     "bad-credentials",
     "bad_credentials",
     "bad credentials",
-    "unauthenticated",
     "failed to look up session id",
     "blocked-user",
     "blocked_user",
@@ -518,8 +533,6 @@ GROK_CONFIRMED_INVALID_MARKERS = (
     "token expired",
     "token_expired",
     "token-expired",
-    "authentication_failed",
-    "authentication failed",
 )
 
 

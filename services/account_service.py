@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Condition, Lock
 from typing import Any, Callable, cast
 
@@ -146,6 +146,7 @@ class _UnchangedRemoteInfo(dict[str, Any]):
 
 
 UNCHANGED_REMOTE_INFO = _UnchangedRemoteInfo()
+GROK_RECENT_SUCCESS_TTL_SECONDS = 86400
 
 
 class AccountService:
@@ -228,6 +229,68 @@ class AccountService:
                 current_time=self._now(),
             )
         )
+
+    def _timestamp_string(self, offset_seconds: int = 0) -> str:
+        value = datetime.fromtimestamp(self._now(), timezone.utc).replace(tzinfo=None) + timedelta(seconds=offset_seconds)
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _grok_transient_state_reason(code: str, http_status: int | None) -> str:
+        if http_status == 403 or code in {"cloudflare_challenge", "rate_limit_check_unavailable"}:
+            return "cloudflare_or_forbidden"
+        return "temporary_failure"
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime | None:
+        text = _clean_string(value)
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+    def _has_recent_grok_success(self, account: dict[str, Any], now: datetime | None = None) -> bool:
+        if _clean_string(account.get("status")) in {"禁用", "异常", "限流"}:
+            return False
+        last_success_at = self._parse_timestamp(account.get("last_success_at"))
+        if last_success_at is None:
+            return False
+        current = now or datetime.fromtimestamp(self._now(), timezone.utc).replace(tzinfo=None)
+        age = current - last_success_at
+        return timedelta(0) <= age <= timedelta(seconds=GROK_RECENT_SUCCESS_TTL_SECONDS)
+
+    def _grok_clear_transient_metadata(self, now: str) -> dict[str, Any]:
+        return {
+            "state_reason": "",
+            "last_check_error": "",
+            "last_check_http_status": None,
+            "last_check_at": now,
+            "refresh_backoff_until": None,
+        }
+
+    def _grok_transient_metadata(self, code: str, http_status: int | None, *, include_refresh_attempt: bool = False) -> dict[str, Any]:
+        now = self._timestamp_string()
+        updates: dict[str, Any] = {
+            "state_reason": self._grok_transient_state_reason(code, http_status),
+            "last_check_status": "unverified",
+            "last_check_error": code or "check_unavailable",
+            "last_check_http_status": http_status,
+            "last_check_at": now,
+            "refresh_backoff_until": self._timestamp_string(300),
+        }
+        if include_refresh_attempt:
+            updates["last_refresh_attempt_at"] = now
+        return updates
+
+    def _grok_transient_metadata_for_account(self, account: dict[str, Any], code: str, http_status: int | None, *, include_refresh_attempt: bool = False) -> dict[str, Any]:
+        updates = self._grok_transient_metadata(code, http_status, include_refresh_attempt=include_refresh_attempt)
+        if self._has_recent_grok_success(account):
+            updates["state_reason"] = ""
+            updates["last_check_status"] = "valid_by_call"
+            updates["last_check_error"] = ""
+            updates["last_check_http_status"] = None
+        return updates
 
     def _pop_account_locked(self, access_token: str, provider: str | None = None) -> dict | None:
         if provider_filter := self._provider_filter(provider):
@@ -481,6 +544,11 @@ class AccountService:
                 return
             next_item = dict(current)
             next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if provider == GROK_PROVIDER:
+                now = self._timestamp_string()
+                next_item.update({"app_chat": True, "last_check_status": "valid_by_call", "last_success_at": now, **self._grok_clear_transient_metadata(now)})
+                if next_item.get("status") != "禁用":
+                    next_item["status"] = "正常"
             account = self._normalize_account(next_item)
             if account is None:
                 return
@@ -497,7 +565,11 @@ class AccountService:
             next_item = dict(current)
             next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if success:
+                now = self._timestamp_string()
                 next_item["success"] = int(next_item.get("success") or 0) + 1
+                next_item.update({"last_check_status": "valid_by_call", "last_success_at": now, **self._grok_clear_transient_metadata(now)})
+                if next_item.get("status") != "禁用":
+                    next_item["status"] = "正常"
             else:
                 next_item["fail"] = int(next_item.get("fail") or 0) + 1
             account = self._normalize_account(next_item)
@@ -841,14 +913,17 @@ class AccountService:
         provider_filter = provider or GROK_PROVIDER
         account = self.get_account(access_token, provider=provider_filter) or {}
         strategy = cast(RemoteAccountValidator, account_strategy(GROK_PROVIDER))
+        refresh_attempt_at = self._timestamp_string()
+        self.update_account(access_token, {"last_refresh_attempt_at": refresh_attempt_at}, provider=provider_filter)
 
         try:
             payload = strategy.validate_remote_info(access_token, account)
         except Exception as exc:
             code = _clean_string(getattr(exc, "code", ""))
-            if code in {"cloudflare_challenge", "invalid_rate_limit_response", "rate_limit_check_unavailable", "rate_limit_network_error", "upstream_transient"} or bool(getattr(exc, "is_check_unavailable", False)):
-                return UNCHANGED_REMOTE_INFO
             status = strategy.remote_error_status(exc)
+            if code in {"cloudflare_challenge", "invalid_rate_limit_response", "rate_limit_check_unavailable", "rate_limit_network_error", "upstream_transient"} or bool(getattr(exc, "is_check_unavailable", False)):
+                self.update_account(access_token, self._grok_transient_metadata_for_account(account, code, status, include_refresh_attempt=True), provider=provider_filter)
+                return UNCHANGED_REMOTE_INFO
             if status in {402, 429}:
                 decision = self._state_decision(account, status_code=status)
                 self.update_account(access_token, decision.writeback, provider=provider_filter)
@@ -856,20 +931,28 @@ class AccountService:
             if status in {400, 401, 403} and strategy.is_auth_failure_payload({"code": code, "message": str(exc)}):
                 self.remove_invalid_token(access_token, event)
                 raise
+            self.update_account(access_token, self._grok_transient_metadata_for_account(account, code, status, include_refresh_attempt=True), provider=provider_filter)
             return UNCHANGED_REMOTE_INFO
         decision = self._state_decision(account, payload=payload)
         if decision.auth_failed:
             self.remove_invalid_token(access_token, event)
             raise RuntimeError("Grok app-chat authentication failed")
         hints = grok_rate_limit_account_hints(payload) if isinstance(payload, dict) else {}
-        usable_hint_keys = {"quota", "rate_limit_window_seconds", "tier"}
+        usable_hint_keys = {"quota", "quota_total", "rate_limit_window_seconds", "tier"}
+        now = self._timestamp_string()
         if not (usable_hint_keys & hints.keys()):
+            valid_updates = self._grok_clear_transient_metadata(now)
+            valid_updates["last_check_status"] = "valid"
+            self.update_account(access_token, valid_updates, provider=provider_filter)
             return UNCHANGED_REMOTE_INFO
         updates = dict(decision.writeback)
         quota_payload = normalize_app_chat_rate_limit_payload(payload)
         if quota_payload:
             updates["quota_console"] = quota_payload
         updates.update(hints)
+        updates.update(self._grok_clear_transient_metadata(now))
+        updates["last_check_status"] = "valid"
+        updates["last_refresh_success_at"] = now
         return self.update_account(access_token, updates, provider=provider_filter)
 
     def _refresh_error_message(self, access_token: str, exc: Exception, provider: str | None = None) -> str:
@@ -902,19 +985,43 @@ class AccountService:
         try:
             for event in _run_grok_app_chat_validation(access_token, account):
                 if isinstance(event, dict):
-                    self.update_account(access_token, {"status": "正常", "app_chat": True}, provider=GROK_PROVIDER)
+                    now = self._timestamp_string()
+                    updates = {"status": "正常", "app_chat": True, "last_check_status": "valid", "last_success_at": now, **self._grok_clear_transient_metadata(now)}
+                    self.update_account(access_token, updates, provider=GROK_PROVIDER)
                     return {"token": token_label, "status": "valid", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat validation succeeded"}
-            self.update_account(access_token, {"status": "正常", "app_chat": True}, provider=GROK_PROVIDER)
+            now = self._timestamp_string()
+            updates = {"status": "正常", "app_chat": True, "last_check_status": "valid", "last_success_at": now, **self._grok_clear_transient_metadata(now)}
+            self.update_account(access_token, updates, provider=GROK_PROVIDER)
             return {"token": token_label, "status": "valid", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat validation completed"}
         except Exception as exc:
             code = _clean_string(getattr(exc, "code", ""))
             status = strategy.remote_error_status(exc)
             if status in {402, 429} or code == "rate_limit_exceeded":
-                self.update_account(access_token, {"status": "限流"}, provider=GROK_PROVIDER)
+                now = self._timestamp_string()
+                self.update_account(access_token, {
+                    "status": "限流",
+                    "state_reason": "rate_limited",
+                    "last_check_status": "limited",
+                    "last_check_error": "rate_limit_exceeded",
+                    "last_check_http_status": status,
+                    "last_check_at": now,
+                    "cooldown_until": self._timestamp_string(900),
+                }, provider=GROK_PROVIDER)
                 return {"token": token_label, "status": "limited", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat rate limited"}
             if status in {400, 401, 403} and strategy.is_auth_failure_payload({"code": code, "message": str(exc)}):
+                now = self._timestamp_string()
+                self.update_account(access_token, {
+                    "state_reason": "invalid_credentials",
+                    "last_check_status": "invalid",
+                    "last_check_error": "invalid_credentials",
+                    "last_check_http_status": status,
+                    "last_check_at": now,
+                    "expired_reason": "invalid_credentials",
+                    "expired_at": now,
+                }, provider=GROK_PROVIDER)
                 self.remove_invalid_token(access_token, "validate_accounts")
                 return {"token": token_label, "status": "invalid", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": "Grok app-chat credential invalid"}
+            self.update_account(access_token, self._grok_transient_metadata_for_account(account, code, status), provider=GROK_PROVIDER)
             return {"token": token_label, "status": "unverified", "account_id": account.get("account_id"), "row_id": _account_row_id_for_provider(account, GROK_PROVIDER), "message": _safe_validation_error_message(exc)}
 
     def validate_accounts(self, access_tokens: list[str], provider: str | None = None, identifiers: list[dict[str, str]] | None = None) -> dict[str, Any]:
@@ -965,9 +1072,10 @@ class AccountService:
                    and _account_strategy(account.get("provider")).supports_refresh(account)
             ]
         if not refresh_targets:
-            return {"refreshed": 0, "errors": [], "items": self.list_accounts(provider_filter)}
+            return {"checked": 0, "refreshed": 0, "unchanged": 0, "failed": 0, "errors": [], "items": self.list_accounts(provider_filter)}
 
         refreshed = 0
+        unchanged = 0
         errors = []
         max_workers = min(10, len(refresh_targets))
 
@@ -984,12 +1092,16 @@ class AccountService:
                     errors.append({"token": anonymize_token(token), "error": self._refresh_error_message(token, exc, target_provider)})
                     continue
                 if account is UNCHANGED_REMOTE_INFO:
+                    unchanged += 1
                     continue
                 if account is not None:
                     refreshed += 1
 
         return {
+            "checked": len(refresh_targets),
             "refreshed": refreshed,
+            "unchanged": unchanged,
+            "failed": len(errors),
             "errors": errors,
             "items": self.list_accounts(provider_filter),
         }

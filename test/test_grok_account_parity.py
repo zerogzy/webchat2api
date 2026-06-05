@@ -120,6 +120,10 @@ class GrokAccountParityTests(unittest.TestCase):
             "window_seconds": 86400,
             "reset_at": None,
         })
+    def test_generic_auth_markers_are_not_confirmed_invalid(self) -> None:
+        self.assertFalse(grok_accounts.is_auth_failure_payload({"code": "authentication_failed"}))
+        self.assertFalse(grok_accounts.is_auth_failure_payload({"message": "unauthenticated"}))
+        self.assertTrue(grok_accounts.is_auth_failure_payload({"code": "invalid-credentials"}))
 
 
 if __name__ == "__main__":
