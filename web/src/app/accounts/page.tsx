@@ -1020,8 +1020,9 @@ function AccountsPageContent() {
             </Button>
             <AccountImportDialog
               disabled={isLoading || isRefreshing || isValidating || isDeleting}
-              onImported={(items, provider) => {
+              onImported={async (items, provider) => {
                 handleProviderMutationResult(provider, items);
+                await loadAccounts(true);
                 setProviderSelection(provider, []);
                 setProviderPage(provider, 1);
                 setActiveProvider(provider);
