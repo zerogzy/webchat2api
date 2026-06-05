@@ -241,7 +241,7 @@ export function ImageComposer({
                   void onSubmit();
                 }
               }}
-              className="min-h-[112px] resize-none rounded-none border-0 bg-transparent px-4 pt-4 pb-3 text-[15px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[160px] sm:px-5 sm:pt-5 sm:pb-24 sm:leading-7"
+              className="min-h-[160px] resize-none rounded-none border-0 bg-transparent px-4 pt-4 pb-20 text-[15px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[180px] sm:px-5 sm:pt-5 sm:pb-28 sm:leading-7"
             />
 
             <div
