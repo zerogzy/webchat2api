@@ -251,6 +251,14 @@ class StubTestClient:
         _sync_auth_key(self.auth_key)
         return self._request("POST", path, headers=request_headers, json_data=json, files=files, data=data)
 
+    def delete(self, path: str, headers: dict[str, str] | None = None, json: object | None = None, json_data: object | None = None) -> StubTestResponse:
+        request_headers = dict(headers or {})
+        payload = json if json is not None else json_data
+        if payload is not None:
+            request_headers.setdefault("content-type", "application/json")
+        _sync_auth_key(self.auth_key)
+        return self._request("DELETE", path, headers=request_headers, json_data=payload)
+
     def _request(self, method: str, path: str, *, headers: dict[str, str], query: dict[str, list[str]] | None = None, json_data: object | None = None, files: object | None = None, data: object | None = None) -> StubTestResponse:
         route_path = _match_route_path(self.app.routes, method, path)
         func = self.app.routes[(method, route_path)]
@@ -259,8 +267,12 @@ class StubTestClient:
             result = _call_route(func, headers=headers, query=query or {}, json_data=json_data, files=files, data=data, path_values=path_values)
         except StubHTTPException as exc:
             return StubTestResponse(exc.status_code, exc.detail)
-        status = result.status_code if isinstance(result, StubJSONResponse) else 200
-        payload = result.content if isinstance(result, StubJSONResponse) else result
+        if isinstance(result, (StubJSONResponse, StubResponse)):
+            status = result.status_code
+            payload = result.content
+        else:
+            status = 200
+            payload = result
         return StubTestResponse(status, payload)
 
 

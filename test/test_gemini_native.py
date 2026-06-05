@@ -26,7 +26,7 @@ from api import gemini as gemini_api
 from services import gemini_deep_research
 from services.providers import gemini as gemini_provider
 from services.providers.gemini import models as gemini_models
-from services.protocol import gemini_native, openai_v1_chat_complete, openai_v1_response
+from services.protocol import gemini_native, openai_v1_chat_complete, openai_v1_complete, openai_v1_response
 
 AUTH_HEADERS = {"Authorization": "Bearer webchat2api"}
 
@@ -331,6 +331,129 @@ class GeminiNativeRouteTests(unittest.TestCase):
     def test_generate_content_route_registered(self) -> None:
         routes = self.client.app.routes
         self.assertIn(("POST", "/gemini/v1beta/models/{model}:generateContent"), routes)
+
+
+    def test_all_static_gemini_models_route_through_openai_chat_provider(self) -> None:
+        for spec in gemini_models.GEMINI_MODEL_SPECS:
+            with self.subTest(model=spec.id), \
+                 mock.patch.object(gemini_provider, "chat_completion", return_value=gemini_provider.GeminiCompletion(f"ok {spec.id}")) as chat_completion:
+                response = cast(dict[str, Any], openai_v1_chat_complete.handle({
+                    "model": spec.id,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                }))
+
+            called_body, called_spec, called_messages = chat_completion.call_args.args
+            self.assertEqual(called_body["model"], spec.id)
+            self.assertEqual(called_spec.provider, "gemini")
+            self.assertEqual(called_spec.id, spec.id)
+            self.assertEqual(called_messages, [{"role": "user", "content": "Hello"}])
+            self.assertEqual(response["model"], spec.id)
+            self.assertEqual(response["choices"][0]["message"]["content"], f"ok {spec.id}")
+
+    def test_unknown_discoverable_gemini_model_routes_through_openai_chat_provider(self) -> None:
+        with mock.patch.object(gemini_provider, "chat_completion", return_value=gemini_provider.GeminiCompletion("dynamic ok")) as chat_completion:
+            response = cast(dict[str, Any], openai_v1_chat_complete.handle({
+                "model": "gemini-2.5-ultra",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }))
+
+        called_spec = chat_completion.call_args.args[1]
+        self.assertEqual(called_spec.provider, "gemini")
+        self.assertEqual(called_spec.id, "gemini-2.5-ultra")
+        self.assertEqual(called_spec.upstream_model, "gemini-2.5-ultra")
+        self.assertEqual(response["model"], "gemini-2.5-ultra")
+        self.assertEqual(response["choices"][0]["message"]["content"], "dynamic ok")
+
+    def test_all_static_gemini_models_route_through_openai_completions_provider(self) -> None:
+        for spec in gemini_models.GEMINI_MODEL_SPECS:
+            with self.subTest(model=spec.id), \
+                 mock.patch.object(gemini_provider, "chat_completion", return_value=gemini_provider.GeminiCompletion(f"complete {spec.id}")) as chat_completion:
+                response = cast(dict[str, Any], openai_v1_complete.handle({
+                    "model": spec.id,
+                    "prompt": "Hello",
+                }))
+
+            called_body, called_spec, called_messages = chat_completion.call_args.args
+            self.assertEqual(called_body["model"], spec.id)
+            self.assertEqual(called_spec.provider, "gemini")
+            self.assertEqual(called_spec.id, spec.id)
+            self.assertEqual(called_messages, [{"role": "user", "content": "Hello"}])
+            self.assertEqual(response["object"], "text_completion")
+            self.assertEqual(response["model"], spec.id)
+            self.assertEqual(response["choices"][0]["text"], f"complete {spec.id}")
+
+    def test_unknown_discoverable_gemini_model_routes_through_openai_completions_provider(self) -> None:
+        with mock.patch.object(gemini_provider, "chat_completion", return_value=gemini_provider.GeminiCompletion("dynamic completion")) as chat_completion:
+            response = cast(dict[str, Any], openai_v1_complete.handle({
+                "model": "gemini-2.5-ultra",
+                "prompt": "Hello",
+            }))
+
+        called_spec = chat_completion.call_args.args[1]
+        self.assertEqual(called_spec.provider, "gemini")
+        self.assertEqual(called_spec.id, "gemini-2.5-ultra")
+        self.assertEqual(response["model"], "gemini-2.5-ultra")
+        self.assertEqual(response["choices"][0]["text"], "dynamic completion")
+
+    def test_all_static_gemini_models_route_through_native_provider(self) -> None:
+        for spec in gemini_models.GEMINI_MODEL_SPECS:
+            with self.subTest(model=spec.id):
+                seen: dict[str, Any] = {}
+
+                def completion_func(body: dict[str, Any], called_spec, messages: list[dict[str, Any]]) -> gemini_provider.GeminiCompletion:
+                    seen["body"] = body
+                    seen["spec"] = called_spec
+                    seen["messages"] = messages
+                    return gemini_provider.GeminiCompletion(f"native {spec.id}")
+
+                response = gemini_native.generate_content(
+                    f"models/{spec.id}",
+                    _native_body("Hello"),
+                    completion_func=completion_func,
+                )
+
+            self.assertEqual(seen["body"]["model"], spec.id)
+            self.assertEqual(seen["spec"].provider, "gemini")
+            self.assertEqual(seen["spec"].id, spec.id)
+            self.assertEqual(seen["messages"], [{"role": "user", "content": "Hello"}])
+            self.assertEqual(response["modelVersion"], spec.id)
+            self.assertEqual(response["candidates"][0]["content"]["parts"], [{"text": f"native {spec.id}"}])
+
+    def test_unknown_discoverable_gemini_model_routes_through_native_provider(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def completion_func(body: dict[str, Any], spec, messages: list[dict[str, Any]]) -> gemini_provider.GeminiCompletion:
+            seen["body"] = body
+            seen["spec"] = spec
+            seen["messages"] = messages
+            return gemini_provider.GeminiCompletion("native dynamic")
+
+        response = gemini_native.generate_content(
+            "models/gemini-2.5-ultra",
+            _native_body("Hello"),
+            completion_func=completion_func,
+        )
+
+        self.assertEqual(seen["body"]["model"], "gemini-2.5-ultra")
+        self.assertEqual(seen["spec"].provider, "gemini")
+        self.assertEqual(seen["spec"].id, "gemini-2.5-ultra")
+        self.assertEqual(response["modelVersion"], "gemini-2.5-ultra")
+        self.assertEqual(response["candidates"][0]["content"]["parts"], [{"text": "native dynamic"}])
+
+    def test_static_and_dynamic_gemini_models_without_account_return_no_gemini_account(self) -> None:
+        account_service = mock.Mock()
+        account_service.get_text_access_token.return_value = ""
+        for model_id in [*(spec.id for spec in gemini_models.GEMINI_MODEL_SPECS), "gemini-2.5-ultra"]:
+            with self.subTest(model=model_id), \
+                 mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
+                 self.assertRaises(HTTPException) as raised:
+                openai_v1_chat_complete.handle({
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                })
+
+            self.assertEqual(getattr(raised.exception, "status_code"), 503)
+            self.assertEqual(getattr(raised.exception, "detail"), {"error": "no available Gemini account"})
 
 
 class OpenAIGeminiToolChoiceTests(unittest.TestCase):

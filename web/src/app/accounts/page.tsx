@@ -46,10 +46,12 @@ import {
   fetchAccounts,
   refreshAccounts,
   updateAccount,
+  validateAccounts,
   type Account,
   type AccountDeleteIdentifier,
   type AccountDeletePayload,
   type AccountExportProvider,
+  type AccountSelectionPayload,
   type AccountStatus,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -240,7 +242,10 @@ function accountProviderId(account: Account): ProviderId {
 function accountRowKey(account: Account, index: number) {
   const provider = accountProviderId(account);
   const token = accountToken(account);
-  if (token) return `${provider}:${token}`;
+  if (token) return `${provider}:token:${token}`;
+  const deleteIdentifier = accountDeleteIdentifier(account);
+  if (deleteIdentifier?.account_id) return `${provider}:account:${deleteIdentifier.account_id}`;
+  if (deleteIdentifier?.row_id) return `${provider}:row:${deleteIdentifier.row_id}`;
   return `${provider}:sanitized-${account.email ?? ""}-${account.type ?? ""}-${index}`;
 }
 
@@ -271,11 +276,24 @@ function accountDeleteIdentifier(account: Account): AccountDeleteCandidate | nul
   return rowId ? { row_id: rowId } : null;
 }
 
-function accountDeletePayloads(accounts: Account[]): AccountDeletePayload {
+function accountSelectionPayload(accounts: Account[]): AccountSelectionPayload {
   return {
     tokens: accountTokens(accounts),
     identifiers: accounts.map(accountDeleteIdentifier).filter((item): item is AccountDeleteCandidate => item !== null),
   };
+}
+
+function accountDeletePayloads(accounts: Account[]): AccountDeletePayload {
+  return accountSelectionPayload(accounts);
+}
+
+function accountSelectionCount(payload: AccountSelectionPayload) {
+  return payload.tokens.length + payload.identifiers.length;
+}
+
+function validationErrorMessage(error: string | { error?: string; message?: string } | undefined) {
+  if (typeof error === "string") return error;
+  return error?.error ?? error?.message ?? "";
 }
 
 function accountHasDeleteIdentifier(account: Account) {
@@ -323,6 +341,7 @@ function ProviderAccountSection({
   startIndex,
   isLoading,
   isRefreshing,
+  isValidating,
   isDeleting,
   isExporting,
   isUpdating,
@@ -330,6 +349,7 @@ function ProviderAccountSection({
   onPageChange,
   onSelectChange,
   onRefresh,
+  onValidate,
   onDelete,
   onDeleteLimited,
   onExport,
@@ -348,24 +368,29 @@ function ProviderAccountSection({
   startIndex: number;
   isLoading: boolean;
   isRefreshing: boolean;
+  isValidating: boolean;
   isDeleting: boolean;
   isExporting: boolean;
   isUpdating: boolean;
   onFilterChange: (next: Partial<ProviderFilters[ProviderId]>) => void;
   onPageChange: (page: number) => void;
   onSelectChange: (ids: string[]) => void;
-  onRefresh: (tokens: string[]) => void;
+  onRefresh: (payload: AccountSelectionPayload) => void;
+  onValidate: (payload: AccountSelectionPayload) => void;
   onDelete: (payload: AccountDeletePayload) => void;
   onDeleteLimited: () => void;
-  onExport: (tokens: string[]) => void;
+  onExport: (payload: AccountSelectionPayload) => void;
   onEdit: (account: Account) => void;
 }) {
   const selectedSet = new Set(selectedIds);
   const selectedRows = accounts.filter((account, index) => selectedSet.has(accountRowKey(account, index)));
-  const selectedPayloads = accountDeletePayloads(selectedRows);
+  const selectedPayloads = accountSelectionPayload(selectedRows);
   const selectedTokens = selectedPayloads.tokens;
-  const selectedRefreshTokens = provider.refresh.enabled ? selectedTokens : [];
-  const selectedDeleteCount = selectedPayloads.tokens.length + selectedPayloads.identifiers.length;
+  const selectedRefreshPayload = provider.refresh.enabled ? selectedPayloads : { tokens: [], identifiers: [] };
+  const selectedRefreshCount = accountSelectionCount(selectedRefreshPayload);
+  const canValidateProvider = provider.id === "grok";
+  const selectedValidateCount = canValidateProvider ? accountSelectionCount(selectedPayloads) : 0;
+  const selectedDeleteCount = accountSelectionCount(selectedPayloads);
   const limitedTokens = accountTokens(accounts.filter((item) => item.status === "限流"));
   const typeOptions = [
     { label: "全部计划/池", value: "all" },
@@ -453,13 +478,24 @@ function ProviderAccountSection({
         <Button
           variant="ghost"
           className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
-          onClick={() => onRefresh(selectedRefreshTokens)}
-          disabled={!provider.refresh.enabled || selectedRefreshTokens.length === 0 || isRefreshing}
+          onClick={() => onRefresh(selectedRefreshPayload)}
+          disabled={!provider.refresh.enabled || selectedRefreshCount === 0 || isRefreshing}
           title={provider.refresh.rowTitle}
         >
           {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
           {provider.refresh.selectedButtonLabel ?? provider.refresh.rowTitle}
         </Button>
+        {canValidateProvider ? (
+          <Button
+            variant="ghost"
+            className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
+            onClick={() => onValidate(selectedPayloads)}
+            disabled={selectedValidateCount === 0 || isValidating}
+          >
+            {isValidating ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
+            验证所选 Grok 账号
+          </Button>
+        ) : null}
         <Button
           variant="ghost"
           className="h-8 rounded-lg px-3 text-amber-700 hover:bg-amber-50 hover:text-amber-800"
@@ -481,11 +517,11 @@ function ProviderAccountSection({
         <Button
           variant="ghost"
           className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
-          onClick={() => onExport(provider.canExportWithoutTokens ? [] : selectedTokens)}
-          disabled={!accountProviderSupportsTokenExport(provider.id, selectedTokens.length) || isExporting || isDeleting}
+          onClick={() => onExport(provider.canExportWithoutTokens ? { tokens: [], identifiers: [] } : selectedPayloads)}
+          disabled={!accountProviderSupportsTokenExport(provider.id, selectedTokens.length, selectedPayloads.identifiers.length) || isExporting || isDeleting}
         >
           {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-          {selectedTokens.length > 0 ? provider.selectedExportButtonLabel : provider.exportButtonLabel}
+          {accountSelectionCount(selectedPayloads) > 0 ? provider.selectedExportButtonLabel : provider.exportButtonLabel}
         </Button>
         {selectedIds.length > 0 ? (
           <span className="rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-semibold text-stone-600 shadow-sm">
@@ -558,6 +594,17 @@ function ProviderAccountSection({
                     <div className="space-y-1 text-xs leading-5 text-stone-500">
                       <div>{renderPrivacyEmail(account.email)}</div>
                       <div className="text-stone-400">{displayAccountProvider(account)} scoped account</div>
+                      {accountProviderId(account) === "grok" && (
+                        <div className="mt-1 flex flex-col gap-0.5 rounded-md bg-stone-50/50 p-1.5 text-[10px] text-stone-400 border border-stone-100/50">
+                          {account.state_reason && <div className="font-medium text-stone-500">原因: {account.state_reason}</div>}
+                          {account.last_check_status && <div>探测: {account.last_check_status} {account.last_check_http_status ? `(${account.last_check_http_status})` : ''}</div>}
+                          {account.last_check_error && <div className="text-rose-400/80 truncate" title={account.last_check_error}>报错: {account.last_check_error}</div>}
+                          {account.last_check_at && <div>检查: {new Date(account.last_check_at).toLocaleString()}</div>}
+                          {account.last_success_at && <div>成功: {new Date(account.last_success_at).toLocaleString()}</div>}
+                          {account.refresh_backoff_until && new Date(account.refresh_backoff_until).getTime() > Date.now() && <div>退避至: {new Date(account.refresh_backoff_until).toLocaleString()}</div>}
+                          {account.cooldown_until && new Date(account.cooldown_until).getTime() > Date.now() && <div>冷却至: {new Date(account.cooldown_until).toLocaleString()}</div>}
+                        </div>
+                      )}
                     </div>
                   </td>
                   <td className="px-4 py-3">
@@ -591,8 +638,8 @@ function ProviderAccountSection({
                       <button
                         type="button"
                         className="rounded-lg p-2 transition hover:bg-white hover:text-stone-700"
-                        onClick={() => onRefresh([token])}
-                        disabled={isRefreshing || !provider.refresh.enabled || !token}
+                        onClick={() => onRefresh(accountSelectionPayload([account]))}
+                        disabled={isRefreshing || !provider.refresh.enabled || !accountHasDeleteIdentifier(account)}
                         title={provider.refresh.rowTitle}
                       >
                         <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
@@ -685,6 +732,7 @@ function AccountsPageContent() {
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isValidating, setIsValidating] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -817,34 +865,75 @@ function AccountsPageContent() {
     }
   };
 
-  const handleRefreshAccounts = async (provider: ProviderId, accessTokens: string[]) => {
+  const handleRefreshAccounts = async (provider: ProviderId, payload: AccountSelectionPayload) => {
     const providerDefinition = getAccountProviderDefinition(provider);
     if (!providerDefinition.refresh.enabled) {
       toast.error(providerDefinition.refresh.rowTitle);
       return;
     }
-    if (accessTokens.length === 0) {
+    if (accountSelectionCount(payload) === 0) {
       toast.error(`没有可刷新的 ${providerDefinition.label} 账户`);
       return;
     }
 
     setIsRefreshing(true);
     try {
-      const data = await refreshAccounts(accessTokens, provider);
+      const data = await refreshAccounts(payload, provider);
       handleProviderMutationResult(provider, data.items);
-      if (data.errors.length > 0) {
-        const firstError = data.errors[0]?.error;
-        toast.error(
-          `刷新成功 ${data.refreshed} 个 ${providerDefinition.label} 账户，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
-        );
+      if (provider === "grok") {
+         const summary = `检查 ${data.checked ?? 0} 个，更新 ${data.refreshed ?? 0} 个，状态保持 ${data.unchanged ?? 0} 个，失败 ${data.failed ?? 0} 个`;
+         const explanation = (data.unchanged ?? 0) > 0 ? " (Cloudflare/上游检查不可用不等于账号失效)" : "";
+         if (data.errors.length > 0) {
+           const firstError = data.errors[0]?.error;
+           toast.error(`${summary}${explanation}${firstError ? `，首个错误：${firstError}` : ""}`);
+         } else {
+           toast.success(`${summary}${explanation}`);
+         }
       } else {
-        toast.success(`刷新成功 ${data.refreshed} 个 ${providerDefinition.label} 账户`);
+        if (data.errors.length > 0) {
+          const firstError = data.errors[0]?.error;
+          toast.error(
+            `刷新成功 ${data.refreshed} 个 ${providerDefinition.label} 账户，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
+          );
+        } else {
+          toast.success(`刷新成功 ${data.refreshed} 个 ${providerDefinition.label} 账户`);
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : `刷新 ${providerDefinition.label} 账户失败`;
       toast.error(message);
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  const handleValidateAccounts = async (provider: ProviderId, payload: AccountSelectionPayload) => {
+    if (provider !== "grok") {
+      toast.error("当前仅支持验证 Grok 账号");
+      return;
+    }
+    if (accountSelectionCount(payload) === 0) {
+      toast.error("请先选择要验证的 Grok 账号");
+      return;
+    }
+
+    setIsValidating(true);
+    try {
+      const data = await validateAccounts(payload, provider);
+      handleProviderMutationResult(provider, data.items);
+      const summary = `检查 ${data.checked} 个，正常 ${data.valid} 个，异常 ${data.invalid} 个，限流 ${data.limited} 个，未验证 ${data.unverified} 个`;
+      const explanation = data.unverified > 0 ? " (未验证指 Cloudflare/Browser Bridge/网络探测等不可用，非凭据无效)" : "";
+      const firstError = validationErrorMessage(data.errors[0]);
+      if (data.errors.length > 0) {
+        toast.error(`${summary}${explanation}${firstError ? `，首个错误：${firstError}` : ""}`);
+      } else {
+        toast.success(`${summary}${explanation}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "验证 Grok 账号失败";
+      toast.error(message);
+    } finally {
+      setIsValidating(false);
     }
   };
 
@@ -879,8 +968,8 @@ function AccountsPageContent() {
     }
   };
 
-  const handleExportAccounts = async (provider: AccountExportProvider, tokens: string[]) => {
-    if (!accountProviderSupportsTokenExport(provider, tokens.length)) {
+  const handleExportAccounts = async (provider: AccountExportProvider, payload: AccountSelectionPayload) => {
+    if (!accountProviderSupportsTokenExport(provider, payload.tokens.length, payload.identifiers.length)) {
       const label = accountExportProviderLabel(provider);
       toast.error(`没有可导出的 ${label} 账户`);
       return;
@@ -888,7 +977,7 @@ function AccountsPageContent() {
 
     setIsExporting(true);
     try {
-      const data = await exportAccounts(provider, tokens);
+      const data = await exportAccounts(provider, payload);
       downloadBlob(data.blob, data.filename);
       const label = accountExportProviderLabel(provider);
       toast.success(`${label} TXT 文件已导出`);
@@ -915,7 +1004,7 @@ function AccountsPageContent() {
               variant="outline"
               className="h-10 rounded-xl border-stone-200 bg-white/85 px-4 text-stone-700 shadow-sm hover:bg-white"
               onClick={() => void loadAccounts()}
-              disabled={isLoading || isRefreshing || isDeleting}
+              disabled={isLoading || isRefreshing || isValidating || isDeleting}
             >
               <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
               刷新全部
@@ -923,14 +1012,14 @@ function AccountsPageContent() {
             <Button
               variant="outline"
               className="h-10 rounded-xl border-stone-200 bg-white/85 px-4 text-stone-700 shadow-sm hover:bg-white"
-              onClick={() => void handleRefreshAccounts(activeProvider, accountTokens(activeRows.accounts))}
-              disabled={!activeDefinition.refresh.enabled || isLoading || isRefreshing || isDeleting || accountTokens(activeRows.accounts).length === 0}
+              onClick={() => void handleRefreshAccounts(activeProvider, accountSelectionPayload(activeRows.accounts))}
+              disabled={!activeDefinition.refresh.enabled || isLoading || isRefreshing || isValidating || isDeleting || accountSelectionCount(accountSelectionPayload(activeRows.accounts)) === 0}
             >
               <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
               {activeDefinition.refresh.buttonLabel ?? activeDefinition.refresh.rowTitle}
             </Button>
             <AccountImportDialog
-              disabled={isLoading || isRefreshing || isDeleting}
+              disabled={isLoading || isRefreshing || isValidating || isDeleting}
               onImported={(items, provider) => {
                 handleProviderMutationResult(provider, items);
                 setProviderSelection(provider, []);
@@ -1058,16 +1147,18 @@ function AccountsPageContent() {
             startIndex={activeRows.startIndex}
             isLoading={isLoading}
             isRefreshing={isRefreshing}
+            isValidating={isValidating}
             isDeleting={isDeleting}
             isExporting={isExporting}
             isUpdating={isUpdating}
             onFilterChange={(next) => setProviderFilters(activeProvider, next)}
             onPageChange={(nextPage) => setProviderPage(activeProvider, nextPage)}
             onSelectChange={(ids) => setProviderSelection(activeProvider, ids)}
-            onRefresh={(tokens) => void handleRefreshAccounts(activeProvider, tokens)}
+            onRefresh={(payload) => void handleRefreshAccounts(activeProvider, payload)}
+            onValidate={(payload) => void handleValidateAccounts(activeProvider, payload)}
             onDelete={(payload) => void handleDeleteTokens(activeProvider, payload)}
             onDeleteLimited={() => void handleDeleteLimitedAccounts(activeProvider)}
-            onExport={(tokens) => void handleExportAccounts(activeProvider, tokens)}
+            onExport={(payload) => void handleExportAccounts(activeProvider, payload)}
             onEdit={openEditDialog}
           />
         )}

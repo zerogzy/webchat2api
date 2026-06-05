@@ -13,7 +13,8 @@ from services.network.client import create_session
 
 from services.account_service import account_service as default_account_service
 from services.config import DATA_DIR
-from services.models import GPT_PROVIDER, normalize_provider
+from services.providers.base import GPT_PROVIDER, GROK_PROVIDER
+from services.providers.registry import normalize_provider
 
 
 REMOTE_ACCOUNT_CONFIG_FILE = DATA_DIR / "remote_account_sources.json"
@@ -66,10 +67,12 @@ def _normalize_provider_default(value: object) -> str:
 
 
 def _normalize_interval(value: object) -> int | None:
-    if value in {None, ""}:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
         return None
     try:
-        interval = int(value)
+        interval = int(str(value))
     except (TypeError, ValueError) as exc:
         raise ValueError("interval_seconds must be an integer") from exc
     if interval <= 0:
@@ -83,7 +86,8 @@ def _normalize_import_job(raw: object, *, fail_unfinished: bool) -> dict | None:
     status = _clean(raw.get("status")) or "failed"
     if fail_unfinished and status in {"pending", "running"}:
         status = "failed"
-    errors = raw.get("errors") if isinstance(raw.get("errors"), list) else []
+    errors_value = raw.get("errors")
+    errors = errors_value if isinstance(errors_value, list) else []
     return {
         "job_id": _clean(raw.get("job_id")) or uuid.uuid4().hex,
         "status": status,
@@ -141,6 +145,24 @@ def _item_token(item: dict[str, Any]) -> str:
     return _clean(item.get("access_token") or item.get("token"))
 
 
+def _grok_remote_item_token(item: dict[str, Any]) -> str:
+    return _clean(item.get("access_token") or item.get("token") or item.get("sso"))
+
+
+def _normalize_grok_remote_token(value: object) -> str:
+    token = _clean(value)
+    if not token or ";" in token:
+        return ""
+    name, separator, cookie_value = token.partition("=")
+    if separator:
+        return cookie_value.strip() if name.strip().lower() == "sso" and cookie_value.strip() else ""
+    return token
+
+
+def _is_grok_provider(value: object) -> bool:
+    return normalize_provider(value or GPT_PROVIDER) == GROK_PROVIDER
+
+
 def normalize_remote_account_payload(
     payload: object,
     *,
@@ -156,17 +178,35 @@ def normalize_remote_account_payload(
 
     for item in _payload_items(payload):
         if isinstance(item, str):
-            access_token = _clean(item)
+            if not _clean(item):
+                continue
+            if _is_grok_provider(provider_default):
+                access_token = _normalize_grok_remote_token(item)
+                if not access_token:
+                    raise ValueError("Grok remote account injection only accepts bare SSO values or single-line sso=<value> tokens")
+            else:
+                access_token = _clean(item)
             if not access_token or access_token in seen_tokens:
                 continue
             account: dict[str, Any] = {"access_token": access_token, "provider": provider_default}
+            if provider_default == GROK_PROVIDER:
+                account["_grok_sso_import"] = True
         elif isinstance(item, dict):
-            access_token = _item_token(item)
-            if not access_token or access_token in seen_tokens:
-                continue
-            account = {key: value for key, value in item.items() if key not in {"token", "accessToken"}}
-            account["access_token"] = access_token
-            account["provider"] = normalize_provider(item.get("provider") or provider_default)
+            item_provider = normalize_provider(item.get("provider") or provider_default)
+            if item_provider == GROK_PROVIDER:
+                access_token = _normalize_grok_remote_token(_grok_remote_item_token(item))
+                if not access_token:
+                    raise ValueError("Grok remote account injection only accepts bare SSO values or single-line sso=<value> tokens")
+                if access_token in seen_tokens:
+                    continue
+                account = {"access_token": access_token, "provider": item_provider, "_grok_sso_import": True}
+            else:
+                access_token = _item_token(item)
+                if not access_token or access_token in seen_tokens:
+                    continue
+                account = {key: value for key, value in item.items() if key not in {"token", "accessToken"}}
+                account["access_token"] = access_token
+                account["provider"] = item_provider
         else:
             continue
 

@@ -36,6 +36,11 @@ _CLIENT_EXPORTS = {
     "synthetic_stream_content",
 }
 
+_ACCOUNT_EXPORTS = {
+    "gemini_cookie_state",
+    "gemini_rotate_cookies_result",
+}
+
 
 def __getattr__(name: str) -> Any:
     if name == "models":
@@ -43,6 +48,11 @@ def __getattr__(name: str) -> Any:
     if name in _CLIENT_EXPORTS:
         client = importlib.import_module(f"{__name__}.client")
         value = getattr(client, name)
+        globals()[name] = value
+        return value
+    if name in _ACCOUNT_EXPORTS:
+        accounts = importlib.import_module(f"{__name__}.accounts")
+        value = getattr(accounts, name)
         globals()[name] = value
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

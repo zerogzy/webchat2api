@@ -4,8 +4,8 @@ from dataclasses import replace
 import re
 from typing import Iterator
 
-from services.protocol.conversation import ConversationRequest, ImageGenerationError, ImageOutput, stream_image_outputs_with_pool
-from services.providers.base import ModelSpec
+from services.providers.base import ConversationRequest, ImageGenerationError, ImageOutput, ModelSpec
+from services.providers.gpt.runtime import stream_image_outputs_with_pool
 
 
 _IMAGE_ERROR_FALLBACK = "image generation failed"

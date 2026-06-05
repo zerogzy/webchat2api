@@ -4,8 +4,7 @@ from typing import Iterator
 
 from fastapi import HTTPException
 
-from services.protocol.conversation import ConversationRequest, ImageOutput
-from services.providers.base import ModelSpec
+from services.providers.base import ConversationRequest, ImageOutput, ModelSpec
 
 
 def unsupported_image_error() -> HTTPException:

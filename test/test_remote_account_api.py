@@ -20,9 +20,42 @@ FastAPI = cast(Any, getattr(sys.modules["fastapi"], "FastAPI"))
 TestClient = cast(Any, getattr(sys.modules["fastapi.testclient"], "TestClient"))
 
 import api.accounts as accounts_module
+from services.account_service import AccountService
+from services.models import GROK_PROVIDER
+from services.remote_account_service import RemoteAccountService
+from services.storage.base import StorageBackend
 
 
 AUTH_HEADERS = {"Authorization": "Bearer webchat2api"}
+
+
+class MemoryStorage(StorageBackend):
+    def __init__(self, accounts: list[dict[str, Any]] | None = None) -> None:
+        self.accounts = list(accounts or [])
+
+    def load_accounts(self) -> list[dict[str, Any]]:
+        return list(self.accounts)
+
+    def save_accounts(self, accounts: list[dict[str, Any]]) -> None:
+        self.accounts = list(accounts)
+
+    def load_auth_keys(self) -> list[dict[str, Any]]:
+        return []
+
+    def save_auth_keys(self, auth_keys: list[dict[str, Any]]) -> None:
+        pass
+
+    def load_settings(self) -> dict[str, Any]:
+        return {}
+
+    def save_settings(self, settings: dict[str, Any]) -> None:
+        pass
+
+    def health_check(self) -> dict[str, Any]:
+        return {"ok": True}
+
+    def get_backend_info(self) -> dict[str, Any]:
+        return {"type": "memory"}
 
 
 class FakeRemoteAccountConfig:
@@ -167,6 +200,74 @@ class RemoteAccountApiTests(unittest.TestCase):
         _, kwargs = self.import_service.inject_calls[-1]
         self.assertEqual(kwargs["provider_default"], "gemini")
 
+    def test_direct_inject_grok_bare_sso_uses_real_remote_service(self) -> None:
+        storage = MemoryStorage()
+        real_service = RemoteAccountService(AccountService(storage))
+        with mock.patch.object(accounts_module, "remote_account_import_service", real_service):
+            response = self.client.post(
+                "/api/remote-account/inject",
+                headers=AUTH_HEADERS,
+                json={"tokens": ["bare-sso"], "provider": "grok"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["total"], 1)
+        self.assertEqual(response.json()["added"], 1)
+        self.assertEqual(response.json()["skipped"], 0)
+        self.assertEqual(storage.accounts[0]["provider"], GROK_PROVIDER)
+        self.assertEqual(storage.accounts[0]["access_token"], "bare-sso")
+
+    def test_direct_inject_grok_sso_prefixed_uses_real_remote_service(self) -> None:
+        storage = MemoryStorage()
+        real_service = RemoteAccountService(AccountService(storage))
+        with mock.patch.object(accounts_module, "remote_account_import_service", real_service):
+            response = self.client.post(
+                "/api/remote-account/inject",
+                headers=AUTH_HEADERS,
+                json={"tokens": ["sso=bare-sso"], "provider": "grok"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["total"], 1)
+        self.assertEqual(response.json()["added"], 1)
+        self.assertEqual(response.json()["skipped"], 0)
+        self.assertEqual(storage.accounts[0]["provider"], GROK_PROVIDER)
+        self.assertEqual(storage.accounts[0]["access_token"], "bare-sso")
+
+    def test_direct_inject_grok_flowpilot_account_uses_real_remote_service(self) -> None:
+        storage = MemoryStorage()
+        real_service = RemoteAccountService(AccountService(storage))
+        with mock.patch.object(accounts_module, "remote_account_import_service", real_service):
+            response = self.client.post(
+                "/api/remote-account/inject",
+                headers=AUTH_HEADERS,
+                json={
+                    "accounts": [{"token": "flowpilot-sso", "provider": "grok", "type": "sso"}],
+                    "strategy": "merge",
+                    "source_id": "flowpilot-grok-sso",
+                    "source_name": "FlowPilot Grok SSO",
+                    "provider": "grok",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["total"], 1)
+        self.assertEqual(response.json()["added"], 1)
+        self.assertEqual(response.json()["skipped"], 0)
+        self.assertEqual(storage.accounts[0]["provider"], GROK_PROVIDER)
+        self.assertEqual(storage.accounts[0]["access_token"], "flowpilot-sso")
+
+    def test_direct_inject_grok_invalid_shape_returns_400(self) -> None:
+        real_service = RemoteAccountService(AccountService(MemoryStorage()))
+        with mock.patch.object(accounts_module, "remote_account_import_service", real_service):
+            response = self.client.post(
+                "/api/remote-account/inject",
+                headers=AUTH_HEADERS,
+                json={"tokens": ["sso-rw=unsafe-rw-token"], "provider": "grok"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("bare SSO", str(response.json()))
 
     def test_sync_source_generic_exception_response_is_sanitized(self) -> None:
         self.config.sources.append({

@@ -37,14 +37,14 @@ Authorization: Bearer <admin-secret-or-admin-key>
 
 ```json
 {
-  "name": "Team GPT Source",
+  "name": "Team Gemini Source",
   "enabled": true,
   "url": "https://accounts.example.test/webchat2api.json",
   "method": "GET",
   "auth_header": "",
   "auth_token": "",
   "bearer_token": "",
-  "provider": "gpt",
+  "provider": "gemini",
   "sync_strategy": "merge",
   "interval_seconds": 3600
 }
@@ -56,7 +56,7 @@ Authorization: Bearer <admin-secret-or-admin-key>
 - `method` 支持 `GET` 或 `POST`，默认 `GET`。
 - `bearer_token` 存在时，同步请求会发送 `Authorization: Bearer <bearer_token>`。
 - `auth_header` 与 `auth_token` 同时存在且未设置 `bearer_token` 时，同步请求会发送自定义鉴权头。
-- `provider` 可为空字符串、`gpt` 或 `grok`。远程 payload 中单个账号未声明 `provider` 时使用该默认值，空值最终按 GPT 默认处理。
+- `provider` 可为空字符串、`gpt`、`grok` 或 `gemini`。远程 payload 中单个账号未声明 `provider` 时使用该默认值，空值最终按 GPT 默认处理。
 - `sync_strategy` 支持 `merge` 或 `replace`，默认 `merge`。
 - `interval_seconds` 会被保存和返回，但当前文档不把它描述为自动调度能力。
 
@@ -474,11 +474,11 @@ curl http://localhost:83/api/remote-account/inject \
   -H "Authorization: Bearer admin" \
   -H "Content-Type: application/json" \
   -d '{
-    "tokens": ["example-gpt-token-1", "example-gpt-token-2"],
+    "tokens": ["example-gemini-token-1", "example-gemini-token-2"],
     "strategy": "merge",
-    "source_id": "manual-gpt",
-    "source_name": "Manual GPT",
-    "provider": "gpt"
+    "source_id": "manual-gemini",
+    "source_name": "Manual Gemini",
+    "provider": "gemini"
   }'
 ```
 
@@ -487,8 +487,8 @@ curl http://localhost:83/api/remote-account/inject \
 ```json
 {
   "strategy": "merge",
-  "source_id": "manual-gpt",
-  "source_name": "Manual GPT",
+  "source_id": "manual-gemini",
+  "source_name": "Manual Gemini",
   "total": 2,
   "added": 2,
   "skipped": 0,
@@ -535,23 +535,14 @@ curl http://localhost:83/api/remote-account/inject \
 }
 ```
 
-Grok 账号示例：
+Grok SSO 示例：
 
 ```bash
 curl http://localhost:83/api/remote-account/inject \
   -H "Authorization: Bearer admin" \
   -H "Content-Type: application/json" \
   -d '{
-    "accounts": [
-      {
-        "token": "example-grok-token-1",
-        "provider": "grok",
-        "type": "basic",
-        "metadata": {
-          "team": "ops"
-        }
-      }
-    ],
+    "tokens": ["example-grok-sso-1", "sso=example-grok-sso-2"],
     "strategy": "merge",
     "source_id": "manual-grok",
     "source_name": "Manual Grok",
@@ -566,14 +557,16 @@ curl http://localhost:83/api/remote-account/inject \
   "strategy": "merge",
   "source_id": "manual-grok",
   "source_name": "Manual Grok",
-  "total": 1,
-  "added": 1,
+  "total": 2,
+  "added": 2,
   "skipped": 0,
   "removed": 0
 }
 ```
 
-`accounts` 中可使用 `access_token` 或 `token`。单个账号的 `provider` 优先于请求级 `provider`。
+Grok 远程注入支持两类兼容格式：`tokens` 中的裸 SSO 值或单行 `sso=<值>`，以及 FlowPilot 兼容的 `accounts` 项里 `token`、`access_token` 或 `sso` 字段。保存时都会归一化为裸 SSO 值；不支持完整 Cookie header、`sso-rw`、其他 Cookie 名称、CPA、cookies payload 或无关 JSON（需要注意，此规则适用于 API 级注入与拉取；而前端 manual/TXT 导入也有其对应的限制：它仅支持 bare SSO 或单行 `sso=<值>` 并会拒绝分号、完整 Cookie 头部、`sso-rw` 等其他键值对，用户在使用时需遵守各个端点具体的 schema，而不应假定前端手动输入支持全部 API 所兼容的格式）。
+
+`accounts` 中可使用 `access_token` 或 `token`。单个账号的 `provider` 优先于请求级 `provider`。Grok 远程注入仅把 FlowPilot 兼容 `accounts` 项中的 `token`、`access_token` 或 `sso` 当作 SSO 输入处理，不会保存其他账号 JSON 字段。
 
 ## merge 与 replace
 
@@ -670,13 +663,16 @@ curl http://localhost:83/api/remote-account/inject \
       "access_token": "example-token-3",
       "provider": "gpt",
       "type": "plus"
-    },
-    {
-      "token": "example-token-4",
-      "provider": "grok",
-      "type": "basic"
     }
   ]
+}
+```
+
+Grok 远程来源请使用 `tokens` 包装对象，例如：
+
+```json
+{
+  "tokens": ["example-grok-sso-1", "sso=example-grok-sso-2"]
 }
 ```
 

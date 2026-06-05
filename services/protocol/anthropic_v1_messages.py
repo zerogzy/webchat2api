@@ -5,7 +5,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,8 +26,9 @@ class MessageRequest:
     tools: Any = None
 
 
-def _tool_meta(tool: dict[str, object]) -> tuple[str, str, object]:
-    fn = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+def _tool_meta(tool: Mapping[str, object]) -> tuple[str, str, object]:
+    function = tool.get("function")
+    fn = function if isinstance(function, Mapping) else {}
     name = str(tool.get("name") or fn.get("name") or "").strip()
     desc = str(tool.get("description") or fn.get("description") or "").strip()
     schema = tool.get("input_schema") or tool.get("parameters") or fn.get("input_schema") or fn.get("parameters") or {}
@@ -168,7 +169,10 @@ def content_blocks(text: str, tools: object = None) -> tuple[list[dict[str, obje
     calls = parse_tool_calls(text) if isinstance(tools, list) and tools else []
     text = strip_tool_markup(text)
     if calls:
-        content = ([{"type": "text", "text": text}] if text else []) + [{"type": "tool_use", "id": f"toolu_{uuid.uuid4()}", "name": name, "input": args} for name, args in calls]
+        content: list[dict[str, object]] = []
+        if text:
+            content.append({"type": "text", "text": text})
+        content.extend({"type": "tool_use", "id": f"toolu_{uuid.uuid4()}", "name": name, "input": args} for name, args in calls)
         return content, "tool_use"
     return [{"type": "text", "text": text}], "end_turn"
 
@@ -221,6 +225,13 @@ def parse_tool_value(raw: str) -> object:
         return value
 
 
+def _first_choice(chunk: Mapping[str, object]) -> Mapping[str, object]:
+    choices = chunk.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
+        return choices[0]
+    return {}
+
+
 def stream_events(chunks: Iterable[dict[str, object]], model: str, input_tokens: int, output_tokens: Callable[[str], int], tools: object = None) -> Iterator[dict[str, object]]:
     message_id = f"msg_{uuid.uuid4()}"
     created = int(time.time())
@@ -234,9 +245,11 @@ def stream_events(chunks: Iterable[dict[str, object]], model: str, input_tokens:
         text_open = True
         yield {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
     for chunk in chunks:
-        choice = (chunk.get("choices") or [{}])[0]
-        delta = choice.get("delta") or {}
-        text_delta = delta.get("content", "") if isinstance(delta, dict) else ""
+        choice = _first_choice(chunk)
+        delta_value = choice.get("delta")
+        delta = delta_value if isinstance(delta_value, Mapping) else {}
+        content_delta = delta.get("content")
+        text_delta = content_delta if isinstance(content_delta, str) else ""
         if text_delta:
             current_text += text_delta
             if not tool_started:

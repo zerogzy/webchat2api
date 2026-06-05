@@ -1,22 +1,17 @@
 from __future__ import annotations
 
-import base64
 import time
 import uuid
 from typing import Any, Iterable, Iterator
 
 from fastapi import HTTPException
 
-from services.models import GEMINI_PROVIDER, GROK_PROVIDER, resolve_model
-from services.providers.registry import chat_adapter, response_image_outputs
+from api.image_inputs import resolve_inline_image_reference
+
+from services.providers.base import ConversationRequest, GEMINI_PROVIDER, GROK_PROVIDER, ImageGenerationError, ImageOutput
+from services.providers.registry import chat_adapter, resolve_model, response_image_outputs
 import services.protocol.tool_calls as tool_calls
-from services.protocol.conversation import (
-    ConversationRequest,
-    ImageOutput,
-    encode_images,
-    stream_text_deltas,
-    text_backend,
-)
+from services.protocol.conversation import encode_images, stream_text_deltas, text_backend
 from utils.helper import extract_image_from_message_content, extract_response_prompt, has_image_message_content, has_response_image_generation_tool
 
 
@@ -31,22 +26,45 @@ def is_text_response_request(body: dict[str, Any]) -> bool:
 
 def extract_response_image(input_value: object) -> tuple[bytes, str] | None:
     if isinstance(input_value, dict):
-        images = extract_image_from_message_content(input_value.get("content"))
-        return images[0] if images else None
+        content_image = _extract_response_image_from_content(input_value.get("content"))
+        if content_image:
+            return content_image
+        return _image_tuple_from_reference(input_value)
     if not isinstance(input_value, list):
         return None
     for item in reversed(input_value):
         if isinstance(item, dict) and str(item.get("type") or "").strip() == "input_image":
-            image_url = str(item.get("image_url") or "")
-            if image_url.startswith("data:"):
-                header, _, data = image_url.partition(",")
-                mime = header.split(";")[0].removeprefix("data:")
-                return base64.b64decode(data), mime or "image/png"
+            image = _image_tuple_from_reference(item)
+            if image:
+                return image
         if isinstance(item, dict):
-            images = extract_image_from_message_content(item.get("content"))
-            if images:
-                return images[0]
+            content_image = _extract_response_image_from_content(item.get("content"))
+            if content_image:
+                return content_image
     return None
+
+
+def _extract_response_image_from_content(content: object) -> tuple[bytes, str] | None:
+    if not isinstance(content, list):
+        return None
+    for item in reversed(content):
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").strip()
+        if item_type in {"input_image", "image_url"}:
+            image = _image_tuple_from_reference(item)
+            if image:
+                return image
+    images = extract_image_from_message_content(content)
+    return images[0] if images else None
+
+
+def _image_tuple_from_reference(value: object) -> tuple[bytes, str] | None:
+    image = resolve_inline_image_reference(value)
+    if image is None:
+        return None
+    data, _filename, mime_type = image
+    return data, mime_type
 
 
 def _typed_response_content(items: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
@@ -323,7 +341,6 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     spec = resolve_model(model)
     if spec.provider == GROK_PROVIDER:
         if images:
-            from services.protocol.conversation import ImageGenerationError
             raise ImageGenerationError("Grok response image generation does not support image input", status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model")
     image_outputs = response_image_outputs(spec, request, body=body, prompt=prompt, n=1)
     yield from stream_image_response(image_outputs, prompt, model)
