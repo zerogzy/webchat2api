@@ -594,6 +594,17 @@ function ProviderAccountSection({
                     <div className="space-y-1 text-xs leading-5 text-stone-500">
                       <div>{renderPrivacyEmail(account.email)}</div>
                       <div className="text-stone-400">{displayAccountProvider(account)} scoped account</div>
+                      {accountProviderId(account) === "grok" && (
+                        <div className="mt-1 flex flex-col gap-0.5 rounded-md bg-stone-50/50 p-1.5 text-[10px] text-stone-400 border border-stone-100/50">
+                          {account.state_reason && <div className="font-medium text-stone-500">原因: {account.state_reason}</div>}
+                          {account.last_check_status && <div>探测: {account.last_check_status} {account.last_check_http_status ? `(${account.last_check_http_status})` : ''}</div>}
+                          {account.last_check_error && <div className="text-rose-400/80 truncate" title={account.last_check_error}>报错: {account.last_check_error}</div>}
+                          {account.last_check_at && <div>检查: {new Date(account.last_check_at).toLocaleString()}</div>}
+                          {account.last_success_at && <div>成功: {new Date(account.last_success_at).toLocaleString()}</div>}
+                          {account.refresh_backoff_until && new Date(account.refresh_backoff_until).getTime() > Date.now() && <div>退避至: {new Date(account.refresh_backoff_until).toLocaleString()}</div>}
+                          {account.cooldown_until && new Date(account.cooldown_until).getTime() > Date.now() && <div>冷却至: {new Date(account.cooldown_until).toLocaleString()}</div>}
+                        </div>
+                      )}
                     </div>
                   </td>
                   <td className="px-4 py-3">
@@ -869,13 +880,24 @@ function AccountsPageContent() {
     try {
       const data = await refreshAccounts(payload, provider);
       handleProviderMutationResult(provider, data.items);
-      if (data.errors.length > 0) {
-        const firstError = data.errors[0]?.error;
-        toast.error(
-          `刷新成功 ${data.refreshed} 个 ${providerDefinition.label} 账户，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
-        );
+      if (provider === "grok") {
+         const summary = `检查 ${data.checked ?? 0} 个，更新 ${data.refreshed ?? 0} 个，状态保持 ${data.unchanged ?? 0} 个，失败 ${data.failed ?? 0} 个`;
+         const explanation = (data.unchanged ?? 0) > 0 ? " (Cloudflare/上游检查不可用不等于账号失效)" : "";
+         if (data.errors.length > 0) {
+           const firstError = data.errors[0]?.error;
+           toast.error(`${summary}${explanation}${firstError ? `，首个错误：${firstError}` : ""}`);
+         } else {
+           toast.success(`${summary}${explanation}`);
+         }
       } else {
-        toast.success(`刷新成功 ${data.refreshed} 个 ${providerDefinition.label} 账户`);
+        if (data.errors.length > 0) {
+          const firstError = data.errors[0]?.error;
+          toast.error(
+            `刷新成功 ${data.refreshed} 个 ${providerDefinition.label} 账户，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
+          );
+        } else {
+          toast.success(`刷新成功 ${data.refreshed} 个 ${providerDefinition.label} 账户`);
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : `刷新 ${providerDefinition.label} 账户失败`;
@@ -900,11 +922,12 @@ function AccountsPageContent() {
       const data = await validateAccounts(payload, provider);
       handleProviderMutationResult(provider, data.items);
       const summary = `检查 ${data.checked} 个，正常 ${data.valid} 个，异常 ${data.invalid} 个，限流 ${data.limited} 个，未验证 ${data.unverified} 个`;
+      const explanation = data.unverified > 0 ? " (未验证指 Cloudflare/Browser Bridge/网络探测等不可用，非凭据无效)" : "";
       const firstError = validationErrorMessage(data.errors[0]);
       if (data.errors.length > 0) {
-        toast.error(`${summary}${firstError ? `，首个错误：${firstError}` : ""}`);
+        toast.error(`${summary}${explanation}${firstError ? `，首个错误：${firstError}` : ""}`);
       } else {
-        toast.success(summary);
+        toast.success(`${summary}${explanation}`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "验证 Grok 账号失败";

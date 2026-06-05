@@ -316,6 +316,22 @@ GPT 图片编辑约束：
 
 带 `mode_id` 的 Grok 文本模型、Grok 图片生成和 `grok-imagine-image-edit` 图片编辑走 grok.com app-chat。app-chat 可读取账号级或 profile 级的 `cf_clearance`、`cf_cookies`、UA、client hints、Statsig 字段。
 
+#### Grok 账号生命周期与状态优先级机制
+
+在账号生命周期维护中，系统引入状态优先级（Status Precedence）决策，用于防止临时探测波动或陈旧 probe 失败导致健康账号被错误下线或禁用：
+
+1. **真实调用优先（Call Precedence Over Probe）**
+   - 24 小时内成功的真实 Grok 业务调用（具有 `last_success_at` 的有效记录）优先级最高，能够覆盖后续 Cloudflare 质询错误或 403 probe 故障。
+   - 只要账号在 24 小时内有成功调用，即使后续探针（Probe）遭遇临时 Cloudflare 或 403 故障，UI 面向用户的健康字段也会恢复并维持为正常状态。
+   - 该状态在内部通过 `last_check_status: "valid_by_call"` 表示，且 `state_reason`、`last_check_error` 与 `last_check_http_status` 会被清空或重置为 null，确保调用链路仍能继续重试或复用该账号。
+
+2. **陈旧成功转为未验证（Stale Success Expiration）**
+   - 如果成功的真实调用时间超出 24 小时（由 `GROK_RECENT_SUCCESS_TTL_SECONDS` 控制），该陈旧成功不再具备状态覆盖优先级。
+   - 此时，该账号若再次在 Probe 探测中遇到 Cloudflare 质询或 HTTP 403 错误，其状态将恢复正常评估，可能降级或转为 `unverified`（未验证）状态，并在 `state_reason` 中记录为 `cloudflare_or_forbidden`。
+
+3. **探针/退避元数据记录（Probe/Backoff Metadata）**
+   - 无论是否触发真实调用优先级覆盖，探针执行过程中的元数据与退避控制（如 `refresh_backoff_until`、`last_check_at` 以及探测返回的 HTTP 状态码）仍会记录到账号元数据中。这保证底层调度与异常重试间隔机制仍能读取探测实况。
+
 app-chat 错误语义：
 
 | 状态或错误 | 账号反馈 | 说明 |
@@ -711,6 +727,44 @@ docker run -d \
 ## 14. 测试、排障与安全建议
 
 ### 14.1 测试与检查
+
+#### 14.1.1 针对性 Grok/账号测试 (Release Validation)
+发布前或开发调试中，可以运行针对性的单体/集成测试以校验状态优先级及账号生命周期逻辑：
+
+```bash
+# 运行账号 Provider 专项测试，重点覆盖 Gemini 与 Grok 账号生命周期状态和优先级判断
+python3 -m unittest test/test_account_provider.py
+```
+
+该测试套件无需任何真实上游 API 凭据或环境机密，仅使用内存 Mock 验证以下逻辑：
+- 24 小时内有成功记录的 Grok 账号在 Probe 质询故障时仍能保持 `valid_by_call` / `正常` 状态。
+- 超过 24 小时（`GROK_RECENT_SUCCESS_TTL_SECONDS` 之后）的成功调用不再生效，Probe 403 会正确引发状态下降。
+
+#### 14.1.2 容器与部署验证 (Container Verification)
+如需验证 Docker 构建和多容器配合情况，但在本地没有设置 Grok 账号凭据或 CF Clearance 等敏感信息：
+1. 构建本地 dev 镜像：
+   ```bash
+   docker build -t webchat2api:dev .
+   ```
+2. 启动一个独立的临时容器用于 smoke 测试，避免占用宿主机生产端口 `83`：
+   ```bash
+   docker run --rm -d --name webchat2api-smoke -p 8083:83 -e PORT=83 -e HOST=0.0.0.0 -e LOGIN_SECRET=admin webchat2api:dev
+   ```
+3. 验证基础 API 接口可用性：
+   ```bash
+   # 检查健康接口
+   curl http://localhost:8083/health
+   # 检查版本接口
+   curl http://localhost:8083/version
+   ```
+4. 进入容器内验证 Browser Bridge 服务的独立健康状态（容器内部默认监听 `3080`）：
+   ```bash
+   docker exec -it webchat2api-smoke curl http://127.0.0.1:3080/health
+   ```
+5. 完成测试后清理容器：
+   ```bash
+   docker stop webchat2api-smoke
+   ```
 
 后端单元测试：
 

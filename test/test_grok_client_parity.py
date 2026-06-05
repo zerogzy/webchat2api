@@ -28,12 +28,12 @@ def _account_service_module(account_service: object) -> ModuleType:
 
 
 class GrokClientParityTests(unittest.TestCase):
-    def test_rate_limit_payload_includes_upstream_request_kind_and_model(self) -> None:
+    def test_rate_limit_payload_includes_upstream_model_only(self) -> None:
         self.assertEqual(
             grok.build_grok_rate_limits_payload({"modelName": "grok-custom"}),
-            {"requestKind": "DEFAULT", "modelName": "grok-custom"},
+            {"modelName": "grok-custom"},
         )
-        self.assertTrue(grok.build_grok_rate_limits_payload()["modelName"])
+        self.assertEqual(grok.build_grok_rate_limits_payload()["modelName"], "auto")
 
     def test_rate_limit_helpers_extract_nested_remaining_window_and_tier_hints(self) -> None:
         payload = {
@@ -96,10 +96,17 @@ class GrokClientParityTests(unittest.TestCase):
             client = grok.GrokAppChatClient("secret-token", {"modelName": "grok-test"})
             self.assertEqual(client.validate_rate_limits(), {"limits": {"remainingQueries": 3, "windowSizeSeconds": 7200}})
 
-        self.assertEqual(posted["json"], {"requestKind": "DEFAULT", "modelName": "grok-test"})
+        self.assertEqual(posted["json"], {"modelName": "grok-test"})
         account_service.update_account.assert_called_once_with(
             "secret-token",
-            {"app_chat": True, "quota": 3, "status": "正常", "rate_limit_window_seconds": 7200, "tier": "super"},
+            {
+                "app_chat": True,
+                "quota": 3,
+                "status": "正常",
+                "rate_limit_window_seconds": 7200,
+                "tier": "super",
+                "quota_console": {"remaining": 3, "window_seconds": 7200, "tier": "super"},
+            },
         )
 
     def test_validate_rate_limits_cloudflare_html_is_check_unavailable(self) -> None:
@@ -241,6 +248,41 @@ class GrokClientParityTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "authentication_failed")
         account_service.update_account.assert_called_once_with("secret-token", {"status": "异常"})
 
+    def test_validate_rate_limits_generic_auth_marker_is_check_unavailable(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+
+        class FakeResponse:
+            status_code = 403
+            text = '{"code":"authentication_failed","message":"unauthenticated"}'
+
+            def json(self) -> object:
+                return {"code": "authentication_failed", "message": "unauthenticated"}
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            def post(self, url: str, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": _account_service_module(account_service)}),
+            mock.patch.object(grok.config, "data", {}),
+            mock.patch("curl_cffi.requests.Session", FakeSession),
+        ):
+            client = grok.GrokAppChatClient("secret-token")
+            with self.assertRaises(grok.GrokConsoleError) as ctx:
+                client.validate_rate_limits()
+
+        self.assertEqual(ctx.exception.code, "rate_limit_check_unavailable")
+        self.assertTrue(ctx.exception.is_check_unavailable)
+        account_service.update_account.assert_not_called()
+
     def test_validate_rate_limits_429_is_rate_limited(self) -> None:
         account_service = types.SimpleNamespace(update_account=mock.Mock())
 
@@ -365,6 +407,63 @@ class GrokClientParityTests(unittest.TestCase):
         self.assertEqual(getattr(context.exception, "status_code", None), 503)
         account_service.refresh_accounts.assert_called_once_with([], provider="grok")
         account_service.mark_text_used.assert_not_called()
+    def test_console_chat_completion_marks_console_used_on_success(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_console_access_token=mock.Mock(return_value="console-token"),
+            mark_grok_console_used=mock.Mock(),
+        )
+        spec = resolve_model("grok-4.20-non-reasoning")
+
+        class FakeConsoleClient:
+            def __init__(self, access_token: str) -> None:
+                self.access_token = access_token
+
+            def __enter__(self) -> "FakeConsoleClient":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+                return None
+
+            def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+                return {"output": [{"content": [{"type": "output_text", "text": "ok"}]}]}
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": _account_service_module(account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", FakeConsoleClient),
+        ):
+            completion = grok.console_chat_completion({}, spec, [{"role": "user", "content": "Hello"}])
+
+        self.assertEqual(completion.content, "ok")
+        account_service.mark_grok_console_used.assert_called_once_with("console-token", success=True)
+
+    def test_console_chat_completion_events_marks_console_used_on_success(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_console_access_token=mock.Mock(return_value="console-token"),
+            mark_grok_console_used=mock.Mock(),
+        )
+        spec = resolve_model("grok-4.20-non-reasoning")
+
+        class FakeConsoleClient:
+            def __init__(self, access_token: str) -> None:
+                self.access_token = access_token
+
+            def __enter__(self) -> "FakeConsoleClient":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+                return None
+
+            def stream_response(self, payload: dict[str, Any]) -> Any:
+                yield {"type": "response.output_text.delta", "delta": "ok"}
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": _account_service_module(account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", FakeConsoleClient),
+        ):
+            events = list(grok.console_chat_completion_events({}, spec, [{"role": "user", "content": "Hello"}]))
+
+        self.assertEqual(events, [{"type": "response.output_text.delta", "delta": "ok"}])
+        account_service.mark_grok_console_used.assert_called_once_with("console-token", success=True)
 
 
 if __name__ == "__main__":

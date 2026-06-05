@@ -34,6 +34,18 @@ export type Account = {
   success: number;
   fail: number;
   last_used_at?: string | null;
+  state_reason?: string | null;
+  last_check_status?: string | null;
+  last_check_error?: string | null;
+  last_check_http_status?: number | null;
+  last_check_at?: string | null;
+  last_success_at?: string | null;
+  last_refresh_attempt_at?: string | null;
+  last_refresh_success_at?: string | null;
+  refresh_backoff_until?: string | null;
+  cooldown_until?: string | null;
+  expired_reason?: string | null;
+  expired_at?: string | null;
 };
 
 type AccountListResponse = {
@@ -46,12 +58,18 @@ type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
+  checked?: number;
+  unchanged?: number;
+  failed?: number;
   errors?: Array<{ access_token: string; error: string }>;
 };
 
 type AccountRefreshResponse = {
   items: Account[];
   refreshed: number;
+  checked?: number;
+  unchanged?: number;
+  failed?: number;
   errors: Array<{ access_token: string; error: string }>;
 };
 
