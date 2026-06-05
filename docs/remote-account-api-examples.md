@@ -564,7 +564,7 @@ curl http://localhost:83/api/remote-account/inject \
 }
 ```
 
-Grok 远程注入支持两类兼容格式：`tokens` 中的裸 SSO 值或单行 `sso=<值>`，以及 FlowPilot 兼容的 `accounts` 项里 `token`、`access_token` 或 `sso` 字段。保存时都会归一化为裸 SSO 值；不支持完整 Cookie header、`sso-rw`、其他 Cookie 名称、CPA、cookies payload 或无关 JSON。
+Grok 远程注入支持两类兼容格式：`tokens` 中的裸 SSO 值或单行 `sso=<值>`，以及 FlowPilot 兼容的 `accounts` 项里 `token`、`access_token` 或 `sso` 字段。保存时都会归一化为裸 SSO 值；不支持完整 Cookie header、`sso-rw`、其他 Cookie 名称、CPA、cookies payload 或无关 JSON（需要注意，此规则适用于 API 级注入与拉取；而前端 manual/TXT 导入也有其对应的限制：它仅支持 bare SSO 或单行 `sso=<值>` 并会拒绝分号、完整 Cookie 头部、`sso-rw` 等其他键值对，用户在使用时需遵守各个端点具体的 schema，而不应假定前端手动输入支持全部 API 所兼容的格式）。
 
 `accounts` 中可使用 `access_token` 或 `token`。单个账号的 `provider` 优先于请求级 `provider`。Grok 远程注入仅把 FlowPilot 兼容 `accounts` 项中的 `token`、`access_token` 或 `sso` 当作 SSO 输入处理，不会保存其他账号 JSON 字段。
 
