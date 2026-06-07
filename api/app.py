@@ -9,9 +9,21 @@ from fastapi.responses import FileResponse
 
 from api import accounts, ai, gemini, image_tasks, system
 from api.errors import install_exception_handlers
-from api.support import resolve_web_asset, start_limited_account_watcher
+from api.support import resolve_web_asset, start_limited_account_watcher, web_index_asset
 from services.backup_service import backup_service
 from services.config import config
+
+
+def serve_web_asset(full_path: str):
+    asset = resolve_web_asset(full_path)
+    if asset is not None:
+        return FileResponse(asset)
+    if full_path.strip("/").startswith("_next/"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    fallback = web_index_asset()
+    if fallback is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return FileResponse(fallback)
 
 
 def create_app() -> FastAPI:
@@ -51,14 +63,6 @@ def create_app() -> FastAPI:
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_web(full_path: str):
-        asset = resolve_web_asset(full_path)
-        if asset is not None:
-            return FileResponse(asset)
-        if full_path.strip("/").startswith("_next/"):
-            raise HTTPException(status_code=404, detail="Not Found")
-        fallback = resolve_web_asset("")
-        if fallback is None:
-            raise HTTPException(status_code=404, detail="Not Found")
-        return FileResponse(fallback)
+        return serve_web_asset(full_path)
 
     return app
