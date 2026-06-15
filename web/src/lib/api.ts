@@ -10,6 +10,13 @@ export type AuthRole = "admin" | "user";
 export type Account = {
   access_token?: string;
   has_gemini_session?: boolean;
+  account_category?: string;
+  account_status?: string;
+  account_status_code?: number | null;
+  usage_info?: unknown;
+  quotas?: unknown;
+  abuse_status?: unknown;
+  available_models?: unknown[];
   type: AccountType;
   provider?: AccountProvider;
   export_type?: string | null;
@@ -355,6 +362,52 @@ export async function createAccounts(
       ...(provider ? { provider } : {}),
       ...(accounts.length > 0 ? { accounts } : {}),
     },
+  });
+}
+
+export type GeminiBrowserLoginStatus = {
+  jobId: string;
+  status: "running" | "waiting_for_2fa" | "waiting_for_manual_confirmation" | "success" | "failed" | "cancelled" | "expired";
+  step?: string;
+  message?: string;
+  engine?: string;
+  errorCode?: string;
+  allowedActions?: string[];
+  items?: Account[];
+  added?: number;
+  skipped?: number;
+  refreshed?: number;
+  errors?: unknown[];
+};
+
+export async function startGeminiBrowserLogin(payload: {
+  email: string;
+  password: string;
+  totp?: string;
+  proxy?: string;
+  headless?: boolean;
+}) {
+  return httpRequest<GeminiBrowserLoginStatus>("/api/accounts/gemini/browser-login", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function fetchGeminiBrowserLogin(jobId: string) {
+  return httpRequest<GeminiBrowserLoginStatus>(`/api/accounts/gemini/browser-login/${encodeURIComponent(jobId)}`);
+}
+
+export async function continueGeminiBrowserLogin(jobId: string, payload: { action: "submit_totp" | "cancel"; totp?: string }) {
+  return httpRequest<GeminiBrowserLoginStatus>(`/api/accounts/gemini/browser-login/${encodeURIComponent(jobId)}/continue`, {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function cancelGeminiBrowserLogin(jobId: string) {
+  return httpRequest<GeminiBrowserLoginStatus>(`/api/accounts/gemini/browser-login/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    body: {},
   });
 }
 

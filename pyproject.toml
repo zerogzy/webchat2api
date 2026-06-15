@@ -15,6 +15,7 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "psycopg2-binary>=2.9.0",
     "gitpython>=3.1.0",
+    "gemini-webapi @ git+https://github.com/HanaokaYuzu/Gemini-API.git@b1a2b48a4cab4ba44c1dd3d2782822b3abf86b7e",
 ]
 
 [dependency-groups]

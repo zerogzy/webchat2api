@@ -16,6 +16,13 @@
 
 const http = require("http");
 const { chromium } = require("playwright");
+const {
+  GeminiLoginError,
+  startGeminiLoginJob,
+  getGeminiLoginJob,
+  continueGeminiLoginJob,
+  cancelGeminiLoginJob,
+} = require("./gemini_login");
 
 const PORT = parseInt(process.env.BRIDGE_PORT || "3080", 10);
 const CHROMIUM_PATH = process.env.CHROMIUM_PATH || "/usr/bin/chromium";
@@ -460,6 +467,47 @@ function respond(res, status, obj) {
 const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     return respond(res, 200, healthPayload());
+  }
+
+  const url = new URL(req.url, "http://127.0.0.1");
+  const geminiLoginMatch = url.pathname.match(/^\/api\/gemini\/login\/([^/]+)(?:\/(continue))?$/);
+
+  if (req.method === "POST" && url.pathname === "/api/gemini/login") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return respond(res, 400, jsonError("invalid_json", "Invalid JSON body"));
+    }
+    try {
+      return respond(res, 202, startGeminiLoginJob(body));
+    } catch (err) {
+      const loginErr = err instanceof GeminiLoginError
+        ? err
+        : new GeminiLoginError("LOGIN_FAILED", err.message || "Gemini login failed");
+      return respond(res, loginErr.code === "INVALID_REQUEST" ? 400 : 502, jsonError(loginErr.code, loginErr.message));
+    }
+  }
+
+  if (req.method === "GET" && geminiLoginMatch && !geminiLoginMatch[2]) {
+    const job = getGeminiLoginJob(geminiLoginMatch[1], true);
+    return job ? respond(res, 200, job) : respond(res, 404, jsonError("JOB_NOT_FOUND", "Gemini login job not found"));
+  }
+
+  if (req.method === "POST" && geminiLoginMatch && geminiLoginMatch[2] === "continue") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return respond(res, 400, jsonError("invalid_json", "Invalid JSON body"));
+    }
+    const job = continueGeminiLoginJob(geminiLoginMatch[1], body);
+    return job ? respond(res, 200, job) : respond(res, 404, jsonError("JOB_NOT_FOUND", "Gemini login job not found"));
+  }
+
+  if (req.method === "DELETE" && geminiLoginMatch && !geminiLoginMatch[2]) {
+    const job = await cancelGeminiLoginJob(geminiLoginMatch[1]);
+    return job ? respond(res, 200, job) : respond(res, 404, jsonError("JOB_NOT_FOUND", "Gemini login job not found"));
   }
 
   if (req.method === "POST" && req.url === "/api/chat") {

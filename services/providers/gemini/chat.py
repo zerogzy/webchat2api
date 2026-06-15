@@ -11,5 +11,4 @@ def chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[s
 
 
 def chat_completion_deltas(body: dict[str, Any], spec: ModelSpec, messages: list[dict[str, Any]]) -> Iterator[str]:
-    completion = chat_completion(body, spec, messages)
-    yield from gemini.synthetic_stream_content(completion.content)
+    yield from gemini.chat_completion_deltas(body, spec, messages)

@@ -5,5 +5,8 @@
   "description": "Browser bridge for grok.com app-chat API (bypasses CF Bot Management)",
   "dependencies": {
     "playwright": "^1.52.0"
+  },
+  "optionalDependencies": {
+    "cloakbrowser": "^0.3.31"
   }
 }

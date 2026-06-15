@@ -8,6 +8,7 @@ import {
   FileJson,
   FileText,
   Files,
+  Globe,
   KeyRound,
   LoaderCircle,
   ServerCog,
@@ -26,7 +27,16 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { createAccounts, type Account, type AccountImportPayload } from "@/lib/api";
+import {
+  cancelGeminiBrowserLogin,
+  continueGeminiBrowserLogin,
+  createAccounts,
+  fetchGeminiBrowserLogin,
+  startGeminiBrowserLogin,
+  type Account,
+  type AccountImportPayload,
+  type GeminiBrowserLoginStatus,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   accountImportProviderOptions,
@@ -52,6 +62,7 @@ type PendingCpaImport = {
 const methodIcons: Record<AccountImportMethod, typeof KeyRound> = {
   token: KeyRound,
   session: FileJson,
+  "browser-login": Globe,
   cpa: Files,
   "remote-cpa": Files,
   sub2api: ServerCog,
@@ -209,6 +220,7 @@ function methodTitle(method: AccountImportMethod, provider: ImportProvider) {
   const definition = getAccountProviderDefinition(provider);
   if (method === "token") return definition.importTokenCopy.label;
   if (method === "session") return definition.importSessionCopy.label;
+  if (method === "browser-login") return "浏览器登录";
   if (method === "cpa") return "本地 JSON 文件";
   if (method === "remote-cpa") return "远程 CPA 服务器";
   return "Sub2API 服务器";
@@ -218,6 +230,7 @@ function methodDescription(method: AccountImportMethod, provider: ImportProvider
   const definition = getAccountProviderDefinition(provider);
   if (method === "token") return definition.importTokenCopy.fileHelp ?? definition.importTokenCopy.placeholder;
   if (method === "session") return definition.importSessionCopy.help || definition.importSessionCopy.placeholder;
+  if (method === "browser-login") return "通过后端真实浏览器登录 Gemini，并自动提取可用 Cookie。";
   if (method === "cpa") return definition.importFlowCopy.cpaHelp;
   if (method === "remote-cpa") return definition.importFlowCopy.remoteCpaDescription;
   return definition.importFlowCopy.sub2apiDescription;
@@ -260,8 +273,11 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   const [importProvider, setImportProvider] = useState<ImportProvider>("gpt");
   const [sessionInput, setSessionInput] = useState("");
   const [importProxy, setImportProxy] = useState("");
-  const [geminiSecure1Psid, setGeminiSecure1Psid] = useState("");
-  const [geminiSecure1Psidts, setGeminiSecure1Psidts] = useState("");
+  const [geminiCookieJson, setGeminiCookieJson] = useState("");
+  const [geminiLoginEmail, setGeminiLoginEmail] = useState("");
+  const [geminiLoginPassword, setGeminiLoginPassword] = useState("");
+  const [geminiLoginTotp, setGeminiLoginTotp] = useState("");
+  const [geminiLoginStatus, setGeminiLoginStatus] = useState<GeminiBrowserLoginStatus | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pendingCpaImport, setPendingCpaImport] = useState<PendingCpaImport | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -278,8 +294,11 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     setImportProvider("gpt");
     setSessionInput("");
     setImportProxy("");
-    setGeminiSecure1Psid("");
-    setGeminiSecure1Psidts("");
+    setGeminiCookieJson("");
+    setGeminiLoginEmail("");
+    setGeminiLoginPassword("");
+    setGeminiLoginTotp("");
+    setGeminiLoginStatus(null);
     setPendingCpaImport(null);
     setConfirmOpen(false);
   };
@@ -365,12 +384,26 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     </div>
   );
 
-  const buildGeminiSessionPayload = (secure1Psid: string, secure1Psidts: string): AccountImportPayload => {
-    return withImportProxy({
-      provider: "gemini",
-      "__Secure-1PSID": secure1Psid,
-      "__Secure-1PSIDTS": secure1Psidts,
-    });
+  const buildGeminiSessionPayload = (value: string): AccountImportPayload | null => {
+    const parsed = JSON.parse(value) as unknown;
+    const raw = getRecord(parsed);
+    const cookieSource = Array.isArray(parsed) ? parsed : Array.isArray(raw?.cookies) ? raw.cookies : null;
+    const source = raw?.cookies && !Array.isArray(raw.cookies) ? getRecord(raw.cookies) : raw;
+    const cookies = cookieSource
+      ? Object.fromEntries(cookieSource.flatMap((item) => {
+        const record = getRecord(item);
+        const name = getStringField(record?.name);
+        const cookieValue = getStringField(record?.value);
+        return name && cookieValue ? [[name, cookieValue] as const] : [];
+      }))
+      : source ? Object.fromEntries(
+        Object.entries(source)
+          .map(([name, cookieValue]) => [name, getStringField(cookieValue)] as const)
+          .filter(([, cookieValue]) => Boolean(cookieValue)),
+      ) : {};
+    return cookies["__Secure-1PSID"] && cookies["__Secure-1PSIDTS"]
+      ? withImportProxy({ provider: "gemini", cookies })
+      : null;
   };
 
   const handleImportTokenText = async () => {
@@ -418,24 +451,107 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     }
   };
 
+  const pollGeminiBrowserLogin = async (jobId: string) => {
+    for (;;) {
+      const status = await fetchGeminiBrowserLogin(jobId);
+      setGeminiLoginStatus(status);
+      if (status.status === "success") {
+        await onImported(status.items ?? [], "gemini");
+        toast.success(`Gemini 浏览器登录完成，新增 ${status.added ?? 0} 个，已刷新 ${status.refreshed ?? 0} 个`);
+        setGeminiLoginPassword("");
+        setGeminiLoginTotp("");
+        return;
+      }
+      if (["failed", "cancelled", "expired"].includes(status.status)) {
+        toast.error(status.message || "Gemini 浏览器登录失败");
+        return;
+      }
+      if (status.status === "waiting_for_2fa" || status.status === "waiting_for_manual_confirmation") {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+  };
+
+  const handleGeminiBrowserLogin = async () => {
+    if (!geminiLoginEmail.trim() || !geminiLoginPassword) {
+      toast.error("请先填写 Gemini 账号邮箱和密码");
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      const status = await startGeminiBrowserLogin({
+        email: geminiLoginEmail.trim(),
+        password: geminiLoginPassword,
+        totp: geminiLoginTotp.trim(),
+        proxy: importProxy.trim(),
+        headless: true,
+      });
+      setGeminiLoginStatus(status);
+      if (status.jobId) await pollGeminiBrowserLogin(status.jobId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Gemini 浏览器登录启动失败";
+      toast.error(message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleGeminiBrowserLoginContinue = async () => {
+    const jobId = geminiLoginStatus?.jobId;
+    if (!jobId) return;
+    if (!geminiLoginTotp.trim()) {
+      toast.error("请填写 2FA 验证码");
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      const status = await continueGeminiBrowserLogin(jobId, { action: "submit_totp", totp: geminiLoginTotp.trim() });
+      setGeminiLoginStatus(status);
+      await pollGeminiBrowserLogin(jobId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "提交 2FA 验证码失败";
+      toast.error(message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleGeminiBrowserLoginCancel = async () => {
+    const jobId = geminiLoginStatus?.jobId;
+    if (!jobId) return;
+    setIsSubmitting(true);
+    try {
+      const status = await cancelGeminiBrowserLogin(jobId);
+      setGeminiLoginStatus(status);
+      toast.info("已取消 Gemini 浏览器登录");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "取消 Gemini 浏览器登录失败";
+      toast.error(message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handleImportSessionJson = async () => {
     const sessionCopy = providerDefinition.importSessionCopy;
 
     if (importProvider === "gemini") {
-      const secure1Psid = geminiSecure1Psid.trim();
-      const secure1Psidts = geminiSecure1Psidts.trim();
-
-      if (!secure1Psid || !secure1Psidts) {
-        toast.error("请分别填写 __Secure-1PSID 和 __Secure-1PSIDTS 的值");
+      if (!geminiCookieJson.trim()) {
+        toast.error("请先粘贴 Gemini Cookie JSON");
         return;
       }
-      if (secure1Psid.includes("=") || secure1Psid.includes(";") || secure1Psidts.includes("=") || secure1Psidts.includes(";")) {
-        toast.error("只填写等号右侧的 cookie 值，不要包含 cookie 名称或分号");
-        return;
+      try {
+        const accountPayload = buildGeminiSessionPayload(geminiCookieJson.trim());
+        if (!accountPayload) {
+          toast.error("Cookie JSON 中必须包含 __Secure-1PSID 和 __Secure-1PSIDTS");
+          return;
+        }
+        await submitTokens([], sessionCopy.successLabel, [accountPayload]);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Gemini Cookie JSON 解析失败";
+        toast.error(message);
       }
-
-      const accountPayload = buildGeminiSessionPayload(secure1Psid, secure1Psidts);
-      await submitTokens([], sessionCopy.successLabel, [accountPayload]);
       return;
     }
 
@@ -628,6 +744,60 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
       );
     }
 
+    if (method === "browser-login") {
+      return (
+        <div className="space-y-4">
+          <button
+            type="button"
+            onClick={() => setMethod("methods")}
+            className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800"
+          >
+            <ArrowLeft className="size-4" />
+            返回导入方式
+          </button>
+          <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-600">
+            后端会启动无头浏览器登录 Gemini，成功后自动提取 Cookie 并校验账号。代理建议填写账号常用地区代理。
+          </div>
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+            <div className="font-medium">安全提示</div>
+            <div>邮箱、密码和 2FA 只用于本次登录，不会保存；如 Google 要求验证码、手机确认或 Passkey，当前无头模式可能无法继续。</div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2 sm:col-span-2">
+              <label className="text-sm font-medium text-stone-700">Gemini 账号邮箱</label>
+              <Input value={geminiLoginEmail} onChange={(event) => setGeminiLoginEmail(event.target.value)} placeholder="name@example.com" className="h-11 rounded-xl border-stone-200 bg-white" />
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <label className="text-sm font-medium text-stone-700">Gemini 账号密码</label>
+              <Input type="password" value={geminiLoginPassword} onChange={(event) => setGeminiLoginPassword(event.target.value)} placeholder="仅用于本次浏览器登录" className="h-11 rounded-xl border-stone-200 bg-white" />
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <label className="text-sm font-medium text-stone-700">2FA 验证码</label>
+              <Input value={geminiLoginTotp} onChange={(event) => setGeminiLoginTotp(event.target.value)} placeholder="可先留空，系统需要时再提交" className="h-11 rounded-xl border-stone-200 bg-white" />
+            </div>
+          </div>
+          {renderImportProxyField()}
+          {geminiLoginStatus ? (
+            <div className="rounded-2xl border border-stone-200 bg-white p-4 text-sm leading-6 text-stone-600">
+              <div className="font-medium text-stone-900">当前状态：{geminiLoginStatus.status}</div>
+              <div>{geminiLoginStatus.message || geminiLoginStatus.step}</div>
+              {geminiLoginStatus.errorCode ? <div className="text-red-600">错误码：{geminiLoginStatus.errorCode}</div> : null}
+              {geminiLoginStatus.status === "waiting_for_2fa" ? (
+                <div className="mt-3 flex gap-2">
+                  <Button type="button" className="rounded-xl bg-stone-950 text-white hover:bg-stone-800" onClick={() => void handleGeminiBrowserLoginContinue()} disabled={isSubmitting}>
+                    提交 2FA
+                  </Button>
+                  <Button type="button" variant="outline" className="rounded-xl border-stone-200 bg-white" onClick={() => void handleGeminiBrowserLoginCancel()} disabled={isSubmitting}>
+                    取消登录
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+
     if (method === "session") {
       const sessionCopy = providerDefinition.importSessionCopy;
 
@@ -662,28 +832,16 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           {renderImportProxyField()}
           <div className="grid gap-4 sm:grid-cols-2">
             {importProvider === "gemini" ? (
-              <>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-stone-700">__Secure-1PSID</label>
-                  <Input
-                    value={geminiSecure1Psid}
-                    onChange={(event) => setGeminiSecure1Psid(event.target.value)}
-                    placeholder="只填写 __Secure-1PSID 的值"
-                    className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs"
-                  />
-                  <p className="text-xs leading-5 text-stone-500">不要包含 cookie 名称，只粘贴等号右侧的完整值。</p>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-stone-700">__Secure-1PSIDTS</label>
-                  <Input
-                    value={geminiSecure1Psidts}
-                    onChange={(event) => setGeminiSecure1Psidts(event.target.value)}
-                    placeholder="只填写 __Secure-1PSIDTS 的值"
-                    className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs"
-                  />
-                  <p className="text-xs leading-5 text-stone-500">必填；不要包含 cookie 名称，只粘贴等号右侧的完整值。</p>
-                </div>
-              </>
+              <div className="space-y-2 sm:col-span-2">
+                <label className="text-sm font-medium text-stone-700">Gemini Cookie JSON</label>
+                <Textarea
+                  value={geminiCookieJson}
+                  onChange={(event) => setGeminiCookieJson(event.target.value)}
+                  placeholder={'{"cookies":{"__Secure-1PSID":"...","__Secure-1PSIDTS":"..."}}'}
+                  className="min-h-48 resize-none rounded-xl border-stone-200 font-mono text-xs"
+                />
+                <p className="text-xs leading-5 text-stone-500">支持浏览器扩展导出的 Cookie JSON 或包含 cookies 字段的 JSON；至少需要 __Secure-1PSID 和 __Secure-1PSIDTS。</p>
+              </div>
             ) : (
               <div className="space-y-2 sm:col-span-2">
                 <label className="text-sm font-medium text-stone-700">{sessionCopy.label}</label>
@@ -774,6 +932,12 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
               <Button className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800" onClick={() => void handleImportTokenText()} disabled={footerDisabled}>
                 {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
                 {selectedTokenCopy.submitLabel}
+              </Button>
+            ) : null}
+            {method === "browser-login" ? (
+              <Button className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800" onClick={() => void handleGeminiBrowserLogin()} disabled={footerDisabled}>
+                {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
+                开始浏览器登录
               </Button>
             ) : null}
             {method === "session" ? (

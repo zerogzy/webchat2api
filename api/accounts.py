@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import time
+import urllib.error
+import urllib.request
 from typing import Any, Literal, Sequence
 
 from fastapi import APIRouter, Header, HTTPException
@@ -8,6 +12,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from services.auth_service import auth_service
+from services.config import config
 
 from api.support import (
     require_admin,
@@ -77,6 +82,20 @@ class AccountExportRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
     provider: Literal["gpt", "grok", "gemini"]
+
+
+class GeminiBrowserLoginRequest(BaseModel):
+    email: str
+    password: str
+    totp: str = ""
+    proxy: str = ""
+    headless: bool = True
+    timeoutMs: int | None = None
+
+
+class GeminiBrowserLoginContinueRequest(BaseModel):
+    action: Literal["submit_totp", "cancel"]
+    totp: str = ""
 
 
 class AccountUpdateRequest(BaseModel):
@@ -236,28 +255,102 @@ def _gemini_import_requested(provider: str | None, payloads: list[dict[str, Any]
     return False
 
 
+_GEMINI_BROWSER_LOGIN_JOBS: dict[str, dict[str, Any]] = {}
+_GEMINI_BROWSER_LOGIN_TTL = 900
+
+
+def _browser_bridge_url() -> str:
+    bridge_url = config.browser_bridge_url or "http://127.0.0.1:3080"
+    return bridge_url.rstrip("/")
+
+
+def _bridge_request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        f"{_browser_bridge_url()}{path}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(raw)
+        except ValueError:
+            detail = {"error": raw or str(exc)}
+        raise HTTPException(status_code=exc.code, detail=detail) from exc
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail={"error": "Gemini 浏览器桥接服务不可用"}) from exc
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail={"error": "Gemini 浏览器桥接服务返回了无效响应"}) from exc
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _remember_gemini_login_job(job_id: str, owner_id: str, proxy: str) -> None:
+    now = time.time()
+    _GEMINI_BROWSER_LOGIN_JOBS[job_id] = {"owner_id": owner_id, "created_at": now, "proxy": proxy}
+    for key, value in list(_GEMINI_BROWSER_LOGIN_JOBS.items()):
+        if now - float(value.get("created_at") or 0) > _GEMINI_BROWSER_LOGIN_TTL:
+            _GEMINI_BROWSER_LOGIN_JOBS.pop(key, None)
+
+
+def _require_gemini_login_job(job_id: str, owner_id: str) -> dict[str, Any]:
+    job = _GEMINI_BROWSER_LOGIN_JOBS.get(job_id)
+    if not job or job.get("owner_id") != owner_id:
+        raise HTTPException(status_code=404, detail={"error": "Gemini browser login job not found"})
+    return job
+
+
+def _complete_gemini_browser_login(status: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    if status.get("status") != "success" or status.get("account"):
+        return status
+    cookies = status.get("cookies") if isinstance(status.get("cookies"), dict) else {}
+    if not cookies.get("__Secure-1PSID") or not cookies.get("__Secure-1PSIDTS"):
+        return {**status, "status": "failed", "errorCode": "COOKIE_NOT_FOUND", "message": "浏览器登录成功但缺少 Gemini 必需 Cookie"}
+    payload = {"provider": GEMINI_PROVIDER, "cookies": cookies, "proxy": str(job.get("proxy") or "")}
+    result = account_service.add_account_items([payload])
+    access_tokens = [str(item.get("access_token") or "").strip() for item in result.get("items", []) if isinstance(item, dict) and str(item.get("provider") or "") == GEMINI_PROVIDER]
+    refresh_result = account_service.refresh_accounts(access_tokens, provider=GEMINI_PROVIDER) if access_tokens else {"refreshed": 0, "errors": [], "items": result.get("items", [])}
+    sanitized = sanitize_account_result({
+        **result,
+        "refreshed": refresh_result.get("refreshed", 0),
+        "errors": refresh_result.get("errors", []),
+        "items": refresh_result.get("items", result.get("items", [])),
+    })
+    status.pop("cookies", None)
+    status.update({
+        "account": True,
+        "added": sanitized.get("added", 0),
+        "skipped": sanitized.get("skipped", 0),
+        "refreshed": sanitized.get("refreshed", 0),
+        "errors": sanitized.get("errors", []),
+        "items": sanitized.get("items", []),
+    })
+    return status
+
+
 def _validate_gemini_import_payloads(tokens: list[str], payloads: list[dict[str, Any]], provider: str | None) -> None:
     if not _gemini_import_requested(provider, payloads):
         return
     if tokens:
-        raise HTTPException(status_code=400, detail={"error": "Gemini 目前只支持 Cookie 双字段导入，请分别填写 __Secure-1PSID 和 __Secure-1PSIDTS 的值"})
+        raise HTTPException(status_code=400, detail={"error": "Gemini 账号请使用 Cookie JSON 导入，不再支持 TXT token 导入"})
     if not payloads:
-        raise HTTPException(status_code=400, detail={"error": "Gemini 目前只支持 Cookie 双字段导入"})
+        raise HTTPException(status_code=400, detail={"error": "Gemini 账号请使用 Cookie JSON 导入"})
     top_level_gemini = normalize_provider(provider) == GEMINI_PROVIDER
-    allowed_keys = {"provider", "__Secure-1PSID", "__Secure-1PSIDTS", "proxy"}
     for item in payloads:
         item_provider = str(item.get("provider") or "").strip()
         if top_level_gemini and item_provider and normalize_account_provider(item_provider) != GEMINI_PROVIDER:
             raise HTTPException(status_code=400, detail={"error": "Gemini 导入不能混用其他供应商账号"})
-        extra_keys = {key for key, value in item.items() if value is not None} - allowed_keys
-        if extra_keys:
-            raise HTTPException(status_code=400, detail={"error": "Gemini 目前只支持 Cookie 双字段导入，不支持完整 Cookie、access_token、JSON 或其他导入方式"})
-        psid = str(item.get("__Secure-1PSID") or "").strip()
-        psidts = str(item.get("__Secure-1PSIDTS") or "").strip()
+        cookies = item.get("cookies") if isinstance(item.get("cookies"), dict) else {}
+        psid = str(item.get("__Secure-1PSID") or cookies.get("__Secure-1PSID") or "").strip()
+        psidts = str(item.get("__Secure-1PSIDTS") or cookies.get("__Secure-1PSIDTS") or "").strip()
         if not psid or not psidts:
-            raise HTTPException(status_code=400, detail={"error": "请分别填写 __Secure-1PSID 和 __Secure-1PSIDTS 的值"})
-        if "=" in psid or ";" in psid or "=" in psidts or ";" in psidts:
-            raise HTTPException(status_code=400, detail={"error": "Gemini Cookie 双字段只接受等号右侧的值，不要包含 cookie 名称、等号或分号"})
+            raise HTTPException(status_code=400, detail={"error": "Gemini Cookie JSON 中必须包含 __Secure-1PSID 和 __Secure-1PSIDTS"})
 
 
 def _normalize_grok_sso_import_token(value: str) -> str:
@@ -430,6 +523,48 @@ def create_router() -> APIRouter:
             "errors": refresh_result.get("errors", []),
             "items": refresh_result.get("items", result.get("items", [])),
         })
+
+    @router.post("/api/accounts/gemini/browser-login")
+    async def start_gemini_browser_login(body: GeminiBrowserLoginRequest, authorization: str | None = Header(default=None)):
+        identity = require_admin(authorization)
+        proxy = str(body.proxy or "").strip()
+        payload: dict[str, Any] = {
+            "email": body.email,
+            "password": body.password,
+            "totp": body.totp,
+            "proxy": proxy,
+            "headless": body.headless,
+        }
+        if body.timeoutMs is not None:
+            payload["timeoutMs"] = body.timeoutMs
+        result = await run_in_threadpool(_bridge_request, "POST", "/api/gemini/login", payload)
+        job_id = str(result.get("jobId") or "").strip()
+        if job_id:
+            _remember_gemini_login_job(job_id, str(identity.get("id") or "admin"), proxy)
+        return {key: value for key, value in result.items() if key != "cookies"}
+
+    @router.get("/api/accounts/gemini/browser-login/{job_id}")
+    async def get_gemini_browser_login(job_id: str, authorization: str | None = Header(default=None)):
+        identity = require_admin(authorization)
+        job = _require_gemini_login_job(job_id, str(identity.get("id") or "admin"))
+        result = await run_in_threadpool(_bridge_request, "GET", f"/api/gemini/login/{job_id}")
+        return _complete_gemini_browser_login(result, job)
+
+    @router.post("/api/accounts/gemini/browser-login/{job_id}/continue")
+    async def continue_gemini_browser_login(job_id: str, body: GeminiBrowserLoginContinueRequest, authorization: str | None = Header(default=None)):
+        identity = require_admin(authorization)
+        _require_gemini_login_job(job_id, str(identity.get("id") or "admin"))
+        payload = {"action": body.action, "totp": body.totp}
+        result = await run_in_threadpool(_bridge_request, "POST", f"/api/gemini/login/{job_id}/continue", payload)
+        return {key: value for key, value in result.items() if key != "cookies"}
+
+    @router.delete("/api/accounts/gemini/browser-login/{job_id}")
+    async def cancel_gemini_browser_login(job_id: str, authorization: str | None = Header(default=None)):
+        identity = require_admin(authorization)
+        _require_gemini_login_job(job_id, str(identity.get("id") or "admin"))
+        result = await run_in_threadpool(_bridge_request, "DELETE", f"/api/gemini/login/{job_id}")
+        _GEMINI_BROWSER_LOGIN_JOBS.pop(job_id, None)
+        return {key: value for key, value in result.items() if key != "cookies"}
 
     @router.delete("/api/accounts")
     async def delete_accounts(body: AccountDeleteRequest, authorization: str | None = Header(default=None)):

@@ -16,7 +16,7 @@ from services.providers.base import (
     ProviderDefinition,
     AccountAdapter,
 )
-from services.providers.gemini.models import GEMINI_MODEL_SPECS
+from services.providers.gemini.models import GEMINI_IMAGE_MODEL_IDS, GEMINI_MODEL_SPECS
 from services.providers.gpt.models import GPT_FALLBACK_MODEL_IDS, GPT_IMAGE_MODEL_IDS, GPT_MODEL_SPECS
 from services.providers.grok.models import GROK_IMAGE_MODEL_IDS, GROK_MODEL_SPECS
 
@@ -33,11 +33,11 @@ _PROVIDER_OWNERS = {
 _PROVIDER_CAPABILITIES: dict[str, frozenset[ModelCapability]] = {
     GPT_PROVIDER: frozenset({"chat", "image", "image_edit"}),
     GROK_PROVIDER: frozenset({"chat", "image", "image_edit"}),
-    GEMINI_PROVIDER: frozenset({"chat"}),
+    GEMINI_PROVIDER: frozenset({"chat", "image"}),
 }
 
 MODEL_REGISTRY = {spec.id: spec for specs in _PROVIDER_MODEL_SPECS.values() for spec in specs}
-IMAGE_MODEL_IDS = GPT_IMAGE_MODEL_IDS | GROK_IMAGE_MODEL_IDS
+IMAGE_MODEL_IDS = GPT_IMAGE_MODEL_IDS | GROK_IMAGE_MODEL_IDS | GEMINI_IMAGE_MODEL_IDS
 
 
 def normalize_provider(value: object, *, strict: bool = False) -> str:

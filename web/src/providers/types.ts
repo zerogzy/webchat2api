@@ -4,7 +4,7 @@ import type { LucideProps } from "lucide-react";
 import type { Account, AccountExportProvider, AccountProvider } from "@/lib/api";
 
 export type ProviderId = AccountExportProvider;
-export type AccountImportMethod = "token" | "session" | "cpa" | "remote-cpa" | "sub2api";
+export type AccountImportMethod = "token" | "session" | "browser-login" | "cpa" | "remote-cpa" | "sub2api";
 
 export type ImportProviderOption = {
   label: string;

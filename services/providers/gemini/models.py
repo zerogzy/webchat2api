@@ -7,11 +7,23 @@ from typing import Any
 
 from services.providers.base import GEMINI_PROVIDER, ModelSpec
 
-GEMINI_MODEL_SPECS = (
-    ModelSpec("gemini-2.5-pro", GEMINI_PROVIDER, "google", "gemini-2.5-pro"),
-    ModelSpec("gemini-2.5-flash", GEMINI_PROVIDER, "google", "gemini-2.5-flash"),
-    ModelSpec("gemini-pro", GEMINI_PROVIDER, "google", "gemini-2.5-pro"),
+GEMINI_CHAT_MODEL_SPECS = (
+    ModelSpec("gemini-3-pro", GEMINI_PROVIDER, "google", "gemini-3-pro"),
+    ModelSpec("gemini-3-flash", GEMINI_PROVIDER, "google", "gemini-3-flash"),
+    ModelSpec("gemini-3-lite", GEMINI_PROVIDER, "google", "gemini-3-lite"),
+    ModelSpec("gemini-3-pro-plus", GEMINI_PROVIDER, "google", "gemini-3-pro-plus"),
+    ModelSpec("gemini-3-flash-plus", GEMINI_PROVIDER, "google", "gemini-3-flash-plus"),
+    ModelSpec("gemini-3-lite-plus", GEMINI_PROVIDER, "google", "gemini-3-lite-plus"),
+    ModelSpec("gemini-3-pro-advanced", GEMINI_PROVIDER, "google", "gemini-3-pro-advanced"),
+    ModelSpec("gemini-3-flash-advanced", GEMINI_PROVIDER, "google", "gemini-3-flash-advanced"),
+    ModelSpec("gemini-3-lite-advanced", GEMINI_PROVIDER, "google", "gemini-3-lite-advanced"),
 )
+GEMINI_IMAGE_MODEL_SPECS = (
+    ModelSpec("gemini-image", GEMINI_PROVIDER, "google", "gemini-3-flash", capability="image"),
+    ModelSpec("gemini-image-pro", GEMINI_PROVIDER, "google", "gemini-3-pro", capability="image"),
+)
+GEMINI_MODEL_SPECS = (*GEMINI_CHAT_MODEL_SPECS, *GEMINI_IMAGE_MODEL_SPECS)
+GEMINI_IMAGE_MODEL_IDS = {spec.id for spec in GEMINI_IMAGE_MODEL_SPECS}
 
 _GEMINI_MODEL_PATTERN = re.compile(r"gemini-[a-zA-Z0-9][a-zA-Z0-9.-]*")
 _GEMINI_REAL_MODEL_PATTERN = re.compile(r"^gemini-(?:\d|advanced)")

@@ -12,7 +12,10 @@ SESSION_TOKEN_FIELDS = ("session_token", "SNlM0e", "at")
 GEMINI_REQUIRED_COOKIES = ("__Secure-1PSID", "__Secure-1PSIDTS")
 GEMINI_SENSITIVE_COOKIE_NAMES = ("__Secure-1PSID", "__Secure-1PSIDTS", "SNlM0e", "at", "session_token")
 GEMINI_NON_COOKIE_FIELDS = ("SNlM0e", "session_token", "at")
-UNAVAILABLE_STATUSES = {"禁用", "异常", "限流", "missing_gemini_session", "missing_psid"}
+GEMINI_API_UNAVAILABLE_STATUSES = {
+    "ACCESS_TEMPORARILY_UNAVAILABLE", "ACCOUNT_REJECTED", "ACCOUNT_UNTRUSTED", "TOS_PENDING",
+    "TOS_OUT_OF_DATE", "ACCOUNT_REJECTED_BY_GUARDIAN", "GUARDIAN_APPROVAL_REQUIRED", "LOCATION_REJECTED"}
+UNAVAILABLE_STATUSES = {"禁用", "异常", "限流", "missing_gemini_session", "missing_psid", *GEMINI_API_UNAVAILABLE_STATUSES}
 AUTH_FAILURE_MARKERS = (
     "auth",
     "login",
@@ -219,12 +222,15 @@ def account_category(item: dict[str, Any]) -> str:
 
 
 def account_status(item: dict[str, Any]) -> str:
+    api_status = clean_string(item.get("account_status"))
+    if api_status in GEMINI_API_UNAVAILABLE_STATUSES:
+        return api_status
     category = account_category(item)
     if category == "missing_session":
         return "missing_gemini_session"
     if category == "session_token_only":
         return "missing_psid"
-    return "usable_gemini_session"
+    return "AVAILABLE" if api_status == "AVAILABLE" else "usable_gemini_session"
 
 
 def has_gemini_session(item: dict[str, Any]) -> bool:
@@ -245,6 +251,26 @@ def normalize_access_token(item: dict[str, Any]) -> str:
     return normalize_account_credentials(item)[0]
 
 
+def _quota_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(_quota_text(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_quota_text(item) for item in value)
+    return clean_string(value)
+
+
+def _infer_account_type(account: dict[str, Any]) -> str:
+    text = " ".join(
+        _quota_text(account.get(key))
+        for key in ("quotas", "usage_info", "available_models")
+    ).lower()
+    if "gemini pro" in text or "advanced" in text or "pro" in text:
+        return "pro"
+    if "gemini flash" in text or "flash" in text:
+        return "free"
+    return clean_string(account.get("type")) or "free"
+
+
 def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
     access_token, psid, psidts = normalize_account_credentials(account)
     account["access_token"] = access_token
@@ -261,6 +287,7 @@ def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
             account[name] = value
     account["cookies"] = {name: value for name, value in cookies.items() if value}
     account["user_agent"] = clean_string(account.get("user_agent")) or None
+    account["type"] = _infer_account_type(account)
     category = account_category(account)
     account["account_category"] = category
     account["account_status"] = account_status(account)
@@ -283,16 +310,12 @@ def supports_refresh(account: dict[str, Any]) -> bool:
 
 
 def validate_remote_info(access_token: str, account: dict[str, Any] | None = None) -> dict[str, Any]:
-    from services.providers.gemini.client import GeminiWebClient, account_cookie_header, gemini_session_writeback
+    from services.providers.gemini.api_client import validate_account
 
     source = dict(account or {})
     if access_token:
         source.setdefault("access_token", access_token)
-    cookie_header_value = account_cookie_header(source)
-    with GeminiWebClient(cookie_header_value, source.get("user_agent"), account=source) as client:
-        client.rotate_psidts()
-        session_token = client.bootstrap_session_token()
-        return gemini_session_writeback(source, client.cookie_header, session_token)
+    return validate_account(source)
 
 
 def remote_error_status(exc: Exception) -> int | None:
@@ -301,7 +324,7 @@ def remote_error_status(exc: Exception) -> int | None:
 
 def refresh_error_message(exc: Exception) -> str:
     message = clean_string(exc)
-    return message or "Gemini session refresh failed"
+    return message or "Gemini account login failed"
 
 
 def is_auth_failure_payload(payload: Any) -> bool:
