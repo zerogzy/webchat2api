@@ -15,6 +15,7 @@ _CLIENT_EXPORTS = {
     "build_stream_generate_form_payload",
     "build_web_payload",
     "chat_completion",
+    "chat_completion_deltas",
     "classify_upstream_error",
     "cookie_header_from_mapping",
     "cookie_header_from_response",

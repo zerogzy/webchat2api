@@ -109,19 +109,29 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(getattr(raised.exception, "status_code"), 400)
         self.assertIn("Gemini Web image input", str(getattr(raised.exception, "detail")))
 
-    def test_chat_completion_rejects_image_message_before_account_lookup(self) -> None:
-        account_service = mock.Mock()
-        with mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
-             self.assertRaises(HTTPException) as raised:
-            gemini.chat_completion(
-                {},
-                resolve_model("gemini-2.5-pro"),
-                [{"role": "user", "content": [{"type": "image", "data": b"image-bytes", "mime": "image/png"}]}],
-            )
+    def test_stream_gemini_chat_completion_sends_initial_chunk_before_upstream(self) -> None:
+        def fake_deltas(body: dict[str, Any], spec: Any, messages: list[dict[str, Any]]):
+            yield "识别结果"
 
-        self.assertEqual(getattr(raised.exception, "status_code"), 400)
-        self.assertIn("Gemini Web image input", str(getattr(raised.exception, "detail")))
-        account_service.get_text_access_token.assert_not_called()
+        messages = [{"role": "user", "content": [{"type": "text", "text": "描述图片"}]}]
+        with mock.patch.object(openai_v1_chat_complete.gemini_chat, "chat_completion_deltas", side_effect=fake_deltas):
+            chunks = list(openai_v1_chat_complete.stream_gemini_chat_completion({}, resolve_model("gemini-3-flash"), messages, "gemini-3-flash"))
+
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "content": ""})
+        self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": "识别结果"})
+        self.assertEqual(chunks[2]["choices"][0]["finish_reason"], "stop")
+
+    def test_stream_gemini_chat_completion_sends_non_empty_initial_chunk_for_images(self) -> None:
+        def fake_deltas(body: dict[str, Any], spec: Any, messages: list[dict[str, Any]]):
+            yield "红色"
+
+        messages = [{"role": "user", "content": [{"type": "image", "data": b"image-bytes", "mime": "image/png"}]}]
+        with mock.patch.object(openai_v1_chat_complete.gemini_chat, "chat_completion_deltas", side_effect=fake_deltas):
+            chunks = list(openai_v1_chat_complete.stream_gemini_chat_completion({}, resolve_model("gemini-3-flash"), messages, "gemini-3-flash"))
+
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "content": "正在识别图片，请稍候…\n\n"})
+        self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": "红色"})
+        self.assertEqual(chunks[2]["choices"][0]["finish_reason"], "stop")
 
     def test_account_cookie_header_requires_both_session_cookies(self) -> None:
         with self.assertRaises(HTTPException) as raised:

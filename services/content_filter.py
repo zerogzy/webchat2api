@@ -101,14 +101,15 @@ def _resolve_fail_open(review: dict) -> bool:
     return bool(value)
 
 
-def check_request(text: str) -> None:
+def check_request(text: str, *, ai_review: bool = True) -> None:
     text = str(text or "")
     if not text.strip():
         return
-    # Local sensitive-word match runs on the raw text (cheap, no network).
     for word in config.sensitive_words:
         if word in text:
             raise HTTPException(status_code=400, detail={"error": "检测到敏感词，拒绝本次任务"})
+    if not ai_review:
+        return
     review = config.ai_review
     if not review.get("enabled"):
         return

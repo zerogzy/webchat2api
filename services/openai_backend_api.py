@@ -381,6 +381,7 @@ class OpenAIBackendAPI:
                 raise RuntimeError("only string or list message content is supported")
             text_parts: list[str] = []
             image_inputs: list[tuple[bytes, str]] = []
+            file_inputs: list[tuple[bytes, str, str]] = []
             for part in content:
                 if not isinstance(part, dict):
                     continue
@@ -392,7 +393,15 @@ class OpenAIBackendAPI:
                     mime = str(part.get("mime") or "image/png")
                     if isinstance(data, (bytes, bytearray)):
                         image_inputs.append((bytes(data), mime))
-            if not image_inputs:
+                elif part_type == "file":
+                    data = part.get("data")
+                    mime = str(part.get("mime") or "text/plain")
+                    name = str(part.get("name") or "attachment.txt").strip() or "attachment.txt"
+                    if isinstance(data, str):
+                        data = data.encode("utf-8")
+                    if isinstance(data, (bytes, bytearray)):
+                        file_inputs.append((bytes(data), mime, name))
+            if not image_inputs and not file_inputs:
                 conversation_messages.append({
                     "id": new_uuid(),
                     "author": {"role": role},
@@ -400,39 +409,55 @@ class OpenAIBackendAPI:
                 })
                 continue
             if not self.access_token:
-                raise RuntimeError("authenticated upstream account required for image input")
+                raise RuntimeError("authenticated upstream account required for attachment input")
             uploaded: list[Dict[str, Any]] = []
             for idx, (data, mime) in enumerate(image_inputs, start=1):
                 ext_part = mime.split("/", 1)[1].split("+")[0] if "/" in mime else "png"
                 extension = "jpg" if ext_part == "jpeg" else (ext_part or "png")
                 b64 = base64.b64encode(data).decode("ascii")
                 uploaded.append(self._upload_image(f"data:{mime};base64,{b64}", f"image_{idx}.{extension}"))
+            for data, mime, name in file_inputs:
+                uploaded.append(self._upload_file(data, name, mime, use_case="my_files"))
             parts: list[Any] = []
+            attachments: list[dict[str, Any]] = []
             for ref in uploaded:
-                parts.append({
-                    "content_type": "image_asset_pointer",
-                    "asset_pointer": f"file-service://{ref['file_id']}",
-                    "width": ref["width"],
-                    "height": ref["height"],
-                    "size_bytes": ref["file_size"],
-                })
+                attachment = {
+                    "id": ref["file_id"],
+                    "mimeType": ref["mime_type"],
+                    "mime_type": ref["mime_type"],
+                    "name": ref["file_name"],
+                    "size": ref["file_size"],
+                }
+                if "width" in ref and "height" in ref:
+                    parts.append({
+                        "content_type": "image_asset_pointer",
+                        "asset_pointer": f"file-service://{ref['file_id']}",
+                        "width": ref["width"],
+                        "height": ref["height"],
+                        "size_bytes": ref["file_size"],
+                    })
+                    attachment.update({"width": ref["width"], "height": ref["height"]})
+                else:
+                    attachment.update({
+                        "file_token_size": ref.get("file_token_size") or 0,
+                        "source": "my_files",
+                        "non_library_my_files_injest_upload": bool(ref.get("non_library_my_files_injest_upload")),
+                        "is_big_paste": True,
+                    })
+                attachments.append(attachment)
             text = "".join(text_parts)
             if text:
                 parts.append(text)
+            content_type = "multimodal_text" if image_inputs else "text"
+            content_parts = parts if image_inputs else [text]
+            metadata: dict[str, Any] = {"attachments": attachments}
+            if file_inputs:
+                metadata["system_hints"] = ["retrieval"]
             conversation_messages.append({
                 "id": new_uuid(),
                 "author": {"role": role},
-                "content": {"content_type": "multimodal_text", "parts": parts},
-                "metadata": {
-                    "attachments": [{
-                        "id": ref["file_id"],
-                        "mimeType": ref["mime_type"],
-                        "name": ref["file_name"],
-                        "size": ref["file_size"],
-                        "width": ref["width"],
-                        "height": ref["height"],
-                    } for ref in uploaded],
-                },
+                "content": {"content_type": content_type, "parts": content_parts},
+                "metadata": metadata,
             })
         return conversation_messages
 
@@ -453,7 +478,11 @@ class OpenAIBackendAPI:
             "reset_rate_limits": False,
             "suggestions": [],
             "supported_encodings": [],
-            "system_hints": [],
+            "system_hints": ["retrieval"] if any(
+                isinstance(message.get("content"), list)
+                and any(isinstance(part, dict) and part.get("type") == "file" for part in message.get("content", []))
+                for message in messages
+            ) else [],
             "timezone": timezone,
             "timezone_offset_min": -480,
             "variant_purpose": "comparison_implicit",
@@ -542,28 +571,26 @@ class OpenAIBackendAPI:
         payload = image.split(",", 1)[1] if image.startswith("data:") and "," in image else image
         return base64.b64decode(payload)
 
-    def _upload_image(self, image: str, file_name: str = "image.png") -> Dict[str, Any]:
-        """上传一张 base64 图片，返回底层文件元数据。"""
-        data = self._decode_image_base64(image)
-        if (
-                image
-                and len(image) < 512
-                and not image.startswith("data:")
-                and "\n" not in image
-                and "\r" not in image
-        ):
-            candidate_path = Path(os.path.expanduser(image))
-            if candidate_path.exists() and candidate_path.is_file():
-                file_name = candidate_path.name
-        image = Image.open(BytesIO(data))
-        width, height = image.size
-        mime_type = Image.MIME.get(image.format, "image/png")
+    def _upload_file(
+            self,
+            data: bytes,
+            file_name: str,
+            mime_type: str,
+            *,
+            width: int | None = None,
+            height: int | None = None,
+            use_case: str = "multimodal",
+            upload_source: str = "user",
+    ) -> Dict[str, Any]:
+        """上传一个文件，返回底层文件元数据。"""
         path = "/backend-api/files"
+        payload: dict[str, Any] = {"file_name": file_name, "file_size": len(data), "use_case": use_case}
+        if width is not None and height is not None:
+            payload.update({"width": width, "height": height})
         response = self.session.post(
             self.base_url + path,
             headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
-            json={"file_name": file_name, "file_size": len(data), "use_case": "multimodal", "width": width,
-                  "height": height},
+            json=payload,
             timeout=60,
         )
         ensure_ok(response, path)
@@ -584,7 +611,7 @@ class OpenAIBackendAPI:
             data=data,
             timeout=120,
         )
-        ensure_ok(response, "image_upload")
+        ensure_ok(response, "file_upload")
         path = f"/backend-api/files/{upload_meta['file_id']}/uploaded"
         response = self.session.post(
             self.base_url + path,
@@ -593,14 +620,80 @@ class OpenAIBackendAPI:
             timeout=60,
         )
         ensure_ok(response, path)
-        return {
+        upload_result = response.json() if response.text else {}
+        # process_upload_stream is optional — skip to avoid blocking SSE for text files
+        # file_token_size and non_library_my_files_injest_upload default to safe values
+        process_meta: dict[str, Any] = {}
+        if use_case != "my_files" or mime_type.startswith("image/"):
+            try:
+                process_meta = self._process_uploaded_file(upload_meta["file_id"], file_name, use_case, mime_type)
+            except Exception:
+                logger.warning(f"process_upload_stream skipped for {file_name}")
+        logger.info(f"chatgpt attachment uploaded: name={file_name} size={len(data)} mime={mime_type}")
+        result = {
             "file_id": upload_meta["file_id"],
-            "file_name": file_name,
-            "file_size": len(data),
-            "mime_type": mime_type,
-            "width": width,
-            "height": height,
+            "file_name": str(upload_result.get("file_name") or file_name),
+            "file_size": int(upload_result.get("file_size_bytes") or len(data)),
+            "mime_type": str(process_meta.get("mime_type") or upload_result.get("mime_type") or mime_type),
+            "use_case": use_case,
+            "file_token_size": int(process_meta.get("file_token_size") or 0),
+            "non_library_my_files_injest_upload": bool(process_meta.get("non_library_my_files_injest_upload")),
         }
+        if width is not None and height is not None:
+            result.update({"width": width, "height": height})
+        return result
+
+    def _process_uploaded_file(self, file_id: str, file_name: str, use_case: str, mime_type: str) -> dict[str, Any]:
+        """让 ChatGPT Web 后端处理文本附件，返回 token 等元数据。"""
+        if use_case == "multimodal" and mime_type.startswith("image/"):
+            return {}
+        path = "/backend-api/files/process_upload_stream"
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._headers(path, {"Content-Type": "application/json", "Accept": "text/event-stream"}),
+            json={
+                "file_id": file_id,
+                "use_case": use_case,
+                "index_for_retrieval": True,
+                "file_name": file_name,
+            },
+            timeout=120,
+        )
+        ensure_ok(response, path)
+        metadata: dict[str, Any] = {}
+        for chunk in str(response.text or "").split():
+            try:
+                event = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            extra = event.get("extra") if isinstance(event, dict) else None
+            if not isinstance(extra, dict):
+                continue
+            if extra.get("total_tokens") is not None:
+                metadata["file_token_size"] = extra.get("total_tokens")
+            if extra.get("mime_type"):
+                metadata["mime_type"] = extra.get("mime_type")
+            if extra.get("non_library_my_files_injest_upload") is True:
+                metadata["non_library_my_files_injest_upload"] = True
+        return metadata
+
+    def _upload_image(self, image: str, file_name: str = "image.png") -> Dict[str, Any]:
+        """上传一张 base64 图片，返回底层文件元数据。"""
+        data = self._decode_image_base64(image)
+        if (
+                image
+                and len(image) < 512
+                and not image.startswith("data:")
+                and "\n" not in image
+                and "\r" not in image
+        ):
+            candidate_path = Path(os.path.expanduser(image))
+            if candidate_path.exists() and candidate_path.is_file():
+                file_name = candidate_path.name
+        image_file = Image.open(BytesIO(data))
+        width, height = image_file.size
+        mime_type = Image.MIME.get(image_file.format, "image/png")
+        return self._upload_file(data, file_name, mime_type, width=width, height=height)
 
     def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
                                 references: Optional[list[Dict[str, Any]]] = None) -> requests.Response:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import queue
+import threading
 import time
 import uuid
 from typing import Any, Iterable, Iterator, cast
 
 from fastapi import HTTPException
 
-from services.providers.base import ConversationRequest, GEMINI_PROVIDER, GROK_PROVIDER, ImageGenerationError, ImageOutput
+from services.providers.base import ConversationRequest, GEMINI_PROVIDER, GPT_PROVIDER, GROK_PROVIDER, ImageGenerationError, ImageOutput
 from services.providers.registry import chat_adapter, image_adapter, image_generation_outputs, resolve_model
 from services.config import config
 import services.protocol.tool_calls as tool_calls
@@ -22,6 +24,7 @@ from services.protocol.conversation import (
     count_message_tokens,
     count_text_tokens,
     encode_images,
+    maybe_attach_long_text_messages,
     normalize_messages,
     stream_text_deltas,
     text_backend,
@@ -153,6 +156,7 @@ def stream_text_chat_completion(
     messages: list[dict[str, Any]],
     model: str,
     include_usage: bool = False,
+    usage_messages: list[dict[str, Any]] | None = None,
 ) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -186,7 +190,7 @@ def stream_text_chat_completion(
             model,
             completion_id,
             created,
-            completion_usage(messages, model, "".join(content_parts)),
+            completion_usage(usage_messages or messages, model, "".join(content_parts)),
         )
 
 
@@ -355,22 +359,50 @@ def stream_grok_chat_completion(body: dict[str, Any], spec, messages: list[dict[
         )
 
 
+def _consume_gemini_deltas(deltas: Iterator[str], output: queue.Queue[object]) -> None:
+    try:
+        for delta in deltas:
+            output.put(delta)
+    except Exception as exc:
+        output.put(exc)
+    finally:
+        output.put(None)
+
+
 def stream_gemini_chat_completion(body: dict[str, Any], spec, messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    sent_role = False
+    include_usage = stream_include_usage(body)
     content_parts: list[str] = []
-    for delta_text in gemini_chat.chat_completion_deltas(body, spec, messages):
-        content_parts.append(delta_text)
-        if not sent_role:
-            sent_role = True
-            yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created), stream_include_usage(body))
-        else:
-            yield stream_chunk(completion_chunk(model, {"content": delta_text}, None, completion_id, created), stream_include_usage(body))
-    if not sent_role:
-        yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created), stream_include_usage(body))
-    yield stream_chunk(completion_chunk(model, {}, "stop", completion_id, created), stream_include_usage(body))
-    if stream_include_usage(body):
+    deltas = gemini_chat.chat_completion_deltas(body, spec, messages)
+    has_image_input = any(has_image_message_content(message.get("content")) for message in messages if isinstance(message, dict))
+    if has_image_input:
+        output: queue.Queue[object] = queue.Queue()
+        threading.Thread(target=_consume_gemini_deltas, args=(deltas, output), daemon=True).start()
+        initial_content = "正在识别图片，请稍候…\n\n"
+        content_parts.append(initial_content)
+        yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": initial_content}, None, completion_id, created), include_usage)
+        while True:
+            try:
+                item = output.get(timeout=5)
+            except queue.Empty:
+                content_parts.append("\n")
+                yield stream_chunk(completion_chunk(model, {"content": "\n"}, None, completion_id, created), include_usage)
+                continue
+            if item is None:
+                break
+            if isinstance(item, Exception):
+                raise item
+            delta_text = str(item)
+            content_parts.append(delta_text)
+            yield stream_chunk(completion_chunk(model, {"content": delta_text}, None, completion_id, created), include_usage)
+    else:
+        yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created), include_usage)
+        for delta_text in deltas:
+            content_parts.append(delta_text)
+            yield stream_chunk(completion_chunk(model, {"content": delta_text}, None, completion_id, created), include_usage)
+    yield stream_chunk(completion_chunk(model, {}, "stop", completion_id, created), include_usage)
+    if include_usage:
         yield completion_usage_chunk(model, completion_id, created, completion_usage(messages, model, "".join(content_parts)))
 
 
@@ -427,6 +459,9 @@ def chat_image_args(body: dict[str, Any]) -> tuple[str, str, int, list[tuple[byt
 def text_chat_parts(body: dict[str, Any]) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     model = str(body.get("model") or "auto").strip() or "auto"
     messages, original_messages = prepare_text_messages(body)
+    spec = resolve_model(model)
+    if spec.provider == GPT_PROVIDER and not tool_calls.has_function_tools(body):
+        messages = maybe_attach_long_text_messages(messages, model)
     return model, messages, original_messages
 
 
@@ -454,8 +489,20 @@ def has_chat_image_input(body: dict[str, Any]) -> bool:
     return any(isinstance(message, dict) and has_image_message_content(message.get("content")) for message in messages)
 
 
-def gemini_image_chat_unsupported() -> HTTPException:
-    return HTTPException(status_code=400, detail={"error": "Gemini Web image input is not supported by this upstream adapter"})
+def should_route_gemini_vision_request_to_chat(spec: Any, body: dict[str, Any]) -> bool:
+    # 这里处理的是 Gemini 普通聊天模型的“图片理解/识图”请求。
+    # 它与 gemini-image / gemini-image-pro 图片生成模型不同：
+    # - 普通 Gemini 聊天模型带图片输入时，应保留在 /v1/chat/completions 里做视觉理解。
+    # - gemini-image / gemini-image-pro 已在 reject_gemini_image_model_in_chat() 中禁止走 chat，只允许 /v1/images/*。
+    return spec.provider == GEMINI_PROVIDER and has_chat_image_input(body)
+
+
+def reject_gemini_image_model_in_chat(spec: Any) -> None:
+    if spec.provider == GEMINI_PROVIDER and getattr(spec, "capability", None) == "image":
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "gemini-image and gemini-image-pro can only be used with /v1/images/* endpoints"},
+        )
 
 
 def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
@@ -496,12 +543,35 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     yield from stream_image_chat_completion(image_outputs, model)
 
 
+def _consume_image_outputs(image_outputs: Iterable[ImageOutput], output: queue.Queue[object]) -> None:
+    try:
+        for item in image_outputs:
+            output.put(item)
+    except Exception as exc:
+        output.put(exc)
+    finally:
+        output.put(None)
+
+
 def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: str) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    sent_role = False
-    sent_text = ""
-    for output in image_outputs:
+    sent_text = "正在生成图片，请稍候…\n\n"
+    yield completion_chunk(model, {"role": "assistant", "content": sent_text}, None, completion_id, created)
+    output_queue: queue.Queue[object] = queue.Queue()
+    threading.Thread(target=_consume_image_outputs, args=(image_outputs, output_queue), daemon=True).start()
+    while True:
+        try:
+            output = output_queue.get(timeout=5)
+        except queue.Empty:
+            yield completion_chunk(model, {"content": "\n"}, None, completion_id, created)
+            continue
+        if output is None:
+            break
+        if isinstance(output, Exception):
+            raise output
+        if not isinstance(output, ImageOutput):
+            continue
         content = ""
         if output.kind == "progress":
             content = output.text
@@ -510,15 +580,8 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
             content = build_chat_image_markdown_content({"data": output.data})
         elif output.kind == "message":
             content = output.text[len(sent_text):] if output.text.startswith(sent_text) else output.text
-        if not content:
-            continue
-        if not sent_role:
-            sent_role = True
-            yield completion_chunk(model, {"role": "assistant", "content": content}, None, completion_id, created)
-        else:
+        if content:
             yield completion_chunk(model, {"content": content}, None, completion_id, created)
-    if not sent_role:
-        yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
     yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
@@ -567,18 +630,15 @@ def non_stream_text_chat_response(body: dict[str, Any], model: str, messages: li
     tool_response = parsed_chat_tool_response(body, model, content, messages)
     if tool_response:
         return tool_response
-    return completion_response(model, content, messages=original_messages, tool_call_messages=messages)
+    return completion_response(model, content, messages=original_messages)
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     if body.get("stream"):
-        model, messages, _ = text_chat_parts(body)
+        model, messages, original_messages = text_chat_parts(body)
         spec = resolve_model(model)
-        if spec.provider == GEMINI_PROVIDER and has_chat_image_input(body):
-            raise gemini_image_chat_unsupported()
-        if is_image_chat_request(body):
-            if spec.provider == GEMINI_PROVIDER and has_chat_image_input(body):
-                raise gemini_image_chat_unsupported()
+        reject_gemini_image_model_in_chat(spec)
+        if is_image_chat_request(body) and not should_route_gemini_vision_request_to_chat(spec, body):
             return image_chat_events(body)
         if tool_calls.has_function_tools(body):
             if spec.provider == GROK_PROVIDER:
@@ -616,14 +676,11 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
             return stream_grok_chat_completion(body, spec, messages, model)
         if spec.provider == GEMINI_PROVIDER:
             return stream_gemini_chat_completion(body, spec, messages, model)
-        return stream_text_chat_completion(text_backend(), messages, model, stream_include_usage(body))
+        return stream_text_chat_completion(text_backend(), messages, model, stream_include_usage(body), original_messages)
     model, messages, original_messages = text_chat_parts(body)
     spec = resolve_model(model)
-    if spec.provider == GEMINI_PROVIDER and has_chat_image_input(body):
-        raise gemini_image_chat_unsupported()
-    if is_image_chat_request(body):
-        if spec.provider == GEMINI_PROVIDER and has_chat_image_input(body):
-            raise gemini_image_chat_unsupported()
+    reject_gemini_image_model_in_chat(spec)
+    if is_image_chat_request(body) and not should_route_gemini_vision_request_to_chat(spec, body):
         return image_chat_response(body)
     if is_cacheable_text_request(body, stream=False):
         key = cache_key(body, messages, stream=False)

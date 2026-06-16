@@ -85,7 +85,9 @@ def _cookies_from_client(client: object) -> dict[str, str]:
     return cookies
 
 
-def _model_name(spec: ModelSpec) -> str:
+def _model_name(spec: ModelSpec, *, has_files: bool = False) -> str:
+    if has_files:
+        return "gemini-3-pro"
     return spec.upstream_model or spec.id
 
 
@@ -94,6 +96,13 @@ def _image_prompt(prompt: str, size: str | None = None) -> str:
     if size:
         text = f"{text}\n\n请生成一张图片，宽高比为 {size}。"
     return f"GENERATE an image: {text}"
+
+
+def _image_edit_prompt(prompt: str, size: str | None = None) -> str:
+    text = _safe_text(prompt)
+    if size:
+        text = f"{text}\n\n请输出一张图片，宽高比为 {size}。"
+    return f"请基于上传的参考图片生成或编辑图片：{text}"
 
 
 def _exception_to_error(exc: Exception) -> GeminiApiError:
@@ -177,10 +186,60 @@ def validate_account(account: dict[str, Any]) -> dict[str, Any]:
         raise _exception_to_error(exc) from exc
 
 
-async def _chat_completion(account: dict[str, Any], spec: ModelSpec, prompt: str) -> tuple[GeminiApiCompletion, dict[str, Any]]:
+def _image_extension_from_mime(mime_type: str) -> str:
+    subtype = mime_type.split("/", 1)[1].split(";", 1)[0].lower() if "/" in mime_type else "png"
+    return "jpg" if subtype == "jpeg" else subtype or "png"
+
+
+def _materialize_base64_file(temp_dir: Path, value: str, index: int) -> str | None:
+    text = value.strip()
+    mime_type = "image/png"
+    if text.startswith("data:"):
+        header, separator, payload = text.partition(",")
+        if not separator:
+            return None
+        mime_type = header.split(";", 1)[0].removeprefix("data:") or mime_type
+        text = payload
+    try:
+        data = base64.b64decode(text, validate=True)
+    except Exception:
+        return None
+    if not data:
+        return None
+    path = temp_dir / f"image_{index}.{_image_extension_from_mime(mime_type)}"
+    path.write_bytes(data)
+    return str(path)
+
+
+def _materialize_files(temp_dir: Path, files: list[object] | None) -> list[object] | None:
+    if not files:
+        return None
+    materialized: list[object] = []
+    for index, file in enumerate(files, start=1):
+        if hasattr(file, "getvalue"):
+            filename = Path(str(getattr(file, "name", "") or f"image_{index}.png")).name
+            path = temp_dir / filename
+            path.write_bytes(file.getvalue())
+            materialized.append(str(path))
+            continue
+        if isinstance(file, str):
+            if Path(file).exists():
+                materialized.append(file)
+                continue
+            image_path = _materialize_base64_file(temp_dir, file, index)
+            if image_path is not None:
+                materialized.append(image_path)
+                continue
+        materialized.append(file)
+    return materialized
+
+
+async def _chat_completion(account: dict[str, Any], spec: ModelSpec, prompt: str, files: list[object] | None = None) -> tuple[GeminiApiCompletion, dict[str, Any]]:
     client = await _open_client(account, auto_refresh=False, init_rpc=False)
     try:
-        output = await client.generate_content(prompt, model=_model_name(spec))
+        with tempfile.TemporaryDirectory(prefix="gemini-input-") as temp_dir:
+            upload_files = _materialize_files(Path(temp_dir), files)
+            output = await client.generate_content(prompt, files=upload_files, model=_model_name(spec, has_files=bool(upload_files)))
         return GeminiApiCompletion(content=_safe_text(getattr(output, "text", "")), raw_response=output, metadata=_metadata_from_output(output)), {}
     finally:
         await client.close()
@@ -208,29 +267,31 @@ async def _validate_account_from_open_client(client: object) -> dict[str, Any]:
     return updates
 
 
-def chat_completion(account: dict[str, Any], spec: ModelSpec, prompt: str) -> tuple[GeminiApiCompletion, dict[str, Any]]:
+def chat_completion(account: dict[str, Any], spec: ModelSpec, prompt: str, files: list[object] | None = None) -> tuple[GeminiApiCompletion, dict[str, Any]]:
     try:
-        return run_async(_chat_completion(account, spec, prompt))
+        return run_async(_chat_completion(account, spec, prompt, files))
     except Exception as exc:
         raise _exception_to_error(exc) from exc
 
 
-async def _stream_completion(account: dict[str, Any], spec: ModelSpec, prompt: str) -> tuple[list[str], dict[str, Any]]:
+async def _stream_completion(account: dict[str, Any], spec: ModelSpec, prompt: str, files: list[object] | None = None) -> tuple[list[str], dict[str, Any]]:
     client = await _open_client(account, auto_refresh=False, init_rpc=False)
     chunks: list[str] = []
     try:
-        async for output in client.generate_content_stream(prompt, model=_model_name(spec)):
-            delta = _safe_text(getattr(output, "text_delta", ""))
-            if delta:
-                chunks.append(delta)
+        with tempfile.TemporaryDirectory(prefix="gemini-input-") as temp_dir:
+            upload_files = _materialize_files(Path(temp_dir), files)
+            async for output in client.generate_content_stream(prompt, files=upload_files, model=_model_name(spec, has_files=bool(upload_files))):
+                delta = _safe_text(getattr(output, "text_delta", ""))
+                if delta:
+                    chunks.append(delta)
         return chunks, {}
     finally:
         await client.close()
 
 
-def stream_completion(account: dict[str, Any], spec: ModelSpec, prompt: str) -> tuple[list[str], dict[str, Any]]:
+def stream_completion(account: dict[str, Any], spec: ModelSpec, prompt: str, files: list[object] | None = None) -> tuple[list[str], dict[str, Any]]:
     try:
-        return run_async(_stream_completion(account, spec, prompt))
+        return run_async(_stream_completion(account, spec, prompt, files))
     except Exception as exc:
         raise _exception_to_error(exc) from exc
 
@@ -238,6 +299,19 @@ def stream_completion(account: dict[str, Any], spec: ModelSpec, prompt: str) -> 
 async def _save_generated_image(image: object, temp_dir: Path) -> str:
     path = await image.save(path=str(temp_dir), filename="gemini-image", verbose=False, full_size=True)
     return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+
+
+async def _collect_generated_images(output: object, prompt: str, n: int) -> list[GeminiImageResult]:
+    images = list(getattr(output, "images", None) or [])
+    if not images:
+        message = _safe_text(getattr(output, "text", ""))
+        raise GeminiApiError(message or "Gemini did not return a generated image", status_code=502, code="gemini_image_generation_failed")
+    with tempfile.TemporaryDirectory(prefix="gemini-image-") as temp_dir:
+        temp_path = Path(temp_dir)
+        return [
+            GeminiImageResult(b64_json=await _save_generated_image(image, temp_path), revised_prompt=prompt)
+            for image in images[:max(1, int(n or 1))]
+        ]
 
 
 async def _generate_images(
@@ -250,16 +324,31 @@ async def _generate_images(
     client = await _open_client(account, auto_refresh=True)
     try:
         output = await client.generate_content(_image_prompt(prompt, size), model=_model_name(spec))
-        images = list(getattr(output, "images", None) or [])
-        if not images:
-            message = _safe_text(getattr(output, "text", ""))
-            raise GeminiApiError(message or "Gemini did not return a generated image", status_code=502, code="gemini_image_generation_failed")
-        with tempfile.TemporaryDirectory(prefix="gemini-image-") as temp_dir:
-            temp_path = Path(temp_dir)
-            results = [
-                GeminiImageResult(b64_json=await _save_generated_image(image, temp_path), revised_prompt=prompt)
-                for image in images[:max(1, int(n or 1))]
-            ]
+        results = await _collect_generated_images(output, prompt, n)
+        updates = await _validate_account_from_open_client(client)
+        return results, updates
+    finally:
+        await client.close()
+
+
+async def _edit_images(
+    account: dict[str, Any],
+    spec: ModelSpec,
+    prompt: str,
+    files: list[object],
+    n: int = 1,
+    size: str | None = None,
+) -> tuple[list[GeminiImageResult], dict[str, Any]]:
+    client = await _open_client(account, auto_refresh=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix="gemini-edit-") as temp_dir:
+            upload_files = _materialize_files(Path(temp_dir), files)
+            output = await client.generate_content(
+                _image_edit_prompt(prompt, size),
+                files=upload_files,
+                model=_model_name(spec, has_files=bool(upload_files)),
+            )
+        results = await _collect_generated_images(output, prompt, n)
         updates = await _validate_account_from_open_client(client)
         return results, updates
     finally:
@@ -275,6 +364,22 @@ def generate_images(
 ) -> tuple[list[GeminiImageResult], dict[str, Any]]:
     try:
         return run_async(_generate_images(account, spec, prompt, n, size))
+    except GeminiApiError:
+        raise
+    except Exception as exc:
+        raise _exception_to_error(exc) from exc
+
+
+def edit_images(
+    account: dict[str, Any],
+    spec: ModelSpec,
+    prompt: str,
+    files: list[object],
+    n: int = 1,
+    size: str | None = None,
+) -> tuple[list[GeminiImageResult], dict[str, Any]]:
+    try:
+        return run_async(_edit_images(account, spec, prompt, files, n, size))
     except GeminiApiError:
         raise
     except Exception as exc:

@@ -28,6 +28,7 @@ from services.providers.gpt.runtime import (
     is_token_invalid_error,
     iter_conversation_payloads,
     message_text,
+    maybe_attach_long_text_messages,
     normalize_messages,
     prompt_with_global_system,
     save_image_bytes,

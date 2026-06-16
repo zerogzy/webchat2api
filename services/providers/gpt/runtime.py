@@ -59,6 +59,71 @@ def message_text(content: Any) -> str:
     return ""
 
 
+def _estimated_text_tokens(text: str) -> int:
+    return max(1, len(text) // 4) if text else 0
+
+
+def _long_text_attachment_name(index: int, extension: str) -> str:
+    safe_extension = re.sub(r"[^a-zA-Z0-9]+", "", extension or "md") or "md"
+    return f"long_context_{index}.{safe_extension}"
+
+
+def _content_with_text_replaced(content: Any, replacement: list[dict[str, Any]]) -> Any:
+    if isinstance(content, str):
+        return replacement
+    if not isinstance(content, list):
+        return content
+    replaced = False
+    parts: list[Any] = []
+    for item in content:
+        if isinstance(item, dict) and str(item.get("type") or "") == "text" and not replaced:
+            parts.extend(replacement)
+            replaced = True
+        else:
+            parts.append(item)
+    return parts if replaced else content
+
+
+def maybe_attach_long_text_messages(messages: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
+    settings = config.get_chatgpt_text_attachment_settings()
+    if not settings.get("enabled"):
+        return messages
+    candidates: list[tuple[int, str]] = []
+    threshold_chars = int(settings.get("threshold_chars") or 80000)
+    threshold_tokens = int(settings.get("threshold_tokens") or 24000)
+    for index, message in enumerate(messages):
+        if message.get("role") != "user":
+            continue
+        text = message_text(message.get("content"))
+        if len(text) >= threshold_chars or _estimated_text_tokens(text) >= threshold_tokens:
+            candidates.append((index, text))
+    if not candidates:
+        return messages
+    if settings.get("mode") == "largest_user_message":
+        candidates = [max(candidates, key=lambda item: len(item[1]))]
+    max_bytes = int(settings.get("max_attachment_bytes") or 0)
+    mime_type = str(settings.get("mime_type") or "text/markdown")
+    extension = str(settings.get("file_extension") or "md")
+    updated = [dict(message) for message in messages]
+    for number, (index, text) in enumerate(candidates, start=1):
+        data = text.encode("utf-8")
+        if max_bytes > 0 and len(data) > max_bytes:
+            raise RuntimeError("chatgpt text attachment is too large")
+        instruction = "较长上下文已作为附件上传到 attached file。请先读取附件完整内容，再根据附件中的原始请求回答。"
+        replacement = [
+            {"type": "text", "text": instruction},
+            {
+                "type": "file",
+                "data": data,
+                "mime": mime_type,
+                "name": _long_text_attachment_name(number, extension),
+                "source": "long_context",
+            },
+        ]
+        updated[index]["content"] = _content_with_text_replaced(updated[index].get("content"), replacement)
+    return updated
+
+
 def normalize_messages(messages: object, system: Any = None) -> list[dict[str, Any]]:
     normalized = []
     if config.global_system_prompt:
@@ -74,21 +139,37 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
             content = message.get("content", "")
             text = message_text(content)
             images: list[tuple[bytes, str]] = []
+            files: list[dict[str, Any]] = []
             if role == "user":
                 images.extend(extract_image_from_message_content(content))
                 if isinstance(content, list):
                     for part in content:
-                        if not isinstance(part, dict) or part.get("type") != "image":
+                        if not isinstance(part, dict):
                             continue
-                        data = part.get("data")
-                        if isinstance(data, (bytes, bytearray)):
-                            images.append((bytes(data), str(part.get("mime") or "image/png")))
-            if images:
+                        part_type = str(part.get("type") or "")
+                        if part_type == "image":
+                            data = part.get("data")
+                            if isinstance(data, (bytes, bytearray)):
+                                images.append((bytes(data), str(part.get("mime") or "image/png")))
+                        elif part_type == "file":
+                            data = part.get("data")
+                            if isinstance(data, str):
+                                data = data.encode("utf-8")
+                            if isinstance(data, (bytes, bytearray)):
+                                files.append({
+                                    "type": "file",
+                                    "data": bytes(data),
+                                    "mime": str(part.get("mime") or "text/plain"),
+                                    "name": str(part.get("name") or "attachment.txt"),
+                                    "source": str(part.get("source") or ""),
+                                })
+            if images or files:
                 parts: list[Any] = []
                 if text:
                     parts.append({"type": "text", "text": text})
                 for data, mime in images:
                     parts.append({"type": "image", "data": data, "mime": mime})
+                parts.extend(files)
                 normalized.append({"role": role, "content": parts})
             else:
                 normalized.append({"role": role, "content": text})

@@ -66,6 +66,7 @@ PERSISTENT_CONFIG_KEYS = {
     "browser_bridge_url",
     "chat_completion_cache",
     "chat_completion_message_normalization",
+    "chatgpt_text_attachments",
 }
 
 
@@ -218,6 +219,24 @@ def _normalize_chat_completion_message_normalization_settings(value: object) -> 
         "drop_adjacent_duplicates": _normalize_bool(source.get("drop_adjacent_duplicates"), True),
         "drop_assistant_history": _normalize_bool(source.get("drop_assistant_history"), False),
         "merge_adjacent_same_role_text": _normalize_bool(source.get("merge_adjacent_same_role_text"), False),
+    }
+
+
+def _normalize_chatgpt_text_attachment_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    mode = str(source.get("mode") or "largest_user_message").strip().lower()
+    if mode not in {"largest_user_message", "all_oversized_user_messages"}:
+        mode = "largest_user_message"
+    mime_type = str(source.get("mime_type") or "text/markdown").strip() or "text/markdown"
+    extension = str(source.get("file_extension") or "md").strip().lstrip(".") or "md"
+    return {
+        "enabled": _normalize_bool(source.get("enabled"), False),
+        "threshold_tokens": _normalize_positive_int(source.get("threshold_tokens"), 24000, 1),
+        "threshold_chars": _normalize_positive_int(source.get("threshold_chars"), 80000, 1),
+        "max_attachment_bytes": _normalize_positive_int(source.get("max_attachment_bytes"), 0, 0),
+        "mime_type": mime_type,
+        "file_extension": extension,
+        "mode": mode,
     }
 
 
@@ -521,6 +540,7 @@ class ConfigStore:
         data["grok_console_fingerprint"] = self.grok_console_fingerprint
         data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
         data["chat_completion_message_normalization"] = self.get_chat_completion_message_normalization_settings()
+        data["chatgpt_text_attachments"] = self.get_chatgpt_text_attachment_settings()
         data["network_profiles"] = self.network_profiles
         data["flaresolverr_url"] = self.flaresolverr_url
         data["flaresolverr_timeout_sec"] = self.flaresolverr_timeout_sec
@@ -561,6 +581,8 @@ class ConfigStore:
             next_data["chat_completion_cache"] = _normalize_chat_completion_cache_settings(next_data.get("chat_completion_cache"))
         if "chat_completion_message_normalization" in next_data:
             next_data["chat_completion_message_normalization"] = _normalize_chat_completion_message_normalization_settings(next_data.get("chat_completion_message_normalization"))
+        if "chatgpt_text_attachments" in next_data:
+            next_data["chatgpt_text_attachments"] = _normalize_chatgpt_text_attachment_settings(next_data.get("chatgpt_text_attachments"))
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
@@ -584,6 +606,9 @@ class ConfigStore:
 
     def get_chat_completion_message_normalization_settings(self) -> dict[str, object]:
         return _normalize_chat_completion_message_normalization_settings(self.data.get("chat_completion_message_normalization"))
+
+    def get_chatgpt_text_attachment_settings(self) -> dict[str, object]:
+        return _normalize_chatgpt_text_attachment_settings(self.data.get("chatgpt_text_attachments"))
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import json
+import queue
+import threading
+from collections.abc import Callable, Iterator
+from typing import Any
+
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.image_inputs import parse_image_edit_request, read_image_sources
@@ -70,12 +77,50 @@ class AnthropicMessageRequest(BaseModel):
     stream: bool | None = None
 
 
-async def filter_or_log(call: LoggedCall, text: str) -> None:
+async def filter_or_log(call: LoggedCall, text: str, *, ai_review: bool = True) -> None:
     try:
-        await run_in_threadpool(check_request, text)
+        await run_in_threadpool(check_request, text, ai_review=ai_review)
     except HTTPException as exc:
         call.log("调用失败", status="failed", error=str(exc.detail))
         raise
+
+
+def _sse_image_keepalive(handler: Callable[[dict[str, Any]], dict[str, Any]], payload: dict[str, Any], start_message: str) -> Iterator[str]:
+    result_queue: queue.Queue[object] = queue.Queue(maxsize=1)
+
+    def run_handler() -> None:
+        try:
+            result_queue.put(handler(payload))
+        except Exception as exc:
+            result_queue.put(exc)
+
+    threading.Thread(target=run_handler, daemon=True).start()
+    yield f"data: {json.dumps({'type': 'progress', 'message': start_message}, ensure_ascii=False)}\n\n"
+    while True:
+        try:
+            item = result_queue.get(timeout=5)
+            break
+        except queue.Empty:
+            yield f"data: {json.dumps({'type': 'progress', 'message': ''}, ensure_ascii=False)}\n\n"
+    if isinstance(item, Exception):
+        error = {
+            "error": {
+                "message": str(item),
+                "type": "server_error",
+                "param": None,
+                "code": "upstream_error",
+            }
+        }
+        yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
+    else:
+        yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+async def _maybe_stream_image_response(handler: Callable[[dict[str, Any]], dict[str, Any]], payload: dict[str, Any], start_message: str):
+    if payload.get("stream"):
+        return StreamingResponse(_sse_image_keepalive(handler, payload, start_message), media_type="text/event-stream")
+    return await run_in_threadpool(handler, payload)
 
 
 def create_router() -> APIRouter:
@@ -104,6 +149,8 @@ def create_router() -> APIRouter:
         payload["base_url"] = resolve_image_base_url(request)
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
         await filter_or_log(call, body.prompt)
+        if payload.get("stream"):
+            return await _maybe_stream_image_response(openai_v1_image_generations.handle, payload, "正在生成图片，请稍候…")
         return await call.run(openai_v1_image_generations.handle, payload)
 
     @router.post("/v1/images/edits")
@@ -119,7 +166,7 @@ def create_router() -> APIRouter:
         await filter_or_log(call, prompt)
         payload["images"] = await read_image_sources(image_sources)
         payload["base_url"] = resolve_image_base_url(request)
-        return await call.run(openai_v1_image_edit.handle, payload)
+        return await _maybe_stream_image_response(openai_v1_image_edit.handle, payload, "正在编辑图片，请稍候…")
 
     @router.post("/openai/v1/chat/completions", include_in_schema=False)
     @router.post("/v1/chat/completions")
@@ -133,7 +180,8 @@ def create_router() -> APIRouter:
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("prompt"), payload.get("messages"))
         call = LoggedCall(identity, "/v1/chat/completions", model, "文本生成", request_text=request_preview)
-        await filter_or_log(call, request_preview)
+        has_image_input = openai_v1_chat_complete.has_chat_image_input(payload)
+        await filter_or_log(call, request_preview, ai_review=not has_image_input)
         return await call.run(openai_v1_chat_complete.handle, payload)
 
     @router.post("/v1/search")

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+from io import BytesIO
+
 from typing import Any, Iterator
 
 from fastapi import HTTPException
@@ -128,6 +131,80 @@ def contains_image_content(value: object) -> bool:
     return False
 
 
+def _image_extension(mime_type: str) -> str:
+    subtype = mime_type.split("/", 1)[1].split(";", 1)[0].lower() if "/" in mime_type else "png"
+    return "jpg" if subtype == "jpeg" else subtype or "png"
+
+
+def _image_file(data: bytes, mime_type: str, index: int) -> BytesIO:
+    file = BytesIO(data)
+    file.name = f"image_{index}.{_image_extension(mime_type)}"
+    return file
+
+
+def _decode_image_data_url(value: str) -> tuple[bytes, str]:
+    text = _clean(value)
+    if text.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail={"error": "Gemini image input only supports base64 data URLs"})
+    mime_type = "image/png"
+    if text.startswith("data:"):
+        header, _, text = text.partition(",")
+        mime_type = header.split(";", 1)[0].removeprefix("data:") or mime_type
+    try:
+        data = base64.b64decode(text, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"error": "invalid base64 image data"}) from exc
+    if not data:
+        raise HTTPException(status_code=400, detail={"error": "image file is empty"})
+    return data, mime_type
+
+
+def _image_url_value(value: object) -> object:
+    return value.get("url") if isinstance(value, dict) else value
+
+
+def _image_files_from_content(content: object, start_index: int = 1) -> list[BytesIO]:
+    if isinstance(content, dict):
+        block_type = _clean(content.get("type"))
+        raw_image: object = None
+        if block_type == "image":
+            data = content.get("data")
+            if isinstance(data, (bytes, bytearray)):
+                mime_type = _clean(content.get("mime")) or "image/png"
+                return [_image_file(bytes(data), mime_type, start_index)]
+        if block_type == "image_url":
+            raw_image = _image_url_value(content.get("image_url"))
+        elif block_type == "input_image":
+            raw_image = _image_url_value(content.get("image_url") or content.get("url"))
+        elif block_type in {"", "image"} and "image_url" in content:
+            raw_image = _image_url_value(content.get("image_url"))
+        if raw_image:
+            data, mime_type = _decode_image_data_url(str(raw_image))
+            return [_image_file(data, mime_type, start_index)]
+        inline = content.get("inlineData") or content.get("inline_data")
+        if isinstance(inline, dict):
+            data, mime_type = _decode_image_data_url(str(inline.get("data") or ""))
+            mime_type = _clean(inline.get("mimeType") or inline.get("mime_type")) or mime_type
+            return [_image_file(data, mime_type, start_index)]
+        files: list[BytesIO] = []
+        for item in content.values():
+            files.extend(_image_files_from_content(item, start_index + len(files)))
+        return files
+    if isinstance(content, list):
+        files: list[BytesIO] = []
+        for item in content:
+            files.extend(_image_files_from_content(item, start_index + len(files)))
+        return files
+    return []
+
+
+def image_files_from_messages(messages: list[dict[str, Any]]) -> list[BytesIO]:
+    files: list[BytesIO] = []
+    for message in messages:
+        files.extend(_image_files_from_content(message.get("content"), len(files) + 1))
+    return files
+
+
 def raise_unsupported_image_input() -> None:
     raise HTTPException(status_code=400, detail={"error": GEMINI_WEB_IMAGE_UNSUPPORTED_DETAIL})
 
@@ -154,8 +231,6 @@ def message_text(content: object) -> str:
 def build_prompt(messages: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for message in messages:
-        if contains_image_content(message.get("content")):
-            raise_unsupported_image_input()
         role = _clean(message.get("role")).lower() or "user"
         text = message_text(message.get("content")).strip()
         if not text:
@@ -218,12 +293,13 @@ def chat_completion(body: dict[str, Any], spec: ModelSpec, messages: list[dict[s
     from services.account_service import account_service
 
     prompt = build_prompt(messages)
+    files = image_files_from_messages(messages)
     access_token = account_service.get_text_access_token(provider="gemini")
     if not access_token:
         raise HTTPException(status_code=503, detail={"error": "no available Gemini account"})
     account = account_service.get_account(access_token) or {"access_token": access_token, "provider": "gemini"}
     try:
-        completion, updates = _api_client().chat_completion(account, spec, prompt)
+        completion, updates = _api_client().chat_completion(account, spec, prompt, files=files)
     except Exception as exc:
         if hasattr(exc, "to_http_detail"):
             raise HTTPException(status_code=getattr(exc, "status_code", 502), detail=exc.to_http_detail()) from exc
@@ -240,12 +316,13 @@ def chat_completion_deltas(body: dict[str, Any], spec: ModelSpec, messages: list
     from services.account_service import account_service
 
     prompt = build_prompt(messages)
+    files = image_files_from_messages(messages)
     access_token = account_service.get_text_access_token(provider="gemini")
     if not access_token:
         raise HTTPException(status_code=503, detail={"error": "no available Gemini account"})
     account = account_service.get_account(access_token) or {"access_token": access_token, "provider": "gemini"}
     try:
-        chunks, updates = _api_client().stream_completion(account, spec, prompt)
+        chunks, updates = _api_client().stream_completion(account, spec, prompt, files=files)
     except Exception as exc:
         if hasattr(exc, "to_http_detail"):
             raise HTTPException(status_code=getattr(exc, "status_code", 502), detail=exc.to_http_detail()) from exc

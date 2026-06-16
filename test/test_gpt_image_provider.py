@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from typing import cast
+from typing import Any, cast
 from unittest import mock
 
 from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_tiktoken_stub
@@ -18,7 +18,50 @@ from services.protocol.conversation import ConversationRequest, ImageGenerationE
 from services.providers.gpt import images as gpt_images
 
 
+class FakeResponse:
+    def __init__(self, payload: dict[str, Any] | None = None) -> None:
+        self.status_code = 200
+        self.text = ""
+        self.headers = {}
+        self._payload = payload or {}
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class FakeUploadSession:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, Any]] = []
+        self.headers: dict[str, str] = {}
+
+    def post(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.calls.append(("post", url, kwargs.get("json") or kwargs.get("data")))
+        if url.endswith("/backend-api/files"):
+            return FakeResponse({"file_id": "file-123", "upload_url": "https://upload.example/blob"})
+        return FakeResponse({})
+
+    def put(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.calls.append(("put", url, {"headers": kwargs.get("headers"), "data": kwargs.get("data")}))
+        return FakeResponse({})
+
+
 class GPTImageProviderTests(unittest.TestCase):
+    def test_upload_file_uses_three_step_file_flow(self) -> None:
+        backend = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
+        backend.base_url = "https://chatgpt.com"
+        backend.user_agent = "test-agent"
+        backend.session = cast(Any, FakeUploadSession())
+        fake_session = backend.session
+
+        result = backend._upload_file(b"hello", "context.md", "text/markdown")
+
+        self.assertEqual(result, {"file_id": "file-123", "file_name": "context.md", "file_size": 5, "mime_type": "text/markdown", "use_case": "multimodal", "file_token_size": 0, "non_library_my_files_injest_upload": False})
+        self.assertEqual([call[0] for call in fake_session.calls], ["post", "put", "post", "post"])
+        self.assertEqual(fake_session.calls[0][2], {"file_name": "context.md", "file_size": 5, "use_case": "multimodal"})
+        self.assertEqual(fake_session.calls[1][2]["headers"]["Content-Type"], "text/markdown")
+        self.assertEqual(fake_session.calls[2][2], "{}")
+        self.assertEqual(fake_session.calls[3][2]["file_id"], "file-123")
+
     def test_image_alias_routes_to_upstream_model_and_preserves_response_model(self) -> None:
         seen_models: list[str] = []
 

@@ -192,6 +192,30 @@ class ChatCompletionCacheProtocolTests(unittest.TestCase):
 
         self.assertEqual(image_tokens, text_tokens + 85)
 
+    def test_long_text_attachment_usage_uses_original_messages(self) -> None:
+        config.data["chatgpt_text_attachments"] = {
+            "enabled": True,
+            "threshold_tokens": 10,
+            "threshold_chars": 40,
+            "max_attachment_bytes": 10000,
+        }
+        body = {"model": "gpt-5", "messages": [{"role": "user", "content": "x" * 100}]}
+        seen_messages: list[list[dict[str, Any]]] = []
+
+        def fake_chat_completion(_body: dict[str, Any], messages: list[dict[str, Any]], _model: str, backend: object = None) -> str:
+            seen_messages.append(messages)
+            return "ok"
+
+        with (
+            mock.patch.object(openai_v1_chat_complete, "text_backend", return_value=object()),
+            mock.patch.object(openai_v1_chat_complete.gpt_chat, "chat_completion", side_effect=fake_chat_completion),
+            mock.patch.object(openai_v1_chat_complete, "resolve_model", return_value=type("Spec", (), {"provider": "gpt"})()),
+        ):
+            response = cast(dict[str, Any], openai_v1_chat_complete.handle(dict(body)))
+
+        self.assertIsInstance(seen_messages[0][0]["content"], list)
+        self.assertEqual(response["usage"]["prompt_tokens"], count_message_tokens(body["messages"], "gpt-5"))
+
 
 if __name__ == "__main__":
     unittest.main()
