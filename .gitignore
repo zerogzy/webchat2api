@@ -48,6 +48,7 @@ web_dist/
 docs/research-record.md
 docs/task-tracking-log.md
 docs/review.md
+docs/zerogzy-deployment-runbook.md
 
 # Editors and local tooling
 .idea/
