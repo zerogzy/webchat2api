@@ -11,6 +11,7 @@ import {
   Globe,
   KeyRound,
   LoaderCircle,
+  QrCode,
   ServerCog,
   Upload,
 } from "lucide-react";
@@ -28,13 +29,17 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  cancelCatpawQrLogin,
   cancelGeminiBrowserLogin,
   continueGeminiBrowserLogin,
   createAccounts,
+  fetchCatpawQrLogin,
   fetchGeminiBrowserLogin,
+  startCatpawQrLogin,
   startGeminiBrowserLogin,
   type Account,
   type AccountImportPayload,
+  type CatpawQrLoginStatus,
   type GeminiBrowserLoginStatus,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -63,6 +68,7 @@ const methodIcons: Record<AccountImportMethod, typeof KeyRound> = {
   token: KeyRound,
   session: FileJson,
   "browser-login": Globe,
+  "qr-login": QrCode,
   cpa: Files,
   "remote-cpa": Files,
   sub2api: ServerCog,
@@ -221,6 +227,7 @@ function methodTitle(method: AccountImportMethod, provider: ImportProvider) {
   if (method === "token") return definition.importTokenCopy.label;
   if (method === "session") return definition.importSessionCopy.label;
   if (method === "browser-login") return "浏览器登录";
+  if (method === "qr-login") return "扫码登录";
   if (method === "cpa") return "本地 JSON 文件";
   if (method === "remote-cpa") return "远程 CPA 服务器";
   return "Sub2API 服务器";
@@ -231,6 +238,7 @@ function methodDescription(method: AccountImportMethod, provider: ImportProvider
   if (method === "token") return definition.importTokenCopy.fileHelp ?? definition.importTokenCopy.placeholder;
   if (method === "session") return definition.importSessionCopy.help || definition.importSessionCopy.placeholder;
   if (method === "browser-login") return "通过后端真实浏览器登录 Gemini，并自动提取可用 Cookie。";
+  if (method === "qr-login") return "扫描二维码登录 CatPawAI，登录成功后自动获取并续期 token。";
   if (method === "cpa") return definition.importFlowCopy.cpaHelp;
   if (method === "remote-cpa") return definition.importFlowCopy.remoteCpaDescription;
   return definition.importFlowCopy.sub2apiDescription;
@@ -278,12 +286,14 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   const [geminiLoginPassword, setGeminiLoginPassword] = useState("");
   const [geminiLoginTotp, setGeminiLoginTotp] = useState("");
   const [geminiLoginStatus, setGeminiLoginStatus] = useState<GeminiBrowserLoginStatus | null>(null);
+  const [catpawLoginStatus, setCatpawLoginStatus] = useState<CatpawQrLoginStatus | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pendingCpaImport, setPendingCpaImport] = useState<PendingCpaImport | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const txtInputRef = useRef<HTMLInputElement | null>(null);
   const cpaInputRef = useRef<HTMLInputElement | null>(null);
+  const catpawJobRef = useRef<string>("");
 
   const providerDefinition = getAccountProviderDefinition(importProvider);
   const availableMethods = providerDefinition.importMethods;
@@ -299,6 +309,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     setGeminiLoginPassword("");
     setGeminiLoginTotp("");
     setGeminiLoginStatus(null);
+    setCatpawLoginStatus(null);
     setPendingCpaImport(null);
     setConfirmOpen(false);
   };
@@ -531,6 +542,70 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const pollCatpawQrLogin = async (jobId: string) => {
+    catpawJobRef.current = jobId;
+    for (;;) {
+      if (catpawJobRef.current !== jobId) return;
+      let status: CatpawQrLoginStatus;
+      try {
+        status = await fetchCatpawQrLogin(jobId);
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        continue;
+      }
+      if (catpawJobRef.current !== jobId) return;
+      setCatpawLoginStatus((prev) => ({ ...(prev ?? { status: "waiting_for_scan" }), ...status, jobId }));
+      if (status.status === "success") {
+        catpawJobRef.current = "";
+        await onImported(status.items ?? [], "catpaw");
+        toast.success(`CatPaw 扫码登录完成，新增 ${status.added ?? 0} 个账号，跳过 ${status.skipped ?? 0} 个`);
+        setOpen(false);
+        resetState();
+        return;
+      }
+      if (["failed", "cancelled", "expired"].includes(status.status)) {
+        catpawJobRef.current = "";
+        toast.error(status.message || "CatPaw 扫码登录已结束，请重试");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  };
+
+  const handleCatpawQrLogin = async () => {
+    setIsSubmitting(true);
+    let jobId = "";
+    try {
+      const status = await startCatpawQrLogin({ proxy: importProxy.trim() });
+      setCatpawLoginStatus(status);
+      jobId = status.jobId || "";
+      if (!jobId || !status.qrImageUrl) {
+        toast.error(status.message || "获取 CatPaw 二维码失败");
+        return;
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "CatPaw 扫码登录启动失败");
+      return;
+    } finally {
+      setIsSubmitting(false);
+    }
+    void pollCatpawQrLogin(jobId);
+  };
+
+  const handleCatpawQrLoginCancel = async () => {
+    const jobId = catpawLoginStatus?.jobId;
+    catpawJobRef.current = "";
+    if (jobId) {
+      try {
+        await cancelCatpawQrLogin(jobId);
+      } catch {
+        // ignore cancel errors
+      }
+    }
+    setCatpawLoginStatus(null);
+    toast.info("已取消 CatPaw 扫码登录");
   };
 
   const handleImportSessionJson = async () => {
@@ -798,6 +873,54 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
       );
     }
 
+    if (method === "qr-login") {
+      return (
+        <div className="space-y-4">
+          <button
+            type="button"
+            onClick={() => setMethod("methods")}
+            className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800"
+          >
+            <ArrowLeft className="size-4" />
+            返回导入方式
+          </button>
+          <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-600">
+            点击下方「开始扫码登录」获取二维码，使用大象 / 微信扫描并确认登录。成功后系统会自动获取 token 并加入号池，后台会自动续期。
+          </div>
+          {catpawLoginStatus?.qrImageUrl ? (
+            <div className="flex flex-col items-center gap-3 rounded-2xl border border-stone-200 bg-white p-5">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={catpawLoginStatus.qrImageUrl}
+                alt="CatPaw 登录二维码"
+                className="size-52 rounded-xl border border-stone-200 bg-white object-contain"
+              />
+              <div className="text-sm text-stone-600">
+                {catpawLoginStatus.status === "waiting_for_scan"
+                  ? "等待扫码中…"
+                  : catpawLoginStatus.status === "scanned"
+                    ? "已扫码，请在手机 / 客户端确认登录…"
+                    : `当前状态：${catpawLoginStatus.status}`}
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                className="rounded-xl border-stone-200 bg-white"
+                onClick={() => void handleCatpawQrLoginCancel()}
+              >
+                取消并重置
+              </Button>
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-500">
+              尚未生成二维码，点击下方「开始扫码登录」。
+            </div>
+          )}
+          {catpawLoginStatus?.message ? <div className="text-sm text-red-600">{catpawLoginStatus.message}</div> : null}
+        </div>
+      );
+    }
+
     if (method === "session") {
       const sessionCopy = providerDefinition.importSessionCopy;
 
@@ -938,6 +1061,16 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
               <Button className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800" onClick={() => void handleGeminiBrowserLogin()} disabled={footerDisabled}>
                 {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
                 开始浏览器登录
+              </Button>
+            ) : null}
+            {method === "qr-login" ? (
+              <Button
+                className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+                onClick={() => void handleCatpawQrLogin()}
+                disabled={footerDisabled || Boolean(catpawLoginStatus?.qrImageUrl)}
+              >
+                {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
+                开始扫码登录
               </Button>
             ) : null}
             {method === "session" ? (

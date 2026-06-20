@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import time
-import urllib.error
-import urllib.request
+import uuid
 from typing import Any, Literal, Sequence
 
 from fastapi import APIRouter, Header, HTTPException
@@ -11,8 +9,10 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from api.account_flows import catpaw as catpaw_flow
+from api.account_flows import gemini as gemini_flow
+from api.account_flows import grok as grok_flow
 from services.auth_service import auth_service
-from services.config import config
 
 from api.support import (
     require_admin,
@@ -24,7 +24,7 @@ from api.support import (
     sanitize_sub2api_servers,
 )
 from services.account_service import account_service
-from services.providers.base import GEMINI_PROVIDER, GROK_PROVIDER
+from services.providers.base import CATPAW_PROVIDER, GEMINI_PROVIDER, GROK_PROVIDER
 from services.providers.registry import normalize_account_provider, normalize_provider
 from services.providers.registry import account_strategy
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
@@ -51,7 +51,7 @@ class UserKeyUpdateRequest(BaseModel):
 class AccountCreateRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
     accounts: list[dict[str, Any]] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None
 
 
 class AccountDeleteIdentifier(BaseModel):
@@ -63,25 +63,25 @@ class AccountDeleteRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
     mode: Literal["tokens", "limited"] = "tokens"
-    provider: Literal["gpt", "grok", "gemini"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None
 
 
 class AccountRefreshRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None
 
 
 class AccountValidateRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None
 
 
 class AccountExportRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini"]
+    provider: Literal["gpt", "grok", "gemini", "catpaw"]
 
 
 class GeminiBrowserLoginRequest(BaseModel):
@@ -98,13 +98,17 @@ class GeminiBrowserLoginContinueRequest(BaseModel):
     totp: str = ""
 
 
+class CatpawQrLoginRequest(BaseModel):
+    proxy: str = ""
+
+
 class AccountUpdateRequest(BaseModel):
     access_token: str = ""
     account_id: str | None = None
     row_id: str | None = None
     type: str | None = None
     provider: str | None = None
-    target_provider: Literal["gpt", "grok", "gemini"] | None = None
+    target_provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None
     status: str | None = None
     quota: int | None = None
     proxy: str | None = None
@@ -181,7 +185,7 @@ class RemoteAccountInjectRequest(BaseModel):
     strategy: Literal["merge", "replace"] = "merge"
     source_id: str = ""
     source_name: str = ""
-    provider: Literal["gpt", "grok", "gemini"] = "gpt"
+    provider: Literal["gpt", "grok", "gemini", "catpaw"] = "gpt"
 
 
 def _account_payload_provider(item: dict[str, Any], provider: str | None) -> str:
@@ -240,165 +244,8 @@ def _account_strategy(provider: Any):
     return account_strategy(normalize_account_provider(provider))
 
 
-def _gemini_import_requested(provider: str | None, payloads: list[dict[str, Any]]) -> bool:
-    if normalize_provider(provider) == GEMINI_PROVIDER:
-        return True
-    for item in payloads:
-        provider_value = str(item.get("provider") or "").strip()
-        if not provider_value:
-            continue
-        try:
-            if normalize_account_provider(provider_value) == GEMINI_PROVIDER:
-                return True
-        except ValueError:
-            continue
-    return False
 
-
-_GEMINI_BROWSER_LOGIN_JOBS: dict[str, dict[str, Any]] = {}
-_GEMINI_BROWSER_LOGIN_TTL = 900
-
-
-def _browser_bridge_url() -> str:
-    bridge_url = config.browser_bridge_url or "http://127.0.0.1:3080"
-    return bridge_url.rstrip("/")
-
-
-def _bridge_request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    data = None if payload is None else json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        f"{_browser_bridge_url()}{path}",
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method=method,
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        try:
-            detail = json.loads(raw)
-        except ValueError:
-            detail = {"error": raw or str(exc)}
-        raise HTTPException(status_code=exc.code, detail=detail) from exc
-    except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        raise HTTPException(status_code=503, detail={"error": "Gemini 浏览器桥接服务不可用"}) from exc
-    try:
-        parsed = json.loads(raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail={"error": "Gemini 浏览器桥接服务返回了无效响应"}) from exc
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _remember_gemini_login_job(job_id: str, owner_id: str, proxy: str) -> None:
-    now = time.time()
-    _GEMINI_BROWSER_LOGIN_JOBS[job_id] = {"owner_id": owner_id, "created_at": now, "proxy": proxy}
-    for key, value in list(_GEMINI_BROWSER_LOGIN_JOBS.items()):
-        if now - float(value.get("created_at") or 0) > _GEMINI_BROWSER_LOGIN_TTL:
-            _GEMINI_BROWSER_LOGIN_JOBS.pop(key, None)
-
-
-def _require_gemini_login_job(job_id: str, owner_id: str) -> dict[str, Any]:
-    job = _GEMINI_BROWSER_LOGIN_JOBS.get(job_id)
-    if not job or job.get("owner_id") != owner_id:
-        raise HTTPException(status_code=404, detail={"error": "Gemini browser login job not found"})
-    return job
-
-
-def _complete_gemini_browser_login(status: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
-    if status.get("status") != "success" or status.get("account"):
-        return status
-    cookies = status.get("cookies") if isinstance(status.get("cookies"), dict) else {}
-    if not cookies.get("__Secure-1PSID") or not cookies.get("__Secure-1PSIDTS"):
-        return {**status, "status": "failed", "errorCode": "COOKIE_NOT_FOUND", "message": "浏览器登录成功但缺少 Gemini 必需 Cookie"}
-    payload = {"provider": GEMINI_PROVIDER, "cookies": cookies, "proxy": str(job.get("proxy") or "")}
-    result = account_service.add_account_items([payload])
-    access_tokens = [str(item.get("access_token") or "").strip() for item in result.get("items", []) if isinstance(item, dict) and str(item.get("provider") or "") == GEMINI_PROVIDER]
-    refresh_result = account_service.refresh_accounts(access_tokens, provider=GEMINI_PROVIDER) if access_tokens else {"refreshed": 0, "errors": [], "items": result.get("items", [])}
-    sanitized = sanitize_account_result({
-        **result,
-        "refreshed": refresh_result.get("refreshed", 0),
-        "errors": refresh_result.get("errors", []),
-        "items": refresh_result.get("items", result.get("items", [])),
-    })
-    status.pop("cookies", None)
-    status.update({
-        "account": True,
-        "added": sanitized.get("added", 0),
-        "skipped": sanitized.get("skipped", 0),
-        "refreshed": sanitized.get("refreshed", 0),
-        "errors": sanitized.get("errors", []),
-        "items": sanitized.get("items", []),
-    })
-    return status
-
-
-def _validate_gemini_import_payloads(tokens: list[str], payloads: list[dict[str, Any]], provider: str | None) -> None:
-    if not _gemini_import_requested(provider, payloads):
-        return
-    if tokens:
-        raise HTTPException(status_code=400, detail={"error": "Gemini 账号请使用 Cookie JSON 导入，不再支持 TXT token 导入"})
-    if not payloads:
-        raise HTTPException(status_code=400, detail={"error": "Gemini 账号请使用 Cookie JSON 导入"})
-    top_level_gemini = normalize_provider(provider) == GEMINI_PROVIDER
-    for item in payloads:
-        item_provider = str(item.get("provider") or "").strip()
-        if top_level_gemini and item_provider and normalize_account_provider(item_provider) != GEMINI_PROVIDER:
-            raise HTTPException(status_code=400, detail={"error": "Gemini 导入不能混用其他供应商账号"})
-        cookies = item.get("cookies") if isinstance(item.get("cookies"), dict) else {}
-        psid = str(item.get("__Secure-1PSID") or cookies.get("__Secure-1PSID") or "").strip()
-        psidts = str(item.get("__Secure-1PSIDTS") or cookies.get("__Secure-1PSIDTS") or "").strip()
-        if not psid or not psidts:
-            raise HTTPException(status_code=400, detail={"error": "Gemini Cookie JSON 中必须包含 __Secure-1PSID 和 __Secure-1PSIDTS"})
-
-
-def _normalize_grok_sso_import_token(value: str) -> str:
-    token = str(value or "").strip()
-    if not token or ";" in token:
-        return ""
-    name, separator, cookie_value = token.partition("=")
-    if separator:
-        return cookie_value.strip() if name.strip().lower() == "sso" and cookie_value.strip() else ""
-    return token
-
-
-def _grok_import_requested(provider: str | None, payloads: list[dict[str, Any]]) -> bool:
-    if normalize_provider(provider) == GROK_PROVIDER:
-        return True
-    for item in payloads:
-        provider_value = str(item.get("provider") or "").strip()
-        if not provider_value:
-            continue
-        try:
-            if normalize_account_provider(provider_value) == GROK_PROVIDER:
-                return True
-        except ValueError:
-            continue
-    return False
-
-
-def _validate_grok_import_payloads(tokens: list[str], payloads: list[dict[str, Any]], provider: str | None) -> list[str]:
-    if not _grok_import_requested(provider, payloads):
-        return tokens
-    if not tokens and not payloads:
-        raise HTTPException(status_code=400, detail={"error": "Grok 导入只接受裸 SSO 值，或每行一个 sso=<值>"})
-    allowed_keys = {"provider", "sso", "proxy"}
-    for item in payloads:
-        item_provider = str(item.get("provider") or provider or "").strip()
-        if item_provider and normalize_account_provider(item_provider) != GROK_PROVIDER:
-            raise HTTPException(status_code=400, detail={"error": "Grok 导入不能混用其他供应商账号"})
-        extra_keys = {key for key, value in item.items() if value is not None} - allowed_keys
-        sso = str(item.get("sso") or "").strip()
-        if extra_keys or not _normalize_grok_sso_import_token(sso):
-            raise HTTPException(status_code=400, detail={"error": "Grok 导入只接受裸 SSO 值，或每行一个 sso=<值>；不支持 sso-rw、完整 Cookie header、其他 Cookie 名称、JSON、CPA 或 cookies"})
-    normalized_tokens = [_normalize_grok_sso_import_token(token) for token in tokens]
-    if not all(normalized_tokens):
-        raise HTTPException(status_code=400, detail={"error": "Grok 导入只接受裸 SSO 值，或每行一个 sso=<值>；不支持 sso-rw、完整 Cookie header、其他 Cookie 名称、JSON、CPA 或 cookies"})
-    return normalized_tokens
-
-
-def _export_filename(provider: Literal["gpt", "grok", "gemini"]) -> str:
+def _export_filename(provider: Literal["gpt", "grok", "gemini", "catpaw"]) -> str:
     return _account_strategy(provider).export_filename()
 
 
@@ -453,24 +300,24 @@ def create_router() -> APIRouter:
             if value is not None
         }
         if not updates:
-            raise HTTPException(status_code=400, detail={"error": "还没有检测到改动，请修改后再保存"})
+            raise HTTPException(status_code=400, detail={"error": "杩樻病鏈夋娴嬪埌鏀瑰姩锛岃淇敼鍚庡啀淇濆瓨"})
         try:
             item = auth_service.update_key(key_id, updates, role="user")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         if item is None:
-            raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
+            raise HTTPException(status_code=404, detail={"error": "user key not found"})
         return {"item": item, "items": auth_service.list_keys(role="user")}
 
     @router.delete("/api/auth/users/{key_id}")
     async def delete_user_key(key_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         if not auth_service.delete_key(key_id, role="user"):
-            raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
+            raise HTTPException(status_code=404, detail={"error": "user key not found"})
         return {"items": auth_service.list_keys(role="user")}
 
     @router.get("/api/accounts")
-    async def get_accounts(provider: Literal["gpt", "grok", "gemini"] | None = None, authorization: str | None = Header(default=None)):
+    async def get_accounts(provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"items": sanitize_accounts(account_service.list_accounts(provider=provider))}
 
@@ -479,8 +326,8 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         account_payloads = [item for item in body.accounts if isinstance(item, dict)]
         raw_tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
-        _validate_gemini_import_payloads(raw_tokens, account_payloads, body.provider)
-        body_tokens = _validate_grok_import_payloads(raw_tokens, account_payloads, body.provider)
+        gemini_flow.validate_import_payloads(raw_tokens, account_payloads, body.provider)
+        body_tokens = grok_flow.validate_import_payloads(raw_tokens, account_payloads, body.provider)
         scoped_payloads = [{**item, "provider": item.get("provider") or body.provider} for item in account_payloads]
         payload_tokens = [_account_payload_token(item, body.provider) for item in scoped_payloads]
         tokens = _unique_tokens([*body_tokens, *payload_tokens])
@@ -537,34 +384,98 @@ def create_router() -> APIRouter:
         }
         if body.timeoutMs is not None:
             payload["timeoutMs"] = body.timeoutMs
-        result = await run_in_threadpool(_bridge_request, "POST", "/api/gemini/login", payload)
+        result = await run_in_threadpool(gemini_flow.bridge_request, "POST", "/api/gemini/login", payload)
         job_id = str(result.get("jobId") or "").strip()
         if job_id:
-            _remember_gemini_login_job(job_id, str(identity.get("id") or "admin"), proxy)
+            gemini_flow.remember_login_job(job_id, str(identity.get("id") or "admin"), proxy)
         return {key: value for key, value in result.items() if key != "cookies"}
 
     @router.get("/api/accounts/gemini/browser-login/{job_id}")
     async def get_gemini_browser_login(job_id: str, authorization: str | None = Header(default=None)):
         identity = require_admin(authorization)
-        job = _require_gemini_login_job(job_id, str(identity.get("id") or "admin"))
-        result = await run_in_threadpool(_bridge_request, "GET", f"/api/gemini/login/{job_id}")
-        return _complete_gemini_browser_login(result, job)
+        job = gemini_flow.require_login_job(job_id, str(identity.get("id") or "admin"))
+        result = await run_in_threadpool(gemini_flow.bridge_request, "GET", f"/api/gemini/login/{job_id}")
+        return gemini_flow.complete_browser_login(result, job, account_service=account_service, sanitize_account_result=sanitize_account_result)
 
     @router.post("/api/accounts/gemini/browser-login/{job_id}/continue")
     async def continue_gemini_browser_login(job_id: str, body: GeminiBrowserLoginContinueRequest, authorization: str | None = Header(default=None)):
         identity = require_admin(authorization)
-        _require_gemini_login_job(job_id, str(identity.get("id") or "admin"))
+        gemini_flow.require_login_job(job_id, str(identity.get("id") or "admin"))
         payload = {"action": body.action, "totp": body.totp}
-        result = await run_in_threadpool(_bridge_request, "POST", f"/api/gemini/login/{job_id}/continue", payload)
+        result = await run_in_threadpool(gemini_flow.bridge_request, "POST", f"/api/gemini/login/{job_id}/continue", payload)
         return {key: value for key, value in result.items() if key != "cookies"}
 
     @router.delete("/api/accounts/gemini/browser-login/{job_id}")
     async def cancel_gemini_browser_login(job_id: str, authorization: str | None = Header(default=None)):
         identity = require_admin(authorization)
-        _require_gemini_login_job(job_id, str(identity.get("id") or "admin"))
-        result = await run_in_threadpool(_bridge_request, "DELETE", f"/api/gemini/login/{job_id}")
-        _GEMINI_BROWSER_LOGIN_JOBS.pop(job_id, None)
+        gemini_flow.require_login_job(job_id, str(identity.get("id") or "admin"))
+        result = await run_in_threadpool(gemini_flow.bridge_request, "DELETE", f"/api/gemini/login/{job_id}")
+        gemini_flow.forget_login_job(job_id)
         return {key: value for key, value in result.items() if key != "cookies"}
+
+    @router.post("/api/accounts/catpaw/qr-login")
+    async def start_catpaw_qr_login(body: CatpawQrLoginRequest, authorization: str | None = Header(default=None)):
+        identity = require_admin(authorization)
+        from services.providers.catpaw import client as catpaw_client
+        try:
+            data = await run_in_threadpool(catpaw_client.get_qrcode)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail={"error": f"鑾峰彇 CatPaw 鎵爜浜岀淮鐮佸け璐ワ細{exc}"}) from exc
+        code = str(data.get("code") or "").strip()
+        if not code:
+            raise HTTPException(status_code=502, detail={"error": "CatPaw 鏈繑鍥炴壂鐮?code"})
+        job_id = uuid.uuid4().hex
+        expire_time = data.get("expireTime")
+        catpaw_flow.remember_qr_job(job_id, str(identity.get("id") or "admin"), code, expire_time, str(body.proxy or "").strip())
+        return {
+            "jobId": job_id,
+            "status": "waiting_for_scan",
+            "qrImageUrl": data.get("qrCodeImageUrl"),
+            "expireTime": expire_time,
+        }
+
+    @router.get("/api/accounts/catpaw/qr-login/{job_id}")
+    async def get_catpaw_qr_login(job_id: str, authorization: str | None = Header(default=None)):
+        identity = require_admin(authorization)
+        job = catpaw_flow.require_qr_job(job_id, str(identity.get("id") or "admin"))
+        if job.get("done"):
+            return job.get("result") or {"status": "success"}
+        expire_time = job.get("expire_time")
+        if isinstance(expire_time, (int, float)) and time.time() * 1000 > float(expire_time):
+            catpaw_flow.forget_qr_job(job_id)
+            return {"status": "expired", "message": "QR code expired"}
+        from services.providers.catpaw import client as catpaw_client
+        poll_data = await run_in_threadpool(catpaw_client.poll_access_token, str(job.get("code") or ""))
+        if not isinstance(poll_data, dict) or not str(poll_data.get("accessToken") or "").strip():
+            # not logged in yet: distinguish "scanned, awaiting confirm" from "waiting for scan"
+            scanned = bool(isinstance(poll_data, dict) and poll_data.get("scanned"))
+            return {"jobId": job_id, "status": "scanned" if scanned else "waiting_for_scan"}
+        try:
+            result = await run_in_threadpool(catpaw_flow.complete_qr_login, poll_data, job, account_service=account_service, sanitize_account_result=sanitize_account_result)
+        except Exception as exc:
+            return {"jobId": job_id, "status": "failed", "message": f"CatPaw account import failed: {exc}"}
+        job["done"] = True
+        job["result"] = result
+        return result
+
+    @router.delete("/api/accounts/catpaw/qr-login/{job_id}")
+    async def cancel_catpaw_qr_login(job_id: str, authorization: str | None = Header(default=None)):
+        identity = require_admin(authorization)
+        catpaw_flow.require_qr_job(job_id, str(identity.get("id") or "admin"))
+        catpaw_flow.forget_qr_job(job_id)
+        return {"status": "cancelled"}
+
+    @router.get("/api/accounts/catpaw/quota")
+    async def get_catpaw_quota(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        result = await run_in_threadpool(account_service.refresh_catpaw_quota, True)
+        return sanitize_account_result(result)
+
+    @router.post("/api/accounts/catpaw/quota/apply")
+    async def apply_catpaw_quota(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        result = await run_in_threadpool(account_service.refresh_catpaw_quota, True)
+        return sanitize_account_result(result)
 
     @router.delete("/api/accounts")
     async def delete_accounts(body: AccountDeleteRequest, authorization: str | None = Header(default=None)):
@@ -611,7 +522,7 @@ def create_router() -> APIRouter:
         if not items:
             raise HTTPException(
                 status_code=400,
-                detail={"error": "没有可导出的账号，请检查 access_tokens 是否存在"},
+                detail={"error": "娌℃湁鍙鍑虹殑璐﹀彿锛岃妫€鏌?access_tokens 鏄惁瀛樺湪"},
             )
 
         filename = _export_filename(body.provider)
@@ -640,7 +551,7 @@ def create_router() -> APIRouter:
             if value is not None
         }
         if not updates:
-            raise HTTPException(status_code=400, detail={"error": "还没有检测到改动，请修改后再保存"})
+            raise HTTPException(status_code=400, detail={"error": "杩樻病鏈夋娴嬪埌鏀瑰姩锛岃淇敼鍚庡啀淇濆瓨"})
         if access_token:
             account = account_service.update_account(access_token, updates, provider=body.target_provider)
         else:

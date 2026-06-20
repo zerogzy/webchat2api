@@ -7,7 +7,8 @@ from typing import Any, Iterator, Literal, Protocol
 GPT_PROVIDER = "gpt"
 GROK_PROVIDER = "grok"
 GEMINI_PROVIDER = "gemini"
-SUPPORTED_PROVIDERS = {GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER}
+CATPAW_PROVIDER = "catpaw"
+SUPPORTED_PROVIDERS = {GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER}
 ModelCapability = Literal["chat", "image", "image_edit", "video"]
 
 

@@ -54,6 +54,16 @@ export type Account = {
   proxy?: string | null;
   expired_reason?: string | null;
   expired_at?: string | null;
+  catpaw_quota?: CatpawQuota | null;
+};
+
+export type CatpawQuota = {
+  remaining?: number;
+  limit?: number;
+  used?: number;
+  last_checked_at?: string | null;
+  auto_apply_status?: "not_needed" | "success" | "skipped" | "error" | string;
+  auto_apply_message?: string | null;
 };
 
 type AccountListResponse = {
@@ -69,6 +79,7 @@ type AccountMutationResponse = {
   checked?: number;
   unchanged?: number;
   failed?: number;
+  applied?: number;
   errors?: Array<{ access_token: string; error: string }>;
 };
 
@@ -115,7 +126,7 @@ export type AccountImportPayload = {
   [key: string]: unknown;
 };
 
-export type AccountExportProvider = "gpt" | "grok" | "gemini";
+export type AccountExportProvider = "gpt" | "grok" | "gemini" | "catpaw";
 
 export type AccountDeleteIdentifier = {
   account_id?: string | null;
@@ -409,6 +420,40 @@ export async function cancelGeminiBrowserLogin(jobId: string) {
     method: "DELETE",
     body: {},
   });
+}
+
+export type CatpawQrLoginStatus = {
+  jobId?: string;
+  status: "waiting_for_scan" | "scanned" | "success" | "failed" | "cancelled" | "expired";
+  qrImageUrl?: string;
+  expireTime?: number;
+  message?: string;
+  account?: boolean;
+  items?: Account[];
+  added?: number;
+  skipped?: number;
+};
+
+export async function startCatpawQrLogin(payload: { proxy?: string } = {}) {
+  return httpRequest<CatpawQrLoginStatus>("/api/accounts/catpaw/qr-login", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function fetchCatpawQrLogin(jobId: string) {
+  return httpRequest<CatpawQrLoginStatus>(`/api/accounts/catpaw/qr-login/${encodeURIComponent(jobId)}`);
+}
+
+export async function cancelCatpawQrLogin(jobId: string) {
+  return httpRequest<CatpawQrLoginStatus>(`/api/accounts/catpaw/qr-login/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    body: {},
+  });
+}
+
+export async function refreshCatpawQuota() {
+  return httpRequest<AccountMutationResponse>("/api/accounts/catpaw/quota");
 }
 
 export async function deleteAccounts(payload: AccountDeletePayload, provider?: AccountExportProvider) {

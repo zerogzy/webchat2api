@@ -3,9 +3,10 @@ import type { Account, AccountExportProvider, AccountProvider } from "@/lib/api"
 import { geminiProvider } from "./gemini";
 import { gptProvider } from "./gpt";
 import { grokProvider } from "./grok";
+import { catpawProvider } from "./catpaw";
 import type { AccountProviderDefinition, ImportProviderOption, ProviderId } from "./types";
 
-export const accountProviderDefinitions = [gptProvider, grokProvider, geminiProvider] as const satisfies readonly AccountProviderDefinition[];
+export const accountProviderDefinitions = [gptProvider, grokProvider, geminiProvider, catpawProvider] as const satisfies readonly AccountProviderDefinition[];
 
 export const knownProviderIds = accountProviderDefinitions.map((provider) => provider.id) as ProviderId[];
 
@@ -15,6 +16,7 @@ export const accountProviderRegistry: Record<ProviderId, AccountProviderDefiniti
   gpt: gptProvider,
   grok: grokProvider,
   gemini: geminiProvider,
+  catpaw: catpawProvider,
 };
 
 export const accountImportProviderOptions: ImportProviderOption[] = accountProviderDefinitions.map((provider) => ({

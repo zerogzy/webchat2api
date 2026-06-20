@@ -45,6 +45,7 @@ import {
   exportAccounts,
   fetchAccounts,
   refreshAccounts,
+  refreshCatpawQuota,
   updateAccount,
   validateAccounts,
   type Account,
@@ -143,6 +144,14 @@ function formatCompact(value: number) {
 }
 
 function formatQuota(account: Account) {
+  if (accountProviderId(account) === "catpaw") {
+    const quota = account.catpaw_quota;
+    if (!quota || typeof quota.remaining !== "number") {
+      return "未知";
+    }
+    const limit = typeof quota.limit === "number" ? quota.limit : 0;
+    return limit > 0 ? `${quota.remaining} / ${limit}` : String(quota.remaining);
+  }
   const providerDefinition = getAccountProviderDefinition(account.provider);
   if (!providerDefinition.quota.applicable) {
     return providerDefinition.quota.unavailableLabel;
@@ -192,6 +201,17 @@ function formatQuotaSummary(accounts: Account[]) {
     return "未知";
   }
   return formatCompact(availableQuotaAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
+}
+
+function catpawQuotaStatusText(account: Account) {
+  const quota = account.catpaw_quota;
+  if (!quota) return "";
+  const status = String(quota.auto_apply_status || "");
+  const message = String(quota.auto_apply_message || "");
+  if (status === "success") return message ? `已自动申请：${message}` : "已自动申请";
+  if (status === "skipped") return message || "未申请";
+  if (status === "error") return message ? `申请失败：${message}` : "申请失败";
+  return "";
 }
 
 function renderPrivacyEmail(email?: string | null) {
@@ -345,6 +365,7 @@ function ProviderAccountSection({
   isDeleting,
   isExporting,
   isUpdating,
+  isQuotaRefreshing,
   onFilterChange,
   onPageChange,
   onSelectChange,
@@ -354,6 +375,7 @@ function ProviderAccountSection({
   onDeleteLimited,
   onExport,
   onEdit,
+  onRefreshQuota,
 }: {
   provider: AccountProviderDefinition;
   accounts: Account[];
@@ -372,6 +394,7 @@ function ProviderAccountSection({
   isDeleting: boolean;
   isExporting: boolean;
   isUpdating: boolean;
+  isQuotaRefreshing: boolean;
   onFilterChange: (next: Partial<ProviderFilters[ProviderId]>) => void;
   onPageChange: (page: number) => void;
   onSelectChange: (ids: string[]) => void;
@@ -381,6 +404,7 @@ function ProviderAccountSection({
   onDeleteLimited: () => void;
   onExport: (payload: AccountSelectionPayload) => void;
   onEdit: (account: Account) => void;
+  onRefreshQuota: () => void;
 }) {
   const selectedSet = new Set(selectedIds);
   const selectedRows = accounts.filter((account, index) => selectedSet.has(accountRowKey(account, index)));
@@ -485,6 +509,18 @@ function ProviderAccountSection({
           {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
           {provider.refresh.selectedButtonLabel ?? provider.refresh.rowTitle}
         </Button>
+        {provider.id === "catpaw" ? (
+          <Button
+            variant="ghost"
+            className="h-8 rounded-lg px-3 text-stone-600 hover:bg-white hover:text-stone-900"
+            onClick={onRefreshQuota}
+            disabled={isQuotaRefreshing || isRefreshing || isDeleting}
+            title="刷新 CatPaw credits，低于 50 时自动申请额度"
+          >
+            {isQuotaRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+            刷新 credits
+          </Button>
+        ) : null}
         {canValidateProvider ? (
           <Button
             variant="ghost"
@@ -608,9 +644,17 @@ function ProviderAccountSection({
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    <Badge variant={provider.quota.applicable ? "info" : "secondary"} className="rounded-md px-2.5 py-1 shadow-sm">
-                      {formatQuota(account)}
-                    </Badge>
+                    <div className="space-y-1">
+                      <Badge variant={provider.quota.applicable ? "info" : "secondary"} className="rounded-md px-2.5 py-1 shadow-sm">
+                        {formatQuota(account)}
+                        {accountProviderId(account) === "catpaw" ? " credits" : ""}
+                      </Badge>
+                      {accountProviderId(account) === "catpaw" && catpawQuotaStatusText(account) ? (
+                        <div className="max-w-[180px] truncate text-[10px] leading-4 text-stone-400" title={catpawQuotaStatusText(account)}>
+                          {catpawQuotaStatusText(account)}
+                        </div>
+                      ) : null}
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-xs leading-5 text-stone-500">
                     {(() => {
@@ -737,6 +781,34 @@ function AccountsPageContent() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isQuotaRefreshing, setIsQuotaRefreshing] = useState(false);
+
+  const mergeCatpawQuotaItems = (items: Account[]) => {
+    setAccounts((current) => {
+      const nextAccounts = mergeProviderAccounts(current, "catpaw", items.filter((item) => isProviderAccount(item, "catpaw")));
+      setSelectedIds((prev) => keepProviderSelection(prev, nextAccounts));
+      return nextAccounts;
+    });
+  };
+
+  const syncCatpawQuota = async (showToast = false) => {
+    setIsQuotaRefreshing(true);
+    try {
+      const data = await refreshCatpawQuota();
+      mergeCatpawQuotaItems(data.items);
+      if (showToast) {
+        const appliedText = data.applied ? `，自动申请 ${data.applied} 个账号` : "";
+        toast.success(`CatPaw credits 已刷新${appliedText}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "刷新 CatPaw credits 失败";
+      if (showToast) {
+        toast.error(message);
+      }
+    } finally {
+      setIsQuotaRefreshing(false);
+    }
+  };
 
   const loadAccounts = async (silent = false) => {
     if (!silent) {
@@ -749,6 +821,9 @@ function AccountsPageContent() {
       );
       setAccounts(items);
       setSelectedIds((prev) => keepProviderSelection(prev, items));
+      if (items.some((item) => isProviderAccount(item, "catpaw"))) {
+        void syncCatpawQuota(false);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载账户失败";
       toast.error(message);
@@ -1176,6 +1251,7 @@ function AccountsPageContent() {
             isDeleting={isDeleting}
             isExporting={isExporting}
             isUpdating={isUpdating}
+            isQuotaRefreshing={isQuotaRefreshing}
             onFilterChange={(next) => setProviderFilters(activeProvider, next)}
             onPageChange={(nextPage) => setProviderPage(activeProvider, nextPage)}
             onSelectChange={(ids) => setProviderSelection(activeProvider, ids)}
@@ -1185,6 +1261,7 @@ function AccountsPageContent() {
             onDeleteLimited={() => void handleDeleteLimitedAccounts(activeProvider)}
             onExport={(payload) => void handleExportAccounts(activeProvider, payload)}
             onEdit={openEditDialog}
+            onRefreshQuota={() => void syncCatpawQuota(true)}
           />
         )}
       </section>

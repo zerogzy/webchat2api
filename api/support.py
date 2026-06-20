@@ -9,8 +9,9 @@ from fastapi import HTTPException, Request
 from services.account_service import account_service
 from services.auth_service import auth_service
 from services.config import config
+from services.runtime_paths import resource_base_dir
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = resource_base_dir()
 WEB_DIST_DIR = BASE_DIR / "web_dist"
 
 
@@ -105,6 +106,12 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                     account_service.refresh_accounts(limited_tokens)
             except Exception as exc:
                 print(f"[account-limited-watcher] fail {exc}")
+            try:
+                renewed = account_service.renew_due_catpaw_accounts()
+                if renewed:
+                    print(f"[catpaw-renew] renewed {renewed} CatPaw token(s)")
+            except Exception as exc:
+                print(f"[catpaw-renew] fail {exc}")
             stop_event.wait(interval_seconds)
 
     thread = Thread(target=worker, name="limited-account-watcher", daemon=True)

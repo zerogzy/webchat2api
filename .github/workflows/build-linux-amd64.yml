@@ -1,0 +1,114 @@
+name: Build Linux amd64 Binary
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-amd64:
+    name: Build Linux amd64 executable
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Python dependencies
+        run: |
+          uv sync --frozen --no-dev
+          uv pip install pyinstaller
+
+      - name: Build web assets
+        working-directory: web
+        run: |
+          npm ci
+          NEXT_PUBLIC_APP_VERSION="$(cat ../VERSION)" npm run build
+
+      - name: Stage web assets
+        run: |
+          rm -rf web_dist
+          cp -R web/out web_dist
+
+      - name: Build executable
+        run: |
+          uv run pyinstaller \
+            --clean \
+            --onefile \
+            --name webchat2api-linux-amd64 \
+            --add-data "web_dist:web_dist" \
+            --add-data "config.example.json:." \
+            --add-data "VERSION:." \
+            --add-data "services/browser_bridge:services/browser_bridge" \
+            --hidden-import services.providers.gpt.accounts \
+            --hidden-import services.providers.gpt.chat \
+            --hidden-import services.providers.gpt.images \
+            --hidden-import services.providers.gpt.models \
+            --hidden-import services.providers.grok.accounts \
+            --hidden-import services.providers.grok.chat \
+            --hidden-import services.providers.grok.images \
+            --hidden-import services.providers.grok.models \
+            --hidden-import services.providers.gemini.accounts \
+            --hidden-import services.providers.gemini.chat \
+            --hidden-import services.providers.gemini.images \
+            --hidden-import services.providers.gemini.models \
+            --hidden-import services.providers.catpaw.accounts \
+            --hidden-import services.providers.catpaw.chat \
+            --hidden-import services.providers.catpaw.images \
+            --hidden-import services.providers.catpaw.models \
+            --hidden-import services.storage.json_storage \
+            --hidden-import services.storage.database_storage \
+            --hidden-import services.storage.git_storage \
+            main.py
+
+      - name: Smoke test binary
+        run: |
+          test -x ./dist/webchat2api-linux-amd64
+          PORT=18083 ./dist/webchat2api-linux-amd64 >/tmp/webchat2api.out 2>/tmp/webchat2api.err &
+          pid=$!
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18083/health; then
+              kill "$pid"
+              wait "$pid" || true
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/webchat2api.out
+          cat /tmp/webchat2api.err >&2
+          kill "$pid" || true
+          exit 1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: webchat2api-linux-amd64
+          path: dist/webchat2api-linux-amd64
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/webchat2api-linux-amd64

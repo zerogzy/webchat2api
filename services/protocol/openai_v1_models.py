@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from fastapi import HTTPException
+
 from services.providers.base import GPT_PROVIDER
+from services.providers.catpaw.models import catpaw_model_metadata
 from services.providers.gemini.models import gemini_model_metadata
 from services.providers.gpt.models import GPT_IMAGE_MODEL_IDS, gpt_fallback_model_metadata, gpt_image_model_metadata
 from services.providers.grok.models import grok_model_metadata
+from services.providers.registry import MODEL_REGISTRY, resolve_model
 
 
 def _append_model(data: list[dict[str, Any]], seen: set[str], item: dict[str, Any]) -> None:
@@ -80,5 +84,22 @@ def list_models() -> dict[str, Any]:
         _append_model(normalized_data, seen, item)
     for item in gemini_model_metadata():
         _append_model(normalized_data, seen, item)
+    for item in catpaw_model_metadata():
+        _append_model(normalized_data, seen, item)
     result["data"] = normalized_data
     return result
+
+
+def get_model(model_id: str) -> dict[str, Any]:
+    model = str(model_id or "").strip()
+    if not model:
+        raise HTTPException(status_code=404, detail={"error": "model not found"})
+    models = list_models().get("data")
+    if isinstance(models, list):
+        for item in models:
+            if isinstance(item, dict) and str(item.get("id") or "") == model:
+                return item
+    spec = MODEL_REGISTRY.get(model)
+    if spec is not None or model.startswith(("catpaw", "claude-", "grok-", "gemini-")):
+        return resolve_model(model).model_metadata()
+    raise HTTPException(status_code=404, detail={"error": "model not found"})

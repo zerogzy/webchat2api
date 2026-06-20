@@ -87,7 +87,7 @@ def build_tool_system_prompt(tools: object, tool_choice: object = None, parallel
         "TOOL CALL FORMAT:",
         "- When calling tools, output ONLY a tool-call structure and no prose or markdown fences.",
         "- Prefer this XML format:",
-        '<tool_calls><tool_call><tool_name>TOOL_NAME</tool_name><parameters>{"key":"value"}</parameters></tool_call></tool_calls>',
+        '<tool_calls><tool_name>TOOL_NAME</tool_name><parameters>{"key":"value"}</parameters></tool_calls>',
         '- A JSON object {"tool_calls":[{"name":"TOOL_NAME","arguments":{"key":"value"}}]} or JSON array [{"name":"TOOL_NAME","arguments":{"key":"value"}}] is also accepted.',
         "- arguments/parameters must be a valid JSON object.",
     ]
@@ -111,7 +111,7 @@ def inject_tool_prompt(messages: list[dict[str, Any]], tools: object, tool_choic
 
 def _serialize_tool_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     injected: list[dict[str, Any]] = []
-    for message in messages:
+    for index, message in enumerate(messages):
         item = dict(message)
         role = item.get("role")
         if role == "assistant" and item.get("tool_calls"):
@@ -120,13 +120,42 @@ def _serialize_tool_history(messages: list[dict[str, Any]]) -> list[dict[str, An
             item["content"] = f"{content}\n{xml}".strip() if content else xml
             item.pop("tool_calls", None)
         elif role == "tool":
+            content_text = str(item.get("content") or "")
             tool_call_id = str(item.get("tool_call_id") or "").strip()
-            label = f"[tool result for {tool_call_id}]" if tool_call_id else "[tool result]"
+            tool_name = _resolve_tool_name_for_id(tool_call_id, injected)
+            if tool_name:
+                label = f"[result of {tool_name}]"
+            elif tool_call_id:
+                label = f"[tool result (id={tool_call_id})]"
+            else:
+                label = "[tool result]"
             item["role"] = "user"
-            item["content"] = f"{label}:\n{str(item.get('content') or '')}"
+            item["content"] = f"{label}:\n{content_text}" if content_text else f"{label}."
             item.pop("tool_call_id", None)
         injected.append(item)
     return injected
+
+
+def _resolve_tool_name_for_id(tool_call_id: str, prev_messages: list[dict[str, Any]]) -> str:
+    if not tool_call_id:
+        return ""
+    for prev in reversed(prev_messages):
+        if prev.get("role") != "assistant":
+            continue
+        tool_calls_list = prev.get("tool_calls")
+        if not isinstance(tool_calls_list, list):
+            continue
+        for tc in tool_calls_list:
+            if not isinstance(tc, dict):
+                continue
+            if str(tc.get("id") or "").strip() != tool_call_id:
+                continue
+            raw_func = tc.get("function")
+            func = raw_func if isinstance(raw_func, dict) else {}
+            name = str(func.get("name") or tc.get("name") or "").strip()
+            if name:
+                return name
+    return ""
 
 
 def make_parsed_tool_call(name: str, arguments: Any) -> ParsedToolCall:
@@ -197,10 +226,8 @@ def tool_calls_to_xml(calls: object) -> str:
         arguments = function.get("arguments") or call.get("arguments") or "{}"
         if not name:
             continue
-        parts.append("<tool_call>")
         parts.append(f"<tool_name>{html.escape(name)}</tool_name>")
         parts.append(f"<parameters>{html.escape(_json_arguments(arguments))}</parameters>")
-        parts.append("</tool_call>")
     parts.append("</tool_calls>")
     return "".join(parts)
 
@@ -296,8 +323,16 @@ def _parse_xml_tool_calls(text: str) -> list[ParsedToolCall]:
     root = _XML_ROOT_RE.search(text)
     if not root:
         return []
+    inner_text = root.group(1)
+    calls = _parse_nested_xml_calls(inner_text)
+    if calls:
+        return calls
+    return _parse_flat_xml_calls(inner_text)
+
+
+def _parse_nested_xml_calls(inner_text: str) -> list[ParsedToolCall]:
     calls = []
-    for match in _XML_CALL_RE.finditer(root.group(1)):
+    for match in _XML_CALL_RE.finditer(inner_text):
         inner = match.group(1)
         name = _xml_value(inner, "tool_name") or _xml_value(inner, "name") or _xml_value(inner, "function")
         parameters = _xml_value(inner, "parameters") or _xml_value(inner, "arguments") or _xml_value(inner, "input") or "{}"
@@ -305,6 +340,29 @@ def _parse_xml_tool_calls(text: str) -> list[ParsedToolCall]:
         if name:
             calls.append(_make_call(name, arguments if isinstance(arguments, dict) else {}))
     return calls
+
+
+def _parse_flat_xml_calls(inner_text: str) -> list[ParsedToolCall]:
+    names = list(re.finditer(r"(?is)<tool_name\b[^>]*>(.*?)</tool_name\s*>", inner_text))
+    if not names:
+        return []
+    calls: list[ParsedToolCall] = []
+    for idx, match in enumerate(names):
+        name = _unwrap_xml(match.group(1))
+        if not name:
+            continue
+        end = names[idx + 1].start() if idx + 1 < len(names) else len(inner_text)
+        segment = inner_text[match.end():end]
+        parameters = _xml_value(segment, "parameters") or _xml_value(segment, "arguments") or _xml_value(segment, "input") or "{}"
+        arguments = _parse_arguments(parameters)
+        calls.append(_make_call(name, arguments if isinstance(arguments, dict) else {}))
+    return calls
+
+
+def _unwrap_xml(value: str) -> str:
+    value = (value or "").strip()
+    cdata = re.fullmatch(r"(?is)<!\[CDATA\[(.*?)]]>", value)
+    return html.unescape(cdata.group(1) if cdata else value).strip()
 
 
 def _parse_json_envelope(text: str) -> list[ParsedToolCall]:

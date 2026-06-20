@@ -109,6 +109,9 @@ class FakeAccountService:
     def build_export_text(items: list[dict[str, str]]) -> str:
         return "\n".join(item["access_token"] for item in items) + "\n"
 
+    def refresh_catpaw_quota(self, auto_apply: bool = True) -> dict[str, Any]:
+        return {"checked": 0, "refreshed": 0, "applied": 0, "failed": 0, "errors": [], "items": self.list_accounts(provider="catpaw")}
+
 
 class GeminiAccountApiSanitizationTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -291,6 +294,27 @@ class GeminiAccountApiSanitizationTests(unittest.TestCase):
         text = self.account_service.build_export_text(items)
 
         self.assertIn(GEMINI_TOKEN, text)
+
+    def test_catpaw_quota_endpoint_sanitizes_secrets(self) -> None:
+        self.account_service.account = {
+            "provider": "catpaw",
+            "access_token": "catpaw-user-1",
+            "catpaw_id": "catpaw-user-1",
+            "catpaw_access_token": "catpaw-secret-access",
+            "refresh_token": "catpaw-secret-refresh",
+            "status": "正常",
+            "type": "catpaw",
+            "quota": 12,
+            "catpaw_quota": {"remaining": 12, "limit": 2000, "used": 1988},
+        }
+
+        response = self.client.get("/api/accounts/catpaw/quota", headers=AUTH_HEADERS)
+
+        self.assertEqual(response.status_code, 200)
+        body = cast(dict[str, Any], response.json())
+        self.assertEqual(body["items"][0]["catpaw_quota"]["remaining"], 12)
+        self.assertNotIn("catpaw-secret-access", str(body))
+        self.assertNotIn("catpaw-secret-refresh", str(body))
 
 
 class MemoryStorage(StorageBackend):

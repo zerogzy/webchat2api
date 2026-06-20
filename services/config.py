@@ -8,8 +8,9 @@ from pathlib import Path
 import time
 
 from services.storage.base import StorageBackend
+from services.runtime_paths import writable_base_dir
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = writable_base_dir()
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
 VERSION_FILE = BASE_DIR / "VERSION"

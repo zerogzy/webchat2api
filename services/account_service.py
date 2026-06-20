@@ -12,6 +12,7 @@ from services.log_service import (
     log_service,
 )
 from services.providers.base import (
+    CATPAW_PROVIDER,
     GEMINI_PROVIDER,
     GPT_PROVIDER,
     GROK_PROVIDER,
@@ -21,9 +22,10 @@ from services.providers.base import (
     RemoteAccountValidator,
     decide_account_state,
 )
+from services.providers.account_ops import account_row_id_for_provider, matched_account_tokens_by_identifiers
 from services.providers.registry import account_strategy, normalize_account_provider, normalize_provider
-from services.providers.gemini.accounts import account_row_id as gemini_account_row_id
-from services.providers.grok.accounts import account_row_id as grok_account_row_id, normalize_app_chat_rate_limit_payload
+from services.providers.catpaw import account_pool as catpaw_account_pool
+from services.providers.grok.accounts import normalize_app_chat_rate_limit_payload
 from services.providers.grok.client import grok_rate_limit_account_hints
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
@@ -111,34 +113,11 @@ def _matched_delete_tokens_for_provider(target_set: set[str], accounts: dict[str
 
 
 def _account_row_id_for_provider(account: dict[str, Any], provider: str | None) -> str:
-    if provider == GEMINI_PROVIDER:
-        return gemini_account_row_id(account)
-    if provider == GROK_PROVIDER:
-        return grok_account_row_id(account)
-    return ""
+    return account_row_id_for_provider(account, provider)
 
 
 def _matched_account_tokens_by_identifiers(identifiers: list[dict[str, str]], accounts: dict[str, dict], provider: str | None) -> set[str]:
-    if provider not in {GEMINI_PROVIDER, GROK_PROVIDER} or not identifiers:
-        return set()
-    account_ids = {
-        _clean_string(identifier.get("account_id"))
-        for identifier in identifiers
-        if isinstance(identifier, dict) and _clean_string(identifier.get("account_id"))
-    }
-    row_ids = {
-        _clean_string(identifier.get("row_id"))
-        for identifier in identifiers
-        if isinstance(identifier, dict) and _clean_string(identifier.get("row_id"))
-    }
-    if not account_ids and not row_ids:
-        return set()
-    return {
-        account_token
-        for account_token, account in accounts.items()
-        if (account_ids and _clean_string(account.get("account_id")) in account_ids)
-        or (row_ids and _account_row_id_for_provider(account, provider) in row_ids)
-    }
+    return matched_account_tokens_by_identifiers(identifiers, accounts, provider)
 
 
 class _UnchangedRemoteInfo(dict[str, Any]):
@@ -147,6 +126,7 @@ class _UnchangedRemoteInfo(dict[str, Any]):
 
 UNCHANGED_REMOTE_INFO = _UnchangedRemoteInfo()
 GROK_RECENT_SUCCESS_TTL_SECONDS = 86400
+CATPAW_QUOTA_AUTO_APPLY_THRESHOLD = 50
 
 
 class AccountService:
@@ -382,7 +362,7 @@ class AccountService:
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
         provider_strategy = account_strategy(normalized["provider"])
-        if normalized["provider"] in {GROK_PROVIDER, GEMINI_PROVIDER}:
+        if normalized["provider"] in {GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER}:
             normalized = provider_strategy.normalize_account(normalized)
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
@@ -904,6 +884,8 @@ class AccountService:
             return self.fetch_grok_remote_info(access_token, event, provider=account_provider)
         if account_provider == GEMINI_PROVIDER:
             return self.fetch_gemini_remote_info(access_token, event, provider=account_provider)
+        if account_provider == CATPAW_PROVIDER:
+            return self.fetch_catpaw_remote_info(access_token, event, provider=account_provider)
         if account_provider != GPT_PROVIDER:
             return dict(account) if account else None
         from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
@@ -922,6 +904,97 @@ class AccountService:
         strategy = cast(RemoteAccountValidator, account_strategy(GEMINI_PROVIDER))
         payload = strategy.validate_remote_info(access_token, account)
         return self.update_account(access_token, payload, provider=provider_filter)
+
+    def fetch_catpaw_remote_info(self, access_token: str, event: str = "fetch_catpaw_remote_info", provider: str | None = None) -> dict[str, Any] | None:
+        provider_filter = provider or CATPAW_PROVIDER
+        account = self.get_account(access_token, provider=provider_filter) or {}
+        strategy = cast(RemoteAccountValidator, account_strategy(CATPAW_PROVIDER))
+        payload = strategy.validate_remote_info(access_token, account)
+        return self.update_account(access_token, payload, provider=provider_filter)
+
+    def get_catpaw_account_for_chat(self, excluded_ids: set[str] | None = None) -> dict[str, Any] | None:
+        return catpaw_account_pool.select_account_for_chat(self, excluded_ids)
+
+    def renew_due_catpaw_accounts(self, margin_seconds: int = 1800) -> int:
+        return catpaw_account_pool.renew_due_accounts(self, margin_seconds)
+
+    @staticmethod
+    def _catpaw_quota_from_payload(payload: Any) -> dict[str, Any]:
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            data = {}
+        used = max(0, int(data.get("modelRequestCount") or data.get("modelRequestTotalCount") or 0))
+        limit = max(0, int(data.get("modelRequestLimit") or data.get("modelRequestLimitCount") or 0))
+        remaining = data.get("modelRemaingCount")
+        if remaining is None:
+            remaining = max(0, limit - used)
+        return {
+            "used": used,
+            "limit": limit,
+            "remaining": max(0, int(remaining or 0)),
+        }
+
+    def _catpaw_quota_update(self, quota: dict[str, Any], *, status: str = "", message: str = "") -> dict[str, Any]:
+        update = dict(quota)
+        update["last_checked_at"] = self._timestamp_string()
+        if status:
+            update["auto_apply_status"] = status
+        if message:
+            update["auto_apply_message"] = message
+        return {"catpaw_quota": update, "quota": int(update.get("remaining") or 0)}
+
+    def refresh_catpaw_quota(self, auto_apply: bool = True, threshold: int = CATPAW_QUOTA_AUTO_APPLY_THRESHOLD) -> dict[str, Any]:
+        from services.providers.catpaw import client as catpaw_client
+
+        with self._lock:
+            targets = [
+                (token, dict(account))
+                for token, account in self._accounts.get(CATPAW_PROVIDER, {}).items()
+                if _clean_string(account.get("catpaw_access_token"))
+            ]
+        refreshed = 0
+        applied = 0
+        errors: list[dict[str, str]] = []
+        for access_token, account in targets:
+            chat_token = _clean_string(account.get("catpaw_access_token"))
+            mis_id = _clean_string(account.get("mis_id"))
+            try:
+                quota = self._catpaw_quota_from_payload(catpaw_client.get_user_limit(chat_token, mis_id))
+                status = "not_needed"
+                message = ""
+                if auto_apply and quota["remaining"] < threshold:
+                    apply_payload = catpaw_client.apply_quota(chat_token, mis_id)
+                    apply_code = apply_payload.get("code") if isinstance(apply_payload, dict) else None
+                    apply_msg = _clean_string(apply_payload.get("msg") if isinstance(apply_payload, dict) else "")
+                    status = "success" if apply_code == 0 else "skipped"
+                    message = apply_msg
+                    applied += int(apply_code == 0)
+                    quota = self._catpaw_quota_from_payload(catpaw_client.get_user_limit(chat_token, mis_id))
+                self.update_account(access_token, self._catpaw_quota_update(quota, status=status, message=message), provider=CATPAW_PROVIDER)
+                refreshed += 1
+            except Exception as exc:
+                errors.append({"token": anonymize_token(access_token), "error": str(exc)})
+                self.update_account(
+                    access_token,
+                    {
+                        "catpaw_quota": {
+                            **(account.get("catpaw_quota") if isinstance(account.get("catpaw_quota"), dict) else {}),
+                            "last_checked_at": self._timestamp_string(),
+                            "auto_apply_status": "error",
+                            "auto_apply_message": str(exc),
+                        }
+                    },
+                    provider=CATPAW_PROVIDER,
+                )
+        return {
+            "checked": len(targets),
+            "refreshed": refreshed,
+            "applied": applied,
+            "failed": len(errors),
+            "errors": errors,
+            "items": self.list_accounts(CATPAW_PROVIDER),
+        }
+
 
     def fetch_grok_remote_info(self, access_token: str, event: str = "fetch_grok_remote_info", provider: str | None = None) -> dict[str, Any] | None:
         provider_filter = provider or GROK_PROVIDER

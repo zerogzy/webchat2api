@@ -140,6 +140,7 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
             text = message_text(content)
             images: list[tuple[bytes, str]] = []
             files: list[dict[str, Any]] = []
+            image_urls: list[dict[str, Any]] = []
             if role == "user":
                 images.extend(extract_image_from_message_content(content))
                 if isinstance(content, list):
@@ -151,6 +152,11 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
                             data = part.get("data")
                             if isinstance(data, (bytes, bytearray)):
                                 images.append((bytes(data), str(part.get("mime") or "image/png")))
+                        elif part_type == "image_url":
+                            iu = part.get("image_url")
+                            url = iu.get("url") if isinstance(iu, dict) else part.get("url")
+                            if isinstance(url, str) and url:
+                                image_urls.append({"type": "image_url", "image_url": {"url": url}})
                         elif part_type == "file":
                             data = part.get("data")
                             if isinstance(data, str):
@@ -163,12 +169,13 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
                                     "name": str(part.get("name") or "attachment.txt"),
                                     "source": str(part.get("source") or ""),
                                 })
-            if images or files:
+            if images or files or image_urls:
                 parts: list[Any] = []
                 if text:
                     parts.append({"type": "text", "text": text})
                 for data, mime in images:
                     parts.append({"type": "image", "data": data, "mime": mime})
+                parts.extend(image_urls)
                 parts.extend(files)
                 normalized.append({"role": role, "content": parts})
             else:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
+import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -138,6 +140,16 @@ def create_router() -> APIRouter:
         except Exception as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
+    @router.get("/openai/v1/models/{model_id}", include_in_schema=False)
+    @router.get("/v1/models/{model_id}")
+    async def retrieve_model(
+            model_id: str,
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="x-api-key"),
+    ):
+        require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
+        return await run_in_threadpool(openai_v1_models.get_model, model_id)
+
     @router.post("/v1/images/generations")
     async def generate_images(
             body: ImageGenerationRequest,
@@ -232,16 +244,49 @@ def create_router() -> APIRouter:
     @router.post("/v1/messages")
     async def create_message(
             body: AnthropicMessageRequest,
+            request: Request,
             authorization: str | None = Header(default=None),
             x_api_key: str | None = Header(default=None, alias="x-api-key"),
             anthropic_version: str | None = Header(default=None, alias="anthropic-version"),
     ):
         identity = require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
         payload = body.model_dump(mode="python")
+        headers = {str(k).lower(): str(v) for k, v in request.headers.items()}
+        payload["_request_headers"] = headers
+        _debug_dump_anthropic_headers(headers)
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("system"), payload.get("messages"), payload.get("tools"))
         call = LoggedCall(identity, "/v1/messages", model, "Messages", request_text=request_preview)
         await filter_or_log(call, request_preview)
         return await call.run(anthropic_v1_messages.handle, payload, sse="anthropic")
 
+    @router.post("/claude/v1/messages/count_tokens", include_in_schema=False)
+    @router.post("/v1/messages/count_tokens")
+    async def count_message_tokens_endpoint(
+            body: AnthropicMessageRequest,
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="x-api-key"),
+            anthropic_version: str | None = Header(default=None, alias="anthropic-version"),
+    ):
+        require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
+        payload = body.model_dump(mode="python")
+        return await run_in_threadpool(anthropic_v1_messages.count_tokens, payload)
+
     return router
+
+
+def _debug_dump_anthropic_headers(headers: dict[str, str]) -> None:
+    path = os.environ.get("CATPAW_DEBUG_HEADERS_DUMP")
+    if not path:
+        return
+    try:
+        redacted = {}
+        for key, value in headers.items():
+            if key in {"authorization", "x-api-key", "cookie"}:
+                redacted[key] = "<redacted>"
+            else:
+                redacted[key] = value
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"time": time.time(), "headers": redacted}, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError:
+        pass
