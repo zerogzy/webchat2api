@@ -40,17 +40,38 @@ def forget_qr_job(job_id: str) -> None:
     _CATPAW_QR_LOGIN_JOBS.pop(job_id, None)
 
 
+def _first_non_empty(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+_MIS_KEYS = ("misId", "mis", "mis_id", "empId", "emp_id", "userId", "user_id")
+_LOGIN_KEYS = ("loginName", "login", "login_name", "name")
+
+
 def build_account_payload(token_data: dict[str, Any], proxy: str) -> dict[str, Any]:
     from services.providers.catpaw import client as catpaw_client
 
     access_token = str(token_data.get("accessToken") or "").strip()
+    mis_id = _first_non_empty(token_data, _MIS_KEYS)
     try:
-        info = catpaw_client.get_user_info(access_token)
+        info = catpaw_client.get_user_info(access_token, mis_id or None)
     except Exception:
         info = {}
-    login_name = str(info.get("loginName") or info.get("login") or info.get("name") or "").strip()
-    mis_id = str(info.get("misId") or info.get("mis") or info.get("empId") or info.get("userId") or "").strip()
-    email = str(info.get("email") or "").strip()
+    login_name = _first_non_empty(info, _LOGIN_KEYS) or _first_non_empty(token_data, _LOGIN_KEYS)
+    mis_id = _first_non_empty(info, _MIS_KEYS) or mis_id
+    if not mis_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "catpaw_mis_id_required",
+                "message": "CatPaw login succeeded but did not return a MIS identity; please log in again.",
+            },
+        )
+    email = _first_non_empty(info, ("email",)) or _first_non_empty(token_data, ("email",))
     catpaw_id = mis_id or login_name or uuid.uuid4().hex
     return {
         "provider": CATPAW_PROVIDER,

@@ -440,7 +440,7 @@ def poll_access_token(code: str) -> dict[str, Any] | None:
 
 def get_user_info(access_token: str, mis_id: str | None = None) -> dict[str, Any]:
     """Fetch the logged-in user's profile (loginName / mis id / email)."""
-    _status, text, _ = _http_get("/api/login/userInfo", _auth_headers(access_token, mis_id), timeout=30)
+    _status, text, _ = _http_get("/api/login/userInfo", _auth_headers_optional_mis(access_token, mis_id), timeout=30)
     try:
         j = json.loads(text)
     except Exception:
