@@ -48,6 +48,22 @@ class CatpawQrLoginTests(unittest.TestCase):
         self.assertEqual(payload["mis_id"], "info-mis")
         self.assertEqual(payload["login_name"], "catpaw-login")
 
+    def test_build_account_payload_accepts_uid_from_user_info_as_identity(self) -> None:
+        token_data = {
+            "accessToken": "access-token",
+            "refreshToken": "refresh-token",
+        }
+
+        with mock.patch(
+            "services.providers.catpaw.client.get_user_info",
+            return_value={"uid": "catpaw-uid", "userInfoId": "100000036413", "loginName": "catpaw-login"},
+        ):
+            payload = catpaw.build_account_payload(token_data, "")
+
+        self.assertEqual(payload["catpaw_id"], "catpaw-uid")
+        self.assertEqual(payload["mis_id"], "catpaw-uid")
+        self.assertEqual(payload["login_name"], "catpaw-login")
+
     def test_build_account_payload_rejects_login_without_mis_identity(self) -> None:
         token_data = {
             "accessToken": "access-token",

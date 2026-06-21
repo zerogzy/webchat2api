@@ -48,7 +48,7 @@ def _first_non_empty(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
     return ""
 
 
-_MIS_KEYS = ("misId", "mis", "mis_id", "empId", "emp_id", "userId", "user_id")
+_MIS_KEYS = ("misId", "mis", "mis_id", "empId", "emp_id", "userId", "user_id", "uid", "userInfoId", "user_info_id")
 _LOGIN_KEYS = ("loginName", "login", "login_name", "name")
 
 
