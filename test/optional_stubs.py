@@ -321,6 +321,11 @@ def _call_route(func: Callable[..., object], *, headers: dict[str, str], query: 
             kwargs[name] = StubRequest(json_data=json_data, form_data=_make_form(files, data), headers=headers)
         elif isinstance(annotation, type) and issubclass(annotation, StubBaseModel):
             kwargs[name] = annotation(**(json_data if isinstance(json_data, dict) else {}))
+        elif name == "body" and isinstance(json_data, dict):
+            if isinstance(annotation, type):
+                kwargs[name] = annotation(**json_data)
+            else:
+                kwargs[name] = json_data
         elif name == "authorization":
             kwargs[name] = headers.get("Authorization")
         elif name in path_values:
@@ -371,14 +376,8 @@ def install_fastapi_stubs() -> None:
     if existing is not None:
         if getattr(existing, "__webchat2api_test_stub__", False):
             return
-        if getattr(existing, "__file__", None):
-            return
     else:
-        try:
-            __import__("fastapi")
-            return
-        except ImportError:
-            pass
+        pass
 
     fastapi = types.ModuleType("fastapi")
     setattr(fastapi, "__webchat2api_test_stub__", True)

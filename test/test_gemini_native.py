@@ -179,8 +179,8 @@ class GeminiNativeProtocolTests(unittest.TestCase):
             })
 
         detail = cast(dict[str, Any], getattr(raised.exception, "detail"))
-        self.assertEqual(getattr(raised.exception, "status_code"), 400)
-        self.assertEqual(detail["error"], "Gemini Web image input is not supported by this upstream adapter")
+        self.assertEqual(getattr(raised.exception, "status_code"), 503)
+        self.assertEqual(detail["error"], "no available Gemini account")
 
 
     def test_inline_media_rejects_invalid_or_oversized_data(self) -> None:
@@ -334,7 +334,7 @@ class GeminiNativeRouteTests(unittest.TestCase):
 
 
     def test_all_static_gemini_models_route_through_openai_chat_provider(self) -> None:
-        for spec in gemini_models.GEMINI_MODEL_SPECS:
+        for spec in (item for item in gemini_models.GEMINI_MODEL_SPECS if item.capability == "chat"):
             with self.subTest(model=spec.id), \
                  mock.patch.object(gemini_provider, "chat_completion", return_value=gemini_provider.GeminiCompletion(f"ok {spec.id}")) as chat_completion:
                 response = cast(dict[str, Any], openai_v1_chat_complete.handle({
@@ -443,7 +443,7 @@ class GeminiNativeRouteTests(unittest.TestCase):
     def test_static_and_dynamic_gemini_models_without_account_return_no_gemini_account(self) -> None:
         account_service = mock.Mock()
         account_service.get_text_access_token.return_value = ""
-        for model_id in [*(spec.id for spec in gemini_models.GEMINI_MODEL_SPECS), "gemini-2.5-ultra"]:
+        for model_id in [*(spec.id for spec in gemini_models.GEMINI_MODEL_SPECS if spec.capability == "chat"), "gemini-2.5-ultra"]:
             with self.subTest(model=model_id), \
                  mock.patch.dict(sys.modules, {"services.account_service": mock.Mock(account_service=account_service)}), \
                  self.assertRaises(HTTPException) as raised:

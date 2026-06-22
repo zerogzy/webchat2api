@@ -324,7 +324,7 @@ def remote_error_status(exc: Exception) -> int | None:
 
 def refresh_error_message(exc: Exception) -> str:
     message = clean_string(exc)
-    return message or "Gemini account login failed"
+    return message or "Gemini session refresh failed"
 
 
 def is_auth_failure_payload(payload: Any) -> bool:

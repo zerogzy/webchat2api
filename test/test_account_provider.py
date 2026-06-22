@@ -337,22 +337,29 @@ class AccountProviderTests(unittest.TestCase):
         ])
         accounts = service.list_accounts(provider=GEMINI_PROVIDER)
         row_id = strategy.sanitize_account(accounts[0])["row_id"]
-        client = Mock()
-        client.cookie_header = "__Secure-1PSID=psid; __Secure-1PSIDTS=new-psidts; NID=nid"
-        client.bootstrap_session_token.return_value = "new-at"
-        client_context = Mock()
-        client_context.__enter__ = Mock(return_value=client)
-        client_context.__exit__ = Mock(return_value=None)
 
-        with patch("services.providers.gemini.client.GeminiWebClient", return_value=client_context) as client_class:
+        with patch(
+            "services.providers.gemini.api_client.validate_account",
+            return_value={
+                "__Secure-1PSID": "psid",
+                "__Secure-1PSIDTS": "new-psidts",
+                "session_token": "new-at",
+                "SNlM0e": "new-at",
+                "at": "new-at",
+                "cookies": {"__Secure-1PSID": "psid", "__Secure-1PSIDTS": "new-psidts", "NID": "nid"},
+                "account_status": "AVAILABLE",
+            },
+        ) as validate_account:
             result = service.refresh_accounts([], provider=GEMINI_PROVIDER, identifiers=[{"row_id": row_id}])
 
         self.assertTrue(strategy.supports_refresh(accounts[0]))
         self.assertEqual(result["refreshed"], 1)
         self.assertEqual(result["errors"], [])
-        client_class.assert_called_once_with("__Secure-1PSID=psid; __Secure-1PSIDTS=old-psidts", None)
-        client.rotate_psidts.assert_called_once_with()
-        client.bootstrap_session_token.assert_called_once_with()
+        validate_account.assert_called_once()
+        validated_account = validate_account.call_args.args[0]
+        self.assertEqual(validated_account["access_token"], "__Secure-1PSID=psid; __Secure-1PSIDTS=old-psidts")
+        self.assertEqual(validated_account["__Secure-1PSID"], "psid")
+        self.assertEqual(validated_account["__Secure-1PSIDTS"], "old-psidts")
         refreshed_accounts = service.list_accounts(provider=GEMINI_PROVIDER)
         self.assertEqual(refreshed_accounts[0]["__Secure-1PSIDTS"], "new-psidts")
         self.assertEqual(refreshed_accounts[0]["session_token"], "new-at")
@@ -1401,7 +1408,7 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(set(definitions), {GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER})
         self.assertIn("image", definitions[GPT_PROVIDER].capabilities)
         self.assertIn("image_edit", definitions[GROK_PROVIDER].capabilities)
-        self.assertEqual(definitions[GEMINI_PROVIDER].capabilities, frozenset({"chat"}))
+        self.assertEqual(definitions[GEMINI_PROVIDER].capabilities, frozenset({"chat", "image"}))
         self.assertEqual(definitions[CATPAW_PROVIDER].capabilities, frozenset({"chat"}))
         self.assertTrue(any(spec.provider == GPT_PROVIDER for spec in definitions[GPT_PROVIDER].model_specs))
         self.assertTrue(any(spec.provider == GROK_PROVIDER for spec in definitions[GROK_PROVIDER].model_specs))
