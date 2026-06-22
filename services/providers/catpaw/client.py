@@ -347,37 +347,16 @@ class _TokenManager:
             pass
 
     def _refresh(self, token: dict[str, Any]) -> bool:
-        refresh = token.get("refreshToken") or token.get("accessToken")
-        if not refresh:
-            return False
-        # POST /api/login/refreshToken
-        headers = _common_headers()
-        headers["Catpaw-Auth"] = refresh
-        try:
-            if _HAS_CURL:
-                r = _curl.post(BASE_URL + "/api/login/refreshToken", data="{}", headers=headers, verify=False, timeout=30)
-                status, text = int(r.status_code), r.text
-            else:
-                import http.client
-                conn = http.client.HTTPSConnection(HOST, 443, context=ssl._create_unverified_context(), timeout=30)
-                headers["Content-Length"] = "2"
-                conn.request("POST", "/api/login/refreshToken", body="{}", headers=headers)
-                resp = conn.getresponse()
-                status, text = resp.status, resp.read().decode("utf-8", "replace")
-                conn.close()
-        except Exception:
-            return False
-        if status != 200:
+        access = token.get("accessToken")
+        refresh = token.get("refreshToken")
+        if not access or not refresh:
             return False
         try:
-            j = json.loads(text)
+            d = refresh_token_value(access, refresh)
         except Exception:
             return False
-        if j.get("code") != 0 or not j.get("data"):
-            return False
-        d = j["data"]
         token["accessToken"] = d["accessToken"]
-        token["refreshToken"] = d.get("refreshToken") or d["accessToken"]
+        token["refreshToken"] = d.get("refreshToken") or refresh
         token["expires"] = d.get("expires")
         token["refreshExpires"] = d.get("refreshExpires")
         self._save(token)
@@ -450,20 +429,45 @@ def get_user_info(access_token: str, mis_id: str | None = None) -> dict[str, Any
     return {}
 
 
-def refresh_token_value(refresh_token: str) -> dict[str, Any] | None:
-    """Exchange a refresh token for a fresh token dict, or None on failure."""
+def _catpaw_api_message(payload: Any) -> str:
+    if isinstance(payload, dict):
+        for key in ("msg", "message"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("msg", "message"):
+                value = str(data.get(key) or "").strip()
+                if value:
+                    return value
+    return ""
+
+
+def refresh_token_value(access_token: str, refresh_token: str) -> dict[str, Any]:
+    """Exchange a refresh token for a fresh token dict.
+
+    CatPaw expects the current access token in Catpaw-Auth and the rotating
+    refresh token in the JSON body. Successful refreshes can invalidate the old
+    refresh token, so callers must persist the returned token pair immediately.
+    """
+    if not access_token:
+        raise CatpawError("CatPaw access token is required to refresh token", 400)
     if not refresh_token:
-        return None
+        raise CatpawError("CatPaw refresh token is required to refresh token", 400)
     headers = _common_headers()
-    headers["Catpaw-Auth"] = refresh_token
-    _status, text = _http_post_json("/api/login/refreshToken", headers, {})
+    headers["Catpaw-Auth"] = access_token
+    status, text = _http_post_json("/api/login/refreshToken", headers, {"refreshToken": refresh_token})
     try:
         j = json.loads(text)
     except Exception:
-        return None
+        raise CatpawError(f"CatPaw token refresh failed (HTTP {status}): invalid JSON response", status)
     if isinstance(j, dict) and j.get("code") == 0 and isinstance(j.get("data"), dict):
         return j["data"]
-    return None
+    message = _catpaw_api_message(j) or "CatPaw token refresh failed"
+    code = j.get("code") if isinstance(j, dict) else None
+    suffix = f" (code {code})" if code is not None else ""
+    raise CatpawError(f"CatPaw token refresh failed (HTTP {status}){suffix}: {message}", status)
 
 
 def get_user_limit(access_token: str, mis_id: str | None = None) -> dict[str, Any]:

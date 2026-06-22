@@ -1051,7 +1051,7 @@ class AccountService:
             return []
         target_tokens: list[str] = []
         seen: set[tuple[str, str]] = set()
-        candidate_providers = [provider_filter] if provider_filter else [GEMINI_PROVIDER, GROK_PROVIDER]
+        candidate_providers = [provider_filter] if provider_filter else [GEMINI_PROVIDER, GROK_PROVIDER, CATPAW_PROVIDER]
         for candidate_provider in candidate_providers:
             if not candidate_provider:
                 continue

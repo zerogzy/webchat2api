@@ -1,19 +1,27 @@
-"""CatPaw AccountAdapter — multi-account store integration.
-
-CatPaw accounts are imported via QR login and live in the shared account store
-(data/accounts.json), one record per logged-in user. The identity key is a STABLE
-id (mis id / login name) because the CatPaw access token rotates on every refresh;
-the rotating chat credential is kept in `catpaw_access_token` and the refresh token
-in `refresh_token`, so token renewal updates those fields without re-keying the row.
-"""
+"""CatPaw account adapter for the shared account store."""
 from __future__ import annotations
 
 import hashlib
 from typing import Any
 
-UNAVAILABLE_STATUSES = {"禁用", "异常", "限流", "disabled", "unauthorized", "rate_limited", "expired"}
+UNAVAILABLE_STATUSES = {
+    "禁用",
+    "异常",
+    "限流",
+    "disabled",
+    "unauthorized",
+    "rate_limited",
+    "expired",
+}
 
-AUTH_FAILURE_MARKERS = ("auth failed", "unauthorized", "token_expired", "invalid token", "expired token", "登录")
+AUTH_FAILURE_MARKERS = (
+    "auth failed",
+    "unauthorized",
+    "token_expired",
+    "invalid token",
+    "expired token",
+    "登录",
+)
 
 SECRET_KEYS = ("catpaw_access_token", "refresh_token", "accessToken", "refreshToken", "token")
 
@@ -90,12 +98,18 @@ def validate_remote_info(access_token: str, account: dict[str, Any] | None = Non
     from services.providers.catpaw import client as catpaw_client
 
     source = dict(account or {})
+    catpaw_access = _clean(source.get("catpaw_access_token") or source.get("accessToken"))
     refresh = _clean(source.get("refresh_token") or source.get("refreshToken"))
+    if not catpaw_access:
+        raise RuntimeError("CatPaw account is missing access token; please scan QR code again.")
     if not refresh:
-        raise RuntimeError("CatPaw 账号缺少 refresh token，请重新扫码登录")
-    data = catpaw_client.refresh_token_value(refresh)
-    if not data or not data.get("accessToken"):
-        raise RuntimeError("CatPaw token 续期失败，refresh token 可能已过期，请重新扫码登录")
+        raise RuntimeError("CatPaw account is missing refresh token; please scan QR code again.")
+    try:
+        data = catpaw_client.refresh_token_value(catpaw_access, refresh)
+    except Exception as exc:
+        raise RuntimeError(str(exc) or "CatPaw token refresh failed; please scan QR code again.") from exc
+    if not data.get("accessToken"):
+        raise RuntimeError("CatPaw token refresh response did not include access token; please scan QR code again.")
     return {
         "catpaw_access_token": _clean(data.get("accessToken")),
         "refresh_token": _clean(data.get("refreshToken")) or refresh,
@@ -110,7 +124,7 @@ def remote_error_status(exc: Exception) -> int | None:
 
 
 def refresh_error_message(exc: Exception) -> str:
-    return _clean(exc) or "CatPaw 账号续期失败"
+    return _clean(exc) or "CatPaw token refresh failed"
 
 
 def export_filename() -> str:
@@ -141,7 +155,6 @@ def is_auth_failure_payload(payload: Any) -> bool:
     return any(marker in text for marker in AUTH_FAILURE_MARKERS)
 
 
-# --- chat-only provider: trivial console/tier/image stubs (mirror gemini) ---
 def is_image_account_available(account: dict[str, Any]) -> bool:
     return False
 
