@@ -223,13 +223,16 @@ def _materialize_files(temp_dir: Path, files: list[object] | None) -> list[objec
             materialized.append(str(path))
             continue
         if isinstance(file, str):
-            if Path(file).exists():
-                materialized.append(file)
-                continue
             image_path = _materialize_base64_file(temp_dir, file, index)
             if image_path is not None:
                 materialized.append(image_path)
                 continue
+            try:
+                if Path(file).exists():
+                    materialized.append(file)
+                    continue
+            except OSError:
+                pass
         materialized.append(file)
     return materialized
 

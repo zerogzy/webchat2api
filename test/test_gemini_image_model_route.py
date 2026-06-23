@@ -5,6 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_tiktoken_stub
+
+install_curl_cffi_stub()
+install_fastapi_stubs()
+install_pil_stub()
+install_pybase64_stub()
+install_tiktoken_stub()
+
 from fastapi import HTTPException
 
 from services.protocol import openai_v1_chat_complete, openai_v1_image_edit, openai_v1_image_generations
@@ -83,6 +91,16 @@ class GeminiImageModelRouteTests(unittest.TestCase):
             path = Path(str((paths or [])[0]))
             self.assertTrue(path.exists())
             self.assertEqual(path.read_bytes(), b"fake-image")
+
+    def test_gemini_materializes_long_base64_before_path_stat(self):
+        encoded = base64.b64encode(b"fake-image" * 256).decode("ascii")
+        self.assertGreater(len(encoded), 255)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = api_client._materialize_files(Path(temp_dir), [encoded])
+            self.assertIsNotNone(paths)
+            path = Path(str((paths or [])[0]))
+            self.assertTrue(path.exists())
+            self.assertEqual(path.read_bytes(), b"fake-image" * 256)
 
     def test_gemini_materializes_data_url_image_edit_input(self):
         encoded = base64.b64encode(b"fake-image").decode("ascii")
