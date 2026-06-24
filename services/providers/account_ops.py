@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.providers.base import CATPAW_PROVIDER, GEMINI_PROVIDER, GROK_PROVIDER
+from services.providers.base import CATPAW_PROVIDER, GEMINI_PROVIDER, GROK_PROVIDER, JOYCODE_PROVIDER
 from services.providers.registry import account_strategy, normalize_account_provider
 
 
@@ -30,7 +30,7 @@ def matched_account_tokens_by_identifiers(
     accounts: dict[str, dict],
     provider: str | None,
 ) -> set[str]:
-    if provider not in {GEMINI_PROVIDER, GROK_PROVIDER, CATPAW_PROVIDER} or not identifiers:
+    if provider not in {GEMINI_PROVIDER, GROK_PROVIDER, CATPAW_PROVIDER, JOYCODE_PROVIDER} or not identifiers:
         return set()
     account_ids = {
         _clean_string(identifier.get("account_id"))

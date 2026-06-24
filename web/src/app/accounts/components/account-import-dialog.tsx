@@ -31,16 +31,23 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   cancelCatpawQrLogin,
   cancelGeminiBrowserLogin,
+  cancelJoyCodeQrLogin,
   continueGeminiBrowserLogin,
   createAccounts,
   fetchCatpawQrLogin,
   fetchGeminiBrowserLogin,
+  fetchJoyCodeQrLogin,
+  importJoyCodeState,
+  startJoyCodeBrowserLogin,
+  startJoyCodeQrLogin,
   startCatpawQrLogin,
   startGeminiBrowserLogin,
+  submitJoyCodeOAuth,
   type Account,
   type AccountImportPayload,
   type CatpawQrLoginStatus,
   type GeminiBrowserLoginStatus,
+  type JoyCodeQrLoginStatus,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
@@ -287,6 +294,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   const [geminiLoginTotp, setGeminiLoginTotp] = useState("");
   const [geminiLoginStatus, setGeminiLoginStatus] = useState<GeminiBrowserLoginStatus | null>(null);
   const [catpawLoginStatus, setCatpawLoginStatus] = useState<CatpawQrLoginStatus | null>(null);
+  const [joycodeLoginUrl, setJoycodeLoginUrl] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pendingCpaImport, setPendingCpaImport] = useState<PendingCpaImport | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -310,6 +318,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     setGeminiLoginTotp("");
     setGeminiLoginStatus(null);
     setCatpawLoginStatus(null);
+    setJoycodeLoginUrl("");
     setPendingCpaImport(null);
     setConfirmOpen(false);
   };
@@ -574,15 +583,45 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     }
   };
 
+  const pollJoyCodeQrLogin = async (jobId: string) => {
+    catpawJobRef.current = jobId;
+    for (;;) {
+      if (catpawJobRef.current !== jobId) return;
+      let status: JoyCodeQrLoginStatus;
+      try {
+        status = await fetchJoyCodeQrLogin(jobId);
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        continue;
+      }
+      if (catpawJobRef.current !== jobId) return;
+      setCatpawLoginStatus((prev) => ({ ...(prev ?? { status: "waiting_for_scan" }), ...status, jobId }));
+      if (status.status === "success") {
+        catpawJobRef.current = "";
+        await onImported(status.items ?? [], "joycode");
+        toast.success(`JoyCode 扫码登录完成，新增 ${status.added ?? 0} 个账号，跳过 ${status.skipped ?? 0} 个`);
+        setOpen(false);
+        resetState();
+        return;
+      }
+      if (["failed", "cancelled", "expired"].includes(status.status)) {
+        catpawJobRef.current = "";
+        toast.error(status.message || "JoyCode 扫码登录已结束，请重试");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  };
+
   const handleCatpawQrLogin = async () => {
     setIsSubmitting(true);
     let jobId = "";
     try {
-      const status = await startCatpawQrLogin({ proxy: importProxy.trim() });
+      const status = importProvider === "joycode" ? await startJoyCodeQrLogin() : await startCatpawQrLogin({ proxy: importProxy.trim() });
       setCatpawLoginStatus(status);
       jobId = status.jobId || "";
-      if (!jobId || !status.qrImageUrl) {
-        toast.error(status.message || "获取 CatPaw 二维码失败");
+      if (!jobId || (!status.qrImageUrl && !(status as JoyCodeQrLoginStatus).qrImage)) {
+        toast.error(status.message || `获取 ${providerDefinition.label} 二维码失败`);
         return;
       }
     } catch (error) {
@@ -591,7 +630,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     } finally {
       setIsSubmitting(false);
     }
-    void pollCatpawQrLogin(jobId);
+    void (importProvider === "joycode" ? pollJoyCodeQrLogin(jobId) : pollCatpawQrLogin(jobId));
   };
 
   const handleCatpawQrLoginCancel = async () => {
@@ -599,17 +638,41 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     catpawJobRef.current = "";
     if (jobId) {
       try {
-        await cancelCatpawQrLogin(jobId);
+        if (importProvider === "joycode") {
+          await cancelJoyCodeQrLogin(jobId);
+        } else {
+          await cancelCatpawQrLogin(jobId);
+        }
       } catch {
         // ignore cancel errors
       }
     }
     setCatpawLoginStatus(null);
-    toast.info("已取消 CatPaw 扫码登录");
+    toast.info(`已取消 ${providerDefinition.label} 扫码登录`);
   };
 
   const handleImportSessionJson = async () => {
     const sessionCopy = providerDefinition.importSessionCopy;
+
+    if (importProvider === "joycode") {
+      if (!sessionInput.trim()) {
+        toast.error("请先粘贴 JoyCode OAuth 回调 URL 或 pt_key");
+        return;
+      }
+      setIsSubmitting(true);
+      try {
+        const data = await submitJoyCodeOAuth(sessionInput.trim());
+        await onImported(data.items, "joycode");
+        toast.success(`JoyCode OAuth 导入完成，新增 ${data.added ?? 0} 个，跳过 ${data.skipped ?? 0} 个`);
+        setOpen(false);
+        resetState();
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "JoyCode OAuth 导入失败");
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
 
     if (importProvider === "gemini") {
       if (!geminiCookieJson.trim()) {
@@ -820,6 +883,52 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     }
 
     if (method === "browser-login") {
+      if (importProvider === "joycode") {
+        return (
+          <div className="space-y-4">
+            <button type="button" onClick={() => setMethod("methods")} className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800">
+              <ArrowLeft className="size-4" />
+              返回导入方式
+            </button>
+            <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-600">
+              点击生成 JoyCode OAuth 链接，在浏览器完成授权后，把回调 URL 或 pt_key 粘贴到 OAuth 导入方式中提交。
+            </div>
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                className="rounded-xl bg-stone-950 text-white hover:bg-stone-800"
+                onClick={async () => {
+                  setIsSubmitting(true);
+                  try {
+                    const data = await startJoyCodeBrowserLogin();
+                    setJoycodeLoginUrl(data.url);
+                    window.open(data.url, "_blank", "noopener,noreferrer");
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : "生成 JoyCode OAuth 链接失败");
+                  } finally {
+                    setIsSubmitting(false);
+                  }
+                }}
+                disabled={isSubmitting}
+              >
+                <ExternalLink className="size-4" />
+                打开 JoyCode OAuth
+              </Button>
+              <Button type="button" variant="outline" className="rounded-xl border-stone-200 bg-white" onClick={() => void importJoyCodeState().then(async (data) => {
+                await onImported(data.items, "joycode");
+                toast.success(`本机 JoyCode 凭据导入完成，新增 ${data.added ?? 0} 个`);
+                setOpen(false);
+                resetState();
+              }).catch((error) => toast.error(error instanceof Error ? error.message : "本机 JoyCode 凭据导入失败"))}>
+                本机自动导入
+              </Button>
+            </div>
+            {joycodeLoginUrl ? (
+              <Input value={joycodeLoginUrl} readOnly className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs" />
+            ) : null}
+          </div>
+        );
+      }
       return (
         <div className="space-y-4">
           <button
@@ -874,6 +983,8 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     }
 
     if (method === "qr-login") {
+      const qrStatus = catpawLoginStatus as (CatpawQrLoginStatus & JoyCodeQrLoginStatus) | null;
+
       return (
         <div className="space-y-4">
           <button
@@ -885,22 +996,22 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             返回导入方式
           </button>
           <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-600">
-            点击下方「开始扫码登录」获取二维码，使用大象 / 微信扫描并确认登录。成功后系统会自动获取 token 并加入号池，后台会自动续期。
+            点击下方「开始扫码登录」获取二维码并确认登录。成功后系统会自动获取凭据并加入号池。
           </div>
-          {catpawLoginStatus?.qrImageUrl ? (
+          {qrStatus?.qrImageUrl || qrStatus?.qrImage ? (
             <div className="flex flex-col items-center gap-3 rounded-2xl border border-stone-200 bg-white p-5">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={catpawLoginStatus.qrImageUrl}
-                alt="CatPaw 登录二维码"
+                src={qrStatus.qrImageUrl || `data:image/png;base64,${qrStatus.qrImage}`}
+                alt={`${providerDefinition.label} 登录二维码`}
                 className="size-52 rounded-xl border border-stone-200 bg-white object-contain"
               />
               <div className="text-sm text-stone-600">
-                {catpawLoginStatus.status === "waiting_for_scan"
+                {qrStatus.status === "waiting_for_scan"
                   ? "等待扫码中…"
-                  : catpawLoginStatus.status === "scanned"
+                  : qrStatus.status === "scanned"
                     ? "已扫码，请在手机 / 客户端确认登录…"
-                    : `当前状态：${catpawLoginStatus.status}`}
+                    : `当前状态：${qrStatus.status}`}
               </div>
               <Button
                 type="button"
@@ -916,7 +1027,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
               尚未生成二维码，点击下方「开始扫码登录」。
             </div>
           )}
-          {catpawLoginStatus?.message ? <div className="text-sm text-red-600">{catpawLoginStatus.message}</div> : null}
+          {qrStatus?.message ? <div className="text-sm text-red-600">{qrStatus.message}</div> : null}
         </div>
       );
     }
@@ -1058,16 +1169,35 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
               </Button>
             ) : null}
             {method === "browser-login" ? (
-              <Button className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800" onClick={() => void handleGeminiBrowserLogin()} disabled={footerDisabled}>
+              <Button
+                className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+                onClick={async () => {
+                  if (importProvider === "joycode") {
+                    setIsSubmitting(true);
+                    try {
+                      const data = await startJoyCodeBrowserLogin();
+                      setJoycodeLoginUrl(data.url);
+                      window.open(data.url, "_blank", "noopener,noreferrer");
+                    } catch (error) {
+                      toast.error(error instanceof Error ? error.message : "生成 JoyCode OAuth 链接失败");
+                    } finally {
+                      setIsSubmitting(false);
+                    }
+                    return;
+                  }
+                  await handleGeminiBrowserLogin();
+                }}
+                disabled={footerDisabled}
+              >
                 {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
-                开始浏览器登录
+                {importProvider === "joycode" ? "生成 OAuth 链接" : "开始浏览器登录"}
               </Button>
             ) : null}
             {method === "qr-login" ? (
               <Button
                 className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
                 onClick={() => void handleCatpawQrLogin()}
-                disabled={footerDisabled || Boolean(catpawLoginStatus?.qrImageUrl)}
+                disabled={footerDisabled || Boolean(catpawLoginStatus?.qrImageUrl || (catpawLoginStatus as JoyCodeQrLoginStatus | null)?.qrImage)}
               >
                 {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
                 开始扫码登录

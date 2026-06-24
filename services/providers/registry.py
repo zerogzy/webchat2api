@@ -10,6 +10,7 @@ from services.providers.base import (
     GEMINI_PROVIDER,
     GPT_PROVIDER,
     GROK_PROVIDER,
+    JOYCODE_PROVIDER,
     SUPPORTED_PROVIDERS,
     ChatAdapter,
     ImageAdapter,
@@ -22,28 +23,32 @@ from services.providers.catpaw.models import CATPAW_IMAGE_MODEL_IDS, CATPAW_MODE
 from services.providers.gemini.models import GEMINI_IMAGE_MODEL_IDS, GEMINI_MODEL_SPECS
 from services.providers.gpt.models import GPT_FALLBACK_MODEL_IDS, GPT_IMAGE_MODEL_IDS, GPT_MODEL_SPECS
 from services.providers.grok.models import GROK_IMAGE_MODEL_IDS, GROK_MODEL_SPECS
+from services.providers.joycode.models import JOYCODE_IMAGE_MODEL_IDS, JOYCODE_MODEL_SPECS, is_joycode_model_id
 
 _PROVIDER_MODEL_SPECS = {
     GPT_PROVIDER: tuple(GPT_MODEL_SPECS),
     GROK_PROVIDER: tuple(GROK_MODEL_SPECS),
     GEMINI_PROVIDER: tuple(GEMINI_MODEL_SPECS),
     CATPAW_PROVIDER: tuple(CATPAW_MODEL_SPECS),
+    JOYCODE_PROVIDER: tuple(JOYCODE_MODEL_SPECS),
 }
 _PROVIDER_OWNERS = {
     GPT_PROVIDER: "chatgpt",
     GROK_PROVIDER: "xai",
     GEMINI_PROVIDER: "google",
     CATPAW_PROVIDER: "catpaw",
+    JOYCODE_PROVIDER: "joycode",
 }
 _PROVIDER_CAPABILITIES: dict[str, frozenset[ModelCapability]] = {
     GPT_PROVIDER: frozenset({"chat", "image", "image_edit"}),
     GROK_PROVIDER: frozenset({"chat", "image", "image_edit"}),
     GEMINI_PROVIDER: frozenset({"chat", "image"}),
     CATPAW_PROVIDER: frozenset({"chat"}),
+    JOYCODE_PROVIDER: frozenset({"chat"}),
 }
 
 MODEL_REGISTRY = {spec.id: spec for specs in _PROVIDER_MODEL_SPECS.values() for spec in specs}
-IMAGE_MODEL_IDS = GPT_IMAGE_MODEL_IDS | GROK_IMAGE_MODEL_IDS | GEMINI_IMAGE_MODEL_IDS | CATPAW_IMAGE_MODEL_IDS
+IMAGE_MODEL_IDS = GPT_IMAGE_MODEL_IDS | GROK_IMAGE_MODEL_IDS | GEMINI_IMAGE_MODEL_IDS | CATPAW_IMAGE_MODEL_IDS | JOYCODE_IMAGE_MODEL_IDS
 
 
 def normalize_provider(value: object, *, strict: bool = False) -> str:
@@ -56,6 +61,8 @@ def normalize_provider(value: object, *, strict: bool = False) -> str:
         return GEMINI_PROVIDER
     if provider in {"catpaw", "cat-paw", "mcopilot", "meituan"}:
         return CATPAW_PROVIDER
+    if provider in {"joycode", "joy-code", "jd", "jingdong"}:
+        return JOYCODE_PROVIDER
     if strict:
         raise ValueError(f"unsupported provider: {value}")
     return GPT_PROVIDER
@@ -66,7 +73,7 @@ def normalize_account_provider(value: object) -> str:
 
 
 def supported_provider_ids() -> tuple[str, ...]:
-    return tuple(provider for provider in (GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER) if provider in SUPPORTED_PROVIDERS)
+    return tuple(provider for provider in (GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER, JOYCODE_PROVIDER) if provider in SUPPORTED_PROVIDERS)
 
 
 def provider_capabilities(provider: object) -> frozenset[ModelCapability]:
@@ -172,6 +179,8 @@ def resolve_model(model_id: object) -> ModelSpec:
         return ModelSpec(model, GEMINI_PROVIDER, "google", model)
     if is_catpaw_model_id(model):
         return ModelSpec(model, CATPAW_PROVIDER, "catpaw", model)
+    if is_joycode_model_id(model):
+        return ModelSpec(model, JOYCODE_PROVIDER, "joycode", model)
     return ModelSpec(model, GPT_PROVIDER, "chatgpt", model)
 
 

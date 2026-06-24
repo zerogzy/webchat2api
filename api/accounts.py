@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from api.account_flows import catpaw as catpaw_flow
 from api.account_flows import gemini as gemini_flow
 from api.account_flows import grok as grok_flow
+from api.account_flows import joycode as joycode_flow
 from services.auth_service import auth_service
 
 from api.support import (
@@ -51,7 +52,7 @@ class UserKeyUpdateRequest(BaseModel):
 class AccountCreateRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
     accounts: list[dict[str, Any]] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode"] | None = None
 
 
 class AccountDeleteIdentifier(BaseModel):
@@ -63,25 +64,25 @@ class AccountDeleteRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
     mode: Literal["tokens", "limited"] = "tokens"
-    provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode"] | None = None
 
 
 class AccountRefreshRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode"] | None = None
 
 
 class AccountValidateRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode"] | None = None
 
 
 class AccountExportRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini", "catpaw"]
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode"]
 
 
 class GeminiBrowserLoginRequest(BaseModel):
@@ -102,13 +103,21 @@ class CatpawQrLoginRequest(BaseModel):
     proxy: str = ""
 
 
+class JoyCodeOAuthSubmitRequest(BaseModel):
+    value: str = ""
+
+
+class JoyCodeAutoLoginRequest(BaseModel):
+    path: str = ""
+
+
 class AccountUpdateRequest(BaseModel):
     access_token: str = ""
     account_id: str | None = None
     row_id: str | None = None
     type: str | None = None
     provider: str | None = None
-    target_provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None
+    target_provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode"] | None = None
     status: str | None = None
     quota: int | None = None
     proxy: str | None = None
@@ -185,7 +194,7 @@ class RemoteAccountInjectRequest(BaseModel):
     strategy: Literal["merge", "replace"] = "merge"
     source_id: str = ""
     source_name: str = ""
-    provider: Literal["gpt", "grok", "gemini", "catpaw"] = "gpt"
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode"] = "gpt"
 
 
 def _account_payload_provider(item: dict[str, Any], provider: str | None) -> str:
@@ -245,7 +254,7 @@ def _account_strategy(provider: Any):
 
 
 
-def _export_filename(provider: Literal["gpt", "grok", "gemini", "catpaw"]) -> str:
+def _export_filename(provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode"]) -> str:
     return _account_strategy(provider).export_filename()
 
 
@@ -317,7 +326,7 @@ def create_router() -> APIRouter:
         return {"items": auth_service.list_keys(role="user")}
 
     @router.get("/api/accounts")
-    async def get_accounts(provider: Literal["gpt", "grok", "gemini", "catpaw"] | None = None, authorization: str | None = Header(default=None)):
+    async def get_accounts(provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode"] | None = None, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"items": sanitize_accounts(account_service.list_accounts(provider=provider))}
 
@@ -470,6 +479,51 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         result = await run_in_threadpool(account_service.refresh_catpaw_quota, True)
         return sanitize_account_result(result)
+
+    @router.post("/api/accounts/joycode/oauth-submit")
+    async def submit_joycode_oauth(body: JoyCodeOAuthSubmitRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return await run_in_threadpool(
+            joycode_flow.import_oauth,
+            body.value,
+            account_service=account_service,
+            sanitize_account_result=sanitize_account_result,
+        )
+
+    @router.post("/api/accounts/joycode/browser-login")
+    async def start_joycode_browser_login(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return joycode_flow.oauth_login_url()
+
+    @router.post("/api/accounts/joycode/auto-login")
+    async def import_joycode_state(body: JoyCodeAutoLoginRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return await run_in_threadpool(
+            joycode_flow.import_state_db,
+            body.path,
+            account_service=account_service,
+            sanitize_account_result=sanitize_account_result,
+        )
+
+    @router.post("/api/accounts/joycode/qr-login")
+    async def start_joycode_qr_login(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return await run_in_threadpool(joycode_flow.start_qr_login)
+
+    @router.get("/api/accounts/joycode/qr-login/{job_id}")
+    async def get_joycode_qr_login(job_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return await run_in_threadpool(
+            joycode_flow.poll_qr_login,
+            job_id,
+            account_service=account_service,
+            sanitize_account_result=sanitize_account_result,
+        )
+
+    @router.delete("/api/accounts/joycode/qr-login/{job_id}")
+    async def cancel_joycode_qr_login(job_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return joycode_flow.cancel_qr_login(job_id)
 
     @router.post("/api/accounts/catpaw/quota/apply")
     async def apply_catpaw_quota(authorization: str | None = Header(default=None)):

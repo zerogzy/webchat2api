@@ -126,7 +126,7 @@ export type AccountImportPayload = {
   [key: string]: unknown;
 };
 
-export type AccountExportProvider = "gpt" | "grok" | "gemini" | "catpaw";
+export type AccountExportProvider = "gpt" | "grok" | "gemini" | "catpaw" | "joycode";
 
 export type AccountDeleteIdentifier = {
   account_id?: string | null;
@@ -434,6 +434,10 @@ export type CatpawQrLoginStatus = {
   skipped?: number;
 };
 
+export type JoyCodeQrLoginStatus = CatpawQrLoginStatus & {
+  qrImage?: string;
+};
+
 export async function startCatpawQrLogin(payload: { proxy?: string } = {}) {
   return httpRequest<CatpawQrLoginStatus>("/api/accounts/catpaw/qr-login", {
     method: "POST",
@@ -447,6 +451,45 @@ export async function fetchCatpawQrLogin(jobId: string) {
 
 export async function cancelCatpawQrLogin(jobId: string) {
   return httpRequest<CatpawQrLoginStatus>(`/api/accounts/catpaw/qr-login/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    body: {},
+  });
+}
+
+export async function startJoyCodeBrowserLogin() {
+  return httpRequest<{ url: string; token: string }>("/api/accounts/joycode/browser-login", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function submitJoyCodeOAuth(value: string) {
+  return httpRequest<AccountMutationResponse>("/api/accounts/joycode/oauth-submit", {
+    method: "POST",
+    body: { value },
+  });
+}
+
+export async function importJoyCodeState(path = "") {
+  return httpRequest<AccountMutationResponse>("/api/accounts/joycode/auto-login", {
+    method: "POST",
+    body: { path },
+  });
+}
+
+export async function startJoyCodeQrLogin() {
+  return httpRequest<JoyCodeQrLoginStatus>("/api/accounts/joycode/qr-login", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function fetchJoyCodeQrLogin(jobId: string) {
+  return httpRequest<JoyCodeQrLoginStatus>(`/api/accounts/joycode/qr-login/${encodeURIComponent(jobId)}`);
+}
+
+export async function cancelJoyCodeQrLogin(jobId: string) {
+  return httpRequest<JoyCodeQrLoginStatus>(`/api/accounts/joycode/qr-login/${encodeURIComponent(jobId)}`, {
     method: "DELETE",
     body: {},
   });

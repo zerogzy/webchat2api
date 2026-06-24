@@ -19,6 +19,7 @@ from services.content_filter import check_request, request_text
 from services.log_service import LoggedCall
 from services.protocol import (
     anthropic_v1_messages,
+    joycode_extras,
     openai_search,
     openai_v1_chat_complete,
     openai_v1_complete,
@@ -53,6 +54,19 @@ class SearchRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-5-5"
+
+
+class JoyCodeWebSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    query: str | None = None
+    prompt: str | None = None
+
+
+class JoyCodeRerankRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    query: str
+    documents: list[str]
+    top_n: int | None = None
 
 
 class CompletionRequest(BaseModel):
@@ -209,6 +223,32 @@ def create_router() -> APIRouter:
         call = LoggedCall(identity, "/v1/search", model, "Search", request_text=prompt)
         await filter_or_log(call, prompt)
         return await call.run(openai_search.handle, payload)
+
+    @router.post("/v1/web-search")
+    async def create_joycode_web_search(
+            body: JoyCodeWebSearchRequest,
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="x-api-key"),
+    ):
+        identity = require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
+        payload = body.model_dump(mode="python")
+        prompt = str(payload.get("query") or payload.get("prompt") or "")
+        call = LoggedCall(identity, "/v1/web-search", "joycode-search", "JoyCode Search", request_text=prompt)
+        await filter_or_log(call, prompt)
+        return await call.run(joycode_extras.web_search, payload)
+
+    @router.post("/v1/rerank")
+    async def create_joycode_rerank(
+            body: JoyCodeRerankRequest,
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="x-api-key"),
+    ):
+        identity = require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
+        payload = body.model_dump(mode="python")
+        prompt = str(payload.get("query") or "")
+        call = LoggedCall(identity, "/v1/rerank", "joycode-rerank", "JoyCode Rerank", request_text=prompt)
+        await filter_or_log(call, prompt)
+        return await call.run(joycode_extras.rerank, payload)
 
     @router.post("/v1/completions")
     @router.post("/v1/complete")

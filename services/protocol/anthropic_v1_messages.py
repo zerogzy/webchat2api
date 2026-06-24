@@ -9,6 +9,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from typing import Any
 
 from services.protocol import openai_v1_chat_complete, tool_calls
+from services.protocol import joycode_anthropic
 from services.protocol.conversation import count_message_tokens, count_text_tokens
 from services.providers.base import CATPAW_PROVIDER
 from services.providers.catpaw import conversation as catpaw_conversation
@@ -399,6 +400,8 @@ def _anthropic_stop_reason(finish_reason: str) -> str:
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     request_model = str(body.get("model") or "auto").strip() or "auto"
+    if joycode_anthropic.enabled() and joycode_anthropic.is_native_model(request_model):
+        return joycode_anthropic.stream_events(body) if body.get("stream") else joycode_anthropic.non_stream_response(body)
     payload = anthropic_to_openai_body(dict(body))
     if payload.get("stream"):
         chunks = openai_v1_chat_complete.handle(payload)

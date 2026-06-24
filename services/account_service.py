@@ -16,6 +16,7 @@ from services.providers.base import (
     GEMINI_PROVIDER,
     GPT_PROVIDER,
     GROK_PROVIDER,
+    JOYCODE_PROVIDER,
     AccountStateDecision,
     AccountStateDecisionInput,
     ModelSpec,
@@ -362,7 +363,7 @@ class AccountService:
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
         provider_strategy = account_strategy(normalized["provider"])
-        if normalized["provider"] in {GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER}:
+        if normalized["provider"] in {GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER, JOYCODE_PROVIDER}:
             normalized = provider_strategy.normalize_account(normalized)
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
@@ -886,6 +887,8 @@ class AccountService:
             return self.fetch_gemini_remote_info(access_token, event, provider=account_provider)
         if account_provider == CATPAW_PROVIDER:
             return self.fetch_catpaw_remote_info(access_token, event, provider=account_provider)
+        if account_provider == JOYCODE_PROVIDER:
+            return self.fetch_joycode_remote_info(access_token, event, provider=account_provider)
         if account_provider != GPT_PROVIDER:
             return dict(account) if account else None
         from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
@@ -909,6 +912,13 @@ class AccountService:
         provider_filter = provider or CATPAW_PROVIDER
         account = self.get_account(access_token, provider=provider_filter) or {}
         strategy = cast(RemoteAccountValidator, account_strategy(CATPAW_PROVIDER))
+        payload = strategy.validate_remote_info(access_token, account)
+        return self.update_account(access_token, payload, provider=provider_filter)
+
+    def fetch_joycode_remote_info(self, access_token: str, event: str = "fetch_joycode_remote_info", provider: str | None = None) -> dict[str, Any] | None:
+        provider_filter = provider or JOYCODE_PROVIDER
+        account = self.get_account(access_token, provider=provider_filter) or {}
+        strategy = cast(RemoteAccountValidator, account_strategy(JOYCODE_PROVIDER))
         payload = strategy.validate_remote_info(access_token, account)
         return self.update_account(access_token, payload, provider=provider_filter)
 
