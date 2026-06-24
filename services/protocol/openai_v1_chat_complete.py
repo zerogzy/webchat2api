@@ -205,7 +205,7 @@ def stream_tool_chat_completion_from_text(
 ) -> Iterator[dict[str, Any]]:
     completion_id = completion_id or f"chatcmpl-{uuid.uuid4().hex}"
     created = created or int(time.time())
-    parsed = tool_calls.parse_gemini_openai_tool_response(content, body) if gemini_native_tools else tool_calls.parse_tool_calls(content, tool_calls.tool_names(body.get("tools")))
+    parsed = tool_calls.parse_gemini_openai_tool_response(content, body) if gemini_native_tools else tool_calls.parse_tool_calls_for_tools(content, body.get("tools"))
     if parsed.calls:
         yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": None}, None, completion_id, created), include_usage)
         for index, call in enumerate(parsed.calls):
@@ -495,7 +495,7 @@ def stream_catpaw_tool_chat_completion(
             continue
 
     full_text = "".join(full_text_parts)
-    parsed = tool_calls.parse_tool_calls(full_text, tool_calls.tool_names(body.get("tools")))
+    parsed = tool_calls.parse_tool_calls_for_tools(full_text, body.get("tools"))
 
     if parsed.calls:
         if not sent_role:
@@ -604,7 +604,7 @@ def parsed_chat_tool_response(body: dict[str, Any], model: str, content: str, me
     names = tool_calls.tool_names(body.get("tools"))
     if not names:
         return None
-    parsed = tool_calls.parse_gemini_openai_tool_response(content, body) if gemini_native_tools else tool_calls.parse_tool_calls(content, names)
+    parsed = tool_calls.parse_gemini_openai_tool_response(content, body) if gemini_native_tools else tool_calls.parse_tool_calls_for_tools(content, body.get("tools"))
     if not parsed.calls:
         return None
     return tool_calls.chat_tool_call_response(model, parsed.calls, messages=messages)

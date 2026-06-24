@@ -157,7 +157,7 @@ def text_output_item(text: str, item_id: str | None = None, status: str = "compl
 def response_output_from_text(body: dict[str, Any], text: str) -> list[dict[str, Any]]:
     names = tool_calls.tool_names(body.get("tools"))
     if names:
-        parsed = tool_calls.parse_tool_calls(text, names)
+        parsed = tool_calls.parse_tool_calls_for_tools(text, body.get("tools"))
         if parsed.calls:
             return tool_calls.response_function_call_items(parsed.calls)
     return [text_output_item(text)]

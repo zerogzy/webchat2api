@@ -70,6 +70,18 @@ def tool_names(tools: object) -> list[str]:
     return names
 
 
+def tool_schemas(tools: object) -> dict[str, dict[str, Any]]:
+    schemas: dict[str, dict[str, Any]] = {}
+    for tool in normalize_openai_tools(tools):
+        raw_function = tool.get("function")
+        function = raw_function if isinstance(raw_function, dict) else {}
+        name = str(function.get("name") or "").strip()
+        parameters = function.get("parameters")
+        if name and isinstance(parameters, dict):
+            schemas[name] = parameters
+    return schemas
+
+
 def has_function_tools(body: dict[str, Any]) -> bool:
     return bool(tool_names(body.get("tools")))
 
@@ -273,6 +285,28 @@ def parse_tool_calls(text: str, available_tools: list[str] | None = None) -> Too
     return ToolParseResult(calls=calls, saw_tool_syntax=saw_tool_syntax)
 
 
+def parse_tool_calls_for_tools(text: str, tools: object) -> ToolParseResult:
+    parsed = parse_tool_calls(text, tool_names(tools))
+    if not parsed.calls:
+        return parsed
+    return ToolParseResult(calls=repair_tool_calls(parsed.calls, tools), saw_tool_syntax=parsed.saw_tool_syntax)
+
+
+def repair_tool_calls(calls: list[ParsedToolCall], tools: object) -> list[ParsedToolCall]:
+    schemas = tool_schemas(tools)
+    if not schemas:
+        return calls
+    repaired: list[ParsedToolCall] = []
+    for call in calls:
+        schema = schemas.get(call.name)
+        args = _parse_arguments(call.arguments)
+        args = args if isinstance(args, dict) else {}
+        args = _normalize_tool_arguments(call.name, args)
+        if schema and _tool_arguments_match_schema(args, schema):
+            repaired.append(ParsedToolCall(call.call_id, call.name, _json_arguments(args)))
+    return repaired
+
+
 def strip_tool_markup(text: str) -> str:
     return _TOOL_MARKUP_RE.sub("", text or "").strip()
 
@@ -374,7 +408,7 @@ def _parse_nested_xml_calls(inner_text: str) -> list[ParsedToolCall]:
         parameters = _xml_value(inner, "parameters") or _xml_value(inner, "arguments") or _xml_value(inner, "input") or "{}"
         arguments = _parse_arguments(parameters)
         if name:
-            calls.append(_make_call(name, arguments if isinstance(arguments, dict) else {}))
+            calls.append(_make_call(name, arguments if isinstance(arguments, dict) else parameters))
     return calls
 
 
@@ -391,7 +425,7 @@ def _parse_flat_xml_calls(inner_text: str) -> list[ParsedToolCall]:
         segment = inner_text[match.end():end]
         parameters = _xml_value(segment, "parameters") or _xml_value(segment, "arguments") or _xml_value(segment, "input") or "{}"
         arguments = _parse_arguments(parameters)
-        calls.append(_make_call(name, arguments if isinstance(arguments, dict) else {}))
+        calls.append(_make_call(name, arguments if isinstance(arguments, dict) else parameters))
     return calls
 
 
@@ -421,9 +455,10 @@ def _parse_alt_xml(text: str) -> list[ParsedToolCall]:
     for match in re.finditer(r"(?is)<function_call\b[^>]*>(.*?)</function_call>", text):
         inner = match.group(1)
         name = _xml_value(inner, "name") or _xml_value(inner, "tool_name")
-        arguments = _parse_arguments(_xml_value(inner, "arguments") or _xml_value(inner, "parameters") or "{}")
+        raw_arguments = _xml_value(inner, "arguments") or _xml_value(inner, "parameters") or "{}"
+        arguments = _parse_arguments(raw_arguments)
         if name:
-            calls.append(_make_call(name, arguments if isinstance(arguments, dict) else {}))
+            calls.append(_make_call(name, arguments if isinstance(arguments, dict) else raw_arguments))
     for match in re.finditer(r"(?is)<invoke\b[^>]*name=[\"']?([\w.-]+)[\"']?[^>]*>(.*?)</invoke>", text):
         arguments = _parse_arguments(match.group(2).strip())
         calls.append(_make_call(match.group(1).strip(), arguments if arguments is not None else {}))
@@ -449,12 +484,67 @@ def _make_call(name: str, arguments: Any) -> ParsedToolCall:
 
 
 def _normalize_tool_arguments(name: str, arguments: Any) -> Any:
+    if isinstance(arguments, str):
+        value = arguments.strip()
+        if name == "Bash" and value:
+            return {"command": value}
+        if name == "Read" and value:
+            return {"file_path": value}
+        if name == "Glob" and value:
+            return {"pattern": value}
     if isinstance(arguments, dict) and isinstance(arguments.get("parameters"), dict) and len(arguments) == 1:
         arguments = dict(arguments["parameters"])
+    if isinstance(arguments, dict) and isinstance(arguments.get("input"), dict) and len(arguments) == 1:
+        arguments = dict(arguments["input"])
+    if isinstance(arguments, dict) and isinstance(arguments.get("arguments"), dict) and len(arguments) == 1:
+        arguments = dict(arguments["arguments"])
+    if name == "Bash" and isinstance(arguments, dict):
+        arguments = dict(arguments)
+        for alias in ("cmd", "shell_command", "script", "code"):
+            if not arguments.get("command") and isinstance(arguments.get(alias), str):
+                arguments["command"] = arguments[alias]
+            arguments.pop(alias, None)
     if name == "Bash" and isinstance(arguments, dict) and isinstance(arguments.get("command"), str):
         arguments = dict(arguments)
         arguments["command"] = _windows_paths_to_posix_command(str(arguments.get("command") or ""))
     return arguments
+
+
+def _tool_arguments_match_schema(arguments: dict[str, Any], schema: dict[str, Any]) -> bool:
+    required = schema.get("required")
+    if not isinstance(required, list):
+        return True
+    properties = schema.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    for raw_key in required:
+        key = str(raw_key)
+        if key not in arguments:
+            return False
+        value = arguments.get(key)
+        if isinstance(value, str) and not value.strip():
+            return False
+        spec = properties.get(key)
+        if isinstance(spec, dict) and not _value_matches_json_type(value, spec.get("type")):
+            return False
+    return True
+
+
+def _value_matches_json_type(value: Any, expected: Any) -> bool:
+    if isinstance(expected, list):
+        return any(_value_matches_json_type(value, item) for item in expected)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, int | float) and not isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "object":
+        return isinstance(value, dict)
+    return True
 
 
 def _json_arguments(arguments: Any) -> str:
@@ -562,7 +652,8 @@ def _parse_tool_element_calls(text: str, available_tools: list[str]) -> list[Par
         if name not in available:
             continue
         args = {child.group(1): _parse_xml_scalar(child.group(2)) for child in re.finditer(r"(?is)<([\w.\-]+)\b[^>]*>(.*?)</\1\s*>", match.group(2))}
-        calls.append(_make_call(name, args or (_parse_arguments(match.group(2)) or {})))
+        parsed = _parse_arguments(match.group(2))
+        calls.append(_make_call(name, args or (parsed if isinstance(parsed, dict) else match.group(2).strip())))
     return calls
 
 

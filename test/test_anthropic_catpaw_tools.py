@@ -67,6 +67,15 @@ def _claude_code_tools() -> list[dict[str, Any]]:
                 "required": ["command"],
             },
         },
+        {
+            "name": "Glob",
+            "description": "Find files by glob.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"pattern": {"type": "string"}},
+                "required": ["pattern"],
+            },
+        },
     ]
 
 
@@ -224,16 +233,38 @@ class AnthropicCatpawToolTests(unittest.TestCase):
             ('<tool_calls><Write><file_path>C:/tmp/catpaw.txt</file_path><content>ok</content></Write></tool_calls>', "Write", {"file_path": "C:/tmp/catpaw.txt", "content": "ok"}),
             ('tool_call>Write{"parameters":{"file_path":"C:/tmp/catpaw.txt","content":"ok"}}', "Write", {"file_path": "C:/tmp/catpaw.txt", "content": "ok"}),
             (r'<tool_calls><tool_name>Bash</tool_name><parameters>{"command":"ls C:\Users\zero\Desktop","description":"List"}</parameters></tool_calls>', "Bash", {"command": "ls /c/Users/zero/Desktop", "description": "List"}),
-            ('我来查看文件。tool_call>Glob{"pattern":"~/Desktop/*frp*"}', "Bash", {"command": "find ~/Desktop -maxdepth 1 -iname '*frp*' -print", "description": "Find files matching ~/Desktop/*frp*"}),
+            ('我来查看文件。tool_call>Glob{"pattern":"~/Desktop/*frp*"}', "Glob", {"pattern": "~/Desktop/*frp*"}),
+            ('tool_call>Bash{"cmd":"pwd"}', "Bash", {"command": "pwd"}),
+            ('tool_call>Bash{"shell_command":"ls -la"}', "Bash", {"command": "ls -la"}),
+            ('<tool_calls><Bash>ls -la</Bash></tool_calls>', "Bash", {"command": "ls -la"}),
         ]
-        names = [tool["name"] for tool in _claude_code_tools()]
+        tools = _claude_code_tools()
 
         for text, name, expected in cases:
             with self.subTest(name=name):
-                parsed = anthropic_v1_messages.tool_calls.parse_tool_calls(text, names)
+                parsed = anthropic_v1_messages.tool_calls.parse_tool_calls_for_tools(text, tools)
                 self.assertEqual(len(parsed.calls), 1)
                 self.assertEqual(parsed.calls[0].name, name)
                 self.assertEqual(json.loads(parsed.calls[0].arguments), expected)
+
+    def test_tool_parser_does_not_emit_unrecoverable_invalid_bash(self) -> None:
+        tools = _claude_code_tools()
+
+        parsed = anthropic_v1_messages.tool_calls.parse_tool_calls_for_tools('tool_call>Bash{"description":"list files"}', tools)
+
+        self.assertEqual(parsed.calls, [])
+
+    def test_glob_falls_back_to_bash_only_when_glob_tool_is_unavailable(self) -> None:
+        tools = [tool for tool in _claude_code_tools() if tool["name"] != "Glob"]
+
+        parsed = anthropic_v1_messages.tool_calls.parse_tool_calls_for_tools('tool_call>Glob{"pattern":"~/Desktop/*frp*"}', tools)
+
+        self.assertEqual(len(parsed.calls), 1)
+        self.assertEqual(parsed.calls[0].name, "Bash")
+        self.assertEqual(
+            json.loads(parsed.calls[0].arguments),
+            {"command": "find ~/Desktop -maxdepth 1 -iname '*frp*' -print", "description": "Find files matching ~/Desktop/*frp*"},
+        )
 
     def test_anthropic_stream_translates_openai_tool_chunks_to_input_json_delta(self) -> None:
         chunks = [
