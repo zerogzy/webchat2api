@@ -323,6 +323,7 @@ class AnthropicCatpawToolTests(unittest.TestCase):
         )
         self.assertEqual(body["userModelTypeCode"], 59)
         self.assertEqual(body["chatApplyModeType"], "chat")
+        self.assertIs(body["planPromptEnabled"], False)
         self.assertEqual(body["agentModeConfig"], {"model": {"default": 59, "maxMode": True, "autoMode": False}})
 
 

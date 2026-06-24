@@ -105,7 +105,7 @@ def build_tool_system_prompt(tools: object, tool_choice: object = None, parallel
     if not blocks:
         return ""
     lines = [
-        "You have access to the following tools.",
+        "You have access to Claude Code local tools. To read, write, edit, delete files, or run commands, you MUST call these tools; describing an action in prose does not execute it.",
         "AVAILABLE TOOLS:",
         "\n\n".join(blocks),
         "TOOL CALL FORMAT:",

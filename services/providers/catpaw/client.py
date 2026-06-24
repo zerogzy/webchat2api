@@ -579,7 +579,7 @@ def _build_stream_body(
         "conversationId": conversation_id or str(uuid.uuid4()),
         "messages": catpaw_messages,
         "triggerMode": "TOOLWINDOW_CHAT",
-        "planPromptEnabled": True,
+        "planPromptEnabled": False,
     }
     if type_code is not None:
         body["userModelTypeCode"] = type_code
