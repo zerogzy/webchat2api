@@ -337,7 +337,7 @@ class AnthropicCatpawToolTests(unittest.TestCase):
 
     def test_catpaw_stream_retries_unfinished_tool_intent_once(self) -> None:
         outputs = [
-            iter(["现在我将创建计算器程序："]),
+            iter(["我来帮你创建一个计算器程序。首先创建文件夹，然后编写代码。\n\n</tool_calls>"]),
             iter(['<tool_call>Write<file_path>/home/claude/api/calculator.py</file_path><content>print(1)</content></Write>']),
         ]
 

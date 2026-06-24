@@ -590,7 +590,7 @@ def _looks_like_unfinished_tool_intent(text: str) -> bool:
     text = (text or "").strip()
     if not text:
         return False
-    return any(marker in text for marker in ("我将", "现在我将", "准备", "接下来", "will", "going to")) and any(
+    return any(marker in text for marker in ("我将", "现在我将", "我来帮", "首先", "然后", "准备", "接下来", "will", "going to")) and any(
         marker in text for marker in ("创建", "写", "保存", "运行", "文件", "目录", "folder", "file", "write", "run", "create")
     )
 
