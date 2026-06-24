@@ -15,7 +15,7 @@ from typing import Any
 from services.providers.base import CATPAW_PROVIDER, ModelSpec
 
 # model id -> (userModelTypeCode, owned_by, vision-capable)
-_CATPAW_MODELS: tuple[tuple[str, int, str, bool], ...] = (
+CATPAW_MODELS: tuple[tuple[str, int, str, bool], ...] = (
     ("deepseek-v3.2", 9, "deepseek", False),
     ("longcat-flash", 22, "meituan", False),
     ("kimi-k2.5", 41, "moonshot", True),
@@ -27,40 +27,38 @@ _CATPAW_MODELS: tuple[tuple[str, int, str, bool], ...] = (
     ("kimi-k2.6", 62, "moonshot", True),
 )
 
-# Generic default alias; -> glm-5 (agentic flagship).
-DEFAULT_TYPE_CODE = 46
-
-
 CATPAW_MODEL_SPECS = (
-    ModelSpec("catpaw", CATPAW_PROVIDER, "meituan-catpaw", "glm-5"),
-    *(ModelSpec(mid, CATPAW_PROVIDER, owner, mid) for mid, _tc, owner, _v in _CATPAW_MODELS),
+    *(ModelSpec(mid, CATPAW_PROVIDER, owner, mid) for mid, _tc, owner, _v in CATPAW_MODELS),
 )
 
-CATPAW_TYPE_CODES: dict[str, int] = {"catpaw": DEFAULT_TYPE_CODE}
-CATPAW_TYPE_CODES.update({mid: tc for mid, tc, _o, _v in _CATPAW_MODELS})
+CATPAW_TYPE_CODES: dict[str, int] = {mid: tc for mid, tc, _o, _v in CATPAW_MODELS}
+CLAUDE_ROUTE_TYPE_CODE = CATPAW_TYPE_CODES["glm-5"]
 
 # Vision (image-input capable) model ids — informational; image generation unsupported.
-CATPAW_VISION_MODEL_IDS: set[str] = {mid for mid, _tc, _o, vision in _CATPAW_MODELS if vision}
+CATPAW_VISION_MODEL_IDS: set[str] = {mid for mid, _tc, _o, vision in CATPAW_MODELS if vision}
 
 # No image-generation models.
 CATPAW_IMAGE_MODEL_IDS: set[str] = set()
 
-_CATPAW_MODEL_ID_SET: set[str] = {mid for mid, _tc, _o, _v in _CATPAW_MODELS} | {"catpaw"}
+CATPAW_MODEL_ID_SET: set[str] = {mid for mid, _tc, _o, _v in CATPAW_MODELS}
 
 
 def type_code_for(model: str) -> int:
     """Resolve a model name to a CatPaw type code.
 
-    Only actual CatPaw model IDs are accepted. Falls back to DEFAULT_TYPE_CODE
-    for unknown models.
+    Only actual CatPaw model IDs are accepted.
     """
     name = str(model or "").strip()
-    return CATPAW_TYPE_CODES.get(name, DEFAULT_TYPE_CODE)
+    if name.startswith("claude-"):
+        return CLAUDE_ROUTE_TYPE_CODE
+    if name not in CATPAW_TYPE_CODES:
+        raise ValueError(f"unsupported CatPaw model: {name}")
+    return CATPAW_TYPE_CODES[name]
 
 
 def is_catpaw_model_id(model: str) -> bool:
     name = str(model or "").strip()
-    return name in _CATPAW_MODEL_ID_SET or name.startswith("catpaw")
+    return name in CATPAW_MODEL_ID_SET
 
 
 def catpaw_model_metadata() -> list[dict[str, Any]]:

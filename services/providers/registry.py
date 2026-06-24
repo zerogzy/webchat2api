@@ -18,7 +18,7 @@ from services.providers.base import (
     ProviderDefinition,
     AccountAdapter,
 )
-from services.providers.catpaw.models import CATPAW_IMAGE_MODEL_IDS, CATPAW_MODEL_SPECS
+from services.providers.catpaw.models import CATPAW_IMAGE_MODEL_IDS, CATPAW_MODEL_SPECS, is_catpaw_model_id
 from services.providers.gemini.models import GEMINI_IMAGE_MODEL_IDS, GEMINI_MODEL_SPECS
 from services.providers.gpt.models import GPT_FALLBACK_MODEL_IDS, GPT_IMAGE_MODEL_IDS, GPT_MODEL_SPECS
 from services.providers.grok.models import GROK_IMAGE_MODEL_IDS, GROK_MODEL_SPECS
@@ -170,7 +170,7 @@ def resolve_model(model_id: object) -> ModelSpec:
         return ModelSpec(model, GROK_PROVIDER, "xai", model)
     if model.startswith("gemini-"):
         return ModelSpec(model, GEMINI_PROVIDER, "google", model)
-    if model.startswith("catpaw"):
+    if is_catpaw_model_id(model):
         return ModelSpec(model, CATPAW_PROVIDER, "catpaw", model)
     return ModelSpec(model, GPT_PROVIDER, "chatgpt", model)
 

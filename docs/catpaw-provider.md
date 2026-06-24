@@ -64,11 +64,15 @@ claude
 
 常见模型示例：
 
-- `catpaw`
-- `catpaw-default`
-- `catpaw-gpt-4.1`
-- `catpaw-gpt-4o`
-- `catpaw-vision`
+- `deepseek-v3.2`
+- `longcat-flash`
+- `kimi-k2.5`
+- `glm-5`
+- `MiniMax-M2.5`
+- `MiniMax-M2.7`
+- `glm-5.1`
+- `glm-5v-turbo`
+- `kimi-k2.6`
 
 ## 路由与限制
 

@@ -7,7 +7,7 @@
 <p align="center">webchat2api 是一个将 GPT/ChatGPT Web、Grok/xAI Web 与 Gemini Web 能力封装为标准 API 接口的代理服务项目，提供 FastAPI 后端、Next.js Web 管理端、OpenAI 风格 API、Gemini native API、GPT/Grok/Gemini 账号池管理、文生文/文生图试验页以及 Docker 自托管部署能力。</p>
 
 > [!WARNING]
-> 免责声明：本项目涉及对 GPT/ChatGPT Web、Grok/xAI Web 与 Gemini Web 能力的逆向研究与封装，仅供个人学习、技术研究与非商业性技术交流使用。严禁用于商业倒卖、批量滥用、违反服务条款或违法违规场景。使用者需自行承担账号受限、封禁及其他法律与合规风险。
+> 免责声明：本项目涉及对 GPT/ChatGPT Web、Grok/xAI Web 与 Gemini Web 能力的研究与封装，仅供个人学习、技术研究与非商业性技术交流使用。严禁用于商业倒卖、批量滥用、违反服务条款或违法违规场景。使用者需自行承担账号受限、封禁及其他法律与合规风险。
 
 > [!IMPORTANT]
 > 默认登录密钥为 `admin`，仅适合本地测试。公网或生产环境部署后必须通过 `LOGIN_SECRET` 或 `WEBCHAT2API_AUTH_KEY` 修改为强随机密钥。
