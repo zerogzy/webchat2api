@@ -578,7 +578,7 @@ def _parse_arguments(raw: Any) -> Any:
         except (json.JSONDecodeError, ValueError):
             pass
     xml_args = {match.group(1): _parse_xml_scalar(match.group(2)) for match in re.finditer(r"(?is)<([\w.-]+)\b[^>]*>(.*?)</\1>", raw)}
-    return xml_args or None
+    return xml_args or _parse_jsonish_arguments(raw) or None
 
 
 def _parse_xml_scalar(raw: str) -> Any:
@@ -649,9 +649,43 @@ def _windows_paths_to_posix_command(command: str) -> str:
 
 def _clean_bash_command(command: str) -> str:
     command = command.strip()
+    assignment = re.fullmatch(r"(?is)command\s*=\s*(.+)", command)
+    if assignment:
+        command = assignment.group(1).strip()
     while len(command) >= 2 and command[0] == command[-1] and command[0] in {'"', "'"}:
         command = command[1:-1].strip()
     return command
+
+
+def _parse_jsonish_arguments(raw: str) -> dict[str, str]:
+    file_path = _jsonish_string_value(raw, "file_path")
+    content = _jsonish_string_value(raw, "content")
+    return {key: value for key, value in {"file_path": file_path, "content": content}.items() if value}
+
+
+def _jsonish_string_value(raw: str, key: str) -> str:
+    match = re.search(rf'(?is)"{re.escape(key)}"\s*:\s*', raw)
+    if not match:
+        return ""
+    rest = raw[match.end():]
+    if key == "content":
+        next_key = re.search(r'(?is)",\s*"[\w.-]+"\s*:', rest)
+        value = rest[:next_key.start() + 1] if next_key else rest.rstrip().removesuffix("}")
+        return _clean_jsonish_string(value)
+    match = re.match(r'(?is)"((?:\\.|[^"\\])*)"', rest)
+    return html.unescape(match.group(1)) if match else ""
+
+
+def _clean_jsonish_string(value: str) -> str:
+    value = value.strip().rstrip(",").strip()
+    for quote in ('"""', "'''", '"', "'"):
+        while value.startswith(quote) and value.endswith(quote) and len(value) >= len(quote) * 2:
+            value = value[len(quote):-len(quote)].strip()
+    try:
+        value = json.loads(f'"{value}"')
+    except (json.JSONDecodeError, ValueError):
+        value = value.replace("\\n", "\n").replace('\\"', '"')
+    return value.removeprefix('""').strip()
 
 
 def _parse_tool_element_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:

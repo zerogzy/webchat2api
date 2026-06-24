@@ -243,6 +243,8 @@ class AnthropicCatpawToolTests(unittest.TestCase):
             ('<tool_call>Write<file_path>/home/claude/api/calc.py</file_path><content>print(1)</content></Write>', "Write", {"file_path": "/home/claude/api/calc.py", "content": "print(1)"}),
             ('tool_call>Bash{"command":"{\\"command\\":\\" \\"mkdir -p /home/claude/api\\"\\",\\"description\\":\\"创建api目录\\"}"}', "Bash", {"command": "mkdir -p /home/claude/api"}),
             ('tool_call>Bash{"command":" "mkdir -p /home/claude/api"","description":"创建api目录"}', "Bash", {"command": "mkdir -p /home/claude/api"}),
+            ('tool_call>Bash{"command":"command=\\"mkdir -p /home/claude/api\\"","description":"创建目录"}', "Bash", {"command": "mkdir -p /home/claude/api", "description": "创建目录"}),
+            ('<tool_calls><tool_name>Write</tool_name><parameters>{&quot;file_path&quot;:&quot;/home/claude/api/calculator.py&quot;,&quot;content&quot;:&quot;&quot;&quot;\\nimport math\\nprint(math.sqrt(9))\\n&quot;}</parameters></tool_calls>', "Write", {"file_path": "/home/claude/api/calculator.py", "content": "import math\nprint(math.sqrt(9))"}),
         ]
         tools = _claude_code_tools()
 
