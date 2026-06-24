@@ -266,6 +266,8 @@ def parse_tool_calls(text: str, available_tools: list[str] | None = None) -> Too
     if not text:
         return ToolParseResult()
     saw_tool_syntax = bool(_TOOL_SYNTAX_RE.search(text))
+    if not saw_tool_syntax and available_tools:
+        saw_tool_syntax = _has_function_style_tool_call(text, available_tools)
     if not saw_tool_syntax:
         return ToolParseResult()
     calls = (
@@ -274,7 +276,9 @@ def parse_tool_calls(text: str, available_tools: list[str] | None = None) -> Too
         or _parse_json_array(text)
         or _parse_alt_xml(text)
         or _parse_tool_element_calls(text, available_tools or [])
+        or _parse_tagless_tool_call_calls(text, available_tools or [])
         or _parse_loose_tool_call_calls(text, available_tools or [])
+        or _parse_function_style_calls(text, available_tools or [])
         or _parse_name_near_json_calls(text, available_tools or [])
     )
     if available_tools:
@@ -487,7 +491,7 @@ def _normalize_tool_arguments(name: str, arguments: Any) -> Any:
     if isinstance(arguments, str):
         value = arguments.strip()
         if name == "Bash" and value:
-            return {"command": value}
+            return {"command": _clean_bash_command(value)}
         if name == "Read" and value:
             return {"file_path": value}
         if name == "Glob" and value:
@@ -506,7 +510,7 @@ def _normalize_tool_arguments(name: str, arguments: Any) -> Any:
             arguments.pop(alias, None)
     if name == "Bash" and isinstance(arguments, dict) and isinstance(arguments.get("command"), str):
         arguments = dict(arguments)
-        arguments["command"] = _windows_paths_to_posix_command(str(arguments.get("command") or ""))
+        arguments["command"] = _windows_paths_to_posix_command(_clean_bash_command(str(arguments.get("command") or "")))
     return arguments
 
 
@@ -641,6 +645,13 @@ def _windows_paths_to_posix_command(command: str) -> str:
     return _WINDOWS_PATH_IN_COMMAND_RE.sub(repl, command)
 
 
+def _clean_bash_command(command: str) -> str:
+    command = command.strip()
+    while len(command) >= 2 and command[0] == command[-1] and command[0] in {'"', "'"}:
+        command = command[1:-1].strip()
+    return command
+
+
 def _parse_tool_element_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
     available = {tool for tool in available_tools if tool}
     if not available:
@@ -672,6 +683,46 @@ def _parse_loose_tool_call_calls(text: str, available_tools: list[str]) -> list[
             if bash_args:
                 calls.append(_make_call("Bash", bash_args))
     return calls
+
+
+def _parse_tagless_tool_call_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
+    available = {tool for tool in available_tools if tool}
+    calls: list[ParsedToolCall] = []
+    for name in sorted(available, key=len, reverse=True):
+        pattern = rf"(?is)<tool_call>\s*{re.escape(name)}\s*(.*?)</{re.escape(name)}\s*>"
+        for match in re.finditer(pattern, text):
+            args = {child.group(1): _parse_xml_scalar(child.group(2)) for child in re.finditer(r"(?is)<([\w.\-]+)\b[^>]*>(.*?)</\1\s*>", match.group(1))}
+            calls.append(_make_call(name, args))
+    return calls
+
+
+def _parse_function_style_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
+    available = {tool for tool in available_tools if tool}
+    if not available:
+        return []
+    for name in sorted(available, key=len, reverse=True):
+        match = re.search(rf"(?is)(^|[^\w.\-]){re.escape(name)}\s*\((.*)\)\s*$", text)
+        if not match:
+            continue
+        raw = match.group(2).strip()
+        parsed = _parse_arguments(raw)
+        if isinstance(parsed, dict):
+            return [_make_call(name, parsed)]
+        if name == "Bash":
+            command = _command_from_broken_json(raw) or raw
+            return [_make_call(name, {"command": command})]
+    return []
+
+
+def _has_function_style_tool_call(text: str, available_tools: list[str]) -> bool:
+    return any(re.search(rf"(?is)(^|[^\w.\-]){re.escape(str(name))}\s*\(", text) for name in available_tools if name)
+
+
+def _command_from_broken_json(raw: str) -> str:
+    match = re.search(r'(?is)["\']command["\']\s*:\s*(.+?)(?:,\s*["\']description["\']|[}\s]*$)', raw)
+    if not match:
+        return ""
+    return _clean_bash_command(match.group(1).strip().rstrip("}").strip())
 
 
 def _parse_name_near_json_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:

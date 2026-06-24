@@ -237,6 +237,10 @@ class AnthropicCatpawToolTests(unittest.TestCase):
             ('tool_call>Bash{"cmd":"pwd"}', "Bash", {"command": "pwd"}),
             ('tool_call>Bash{"shell_command":"ls -la"}', "Bash", {"command": "ls -la"}),
             ('<tool_calls><Bash>ls -la</Bash></tool_calls>', "Bash", {"command": "ls -la"}),
+            ('Bash({"command":" \\"mkdir -p /home/claude/api\\"","description":"创建api目录"})', "Bash", {"command": "mkdir -p /home/claude/api", "description": "创建api目录"}),
+            ('Bash(mkdir -p /home/claude/api)', "Bash", {"command": "mkdir -p /home/claude/api"}),
+            ('<tool_call>Bash<command>mkdir -p /home/claude/api</command><description>创建api目录</description></Bash>', "Bash", {"command": "mkdir -p /home/claude/api", "description": "创建api目录"}),
+            ('<tool_call>Write<file_path>/home/claude/api/calc.py</file_path><content>print(1)</content></Write>', "Write", {"file_path": "/home/claude/api/calc.py", "content": "print(1)"}),
         ]
         tools = _claude_code_tools()
 
