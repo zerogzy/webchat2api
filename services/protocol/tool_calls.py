@@ -510,7 +510,9 @@ def _normalize_tool_arguments(name: str, arguments: Any) -> Any:
             arguments.pop(alias, None)
     if name == "Bash" and isinstance(arguments, dict) and isinstance(arguments.get("command"), str):
         arguments = dict(arguments)
-        arguments["command"] = _windows_paths_to_posix_command(_clean_bash_command(str(arguments.get("command") or "")))
+        command = _clean_bash_command(str(arguments.get("command") or ""))
+        command = _command_from_broken_json(command) or command
+        arguments["command"] = _windows_paths_to_posix_command(command)
     return arguments
 
 

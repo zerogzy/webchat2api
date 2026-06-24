@@ -241,6 +241,7 @@ class AnthropicCatpawToolTests(unittest.TestCase):
             ('Bash(mkdir -p /home/claude/api)', "Bash", {"command": "mkdir -p /home/claude/api"}),
             ('<tool_call>Bash<command>mkdir -p /home/claude/api</command><description>创建api目录</description></Bash>', "Bash", {"command": "mkdir -p /home/claude/api", "description": "创建api目录"}),
             ('<tool_call>Write<file_path>/home/claude/api/calc.py</file_path><content>print(1)</content></Write>', "Write", {"file_path": "/home/claude/api/calc.py", "content": "print(1)"}),
+            ('tool_call>Bash{"command":"{\\"command\\":\\" \\"mkdir -p /home/claude/api\\"\\",\\"description\\":\\"创建api目录\\"}"}', "Bash", {"command": "mkdir -p /home/claude/api"}),
         ]
         tools = _claude_code_tools()
 
