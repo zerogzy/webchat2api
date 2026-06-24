@@ -320,6 +320,21 @@ class AnthropicCatpawToolTests(unittest.TestCase):
         self.assertEqual(json.loads(tool_delta["tool_calls"][0]["function"]["arguments"]), {"file_path": "C:/tmp/a.txt", "content": "ok"})
         self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "tool_calls")
 
+    def test_catpaw_stream_keeps_unparsed_tool_markup_visible(self) -> None:
+        pieces = ["<tool_call>Bash</tool_call>"]
+
+        with mock.patch.object(anthropic_v1_messages.openai_v1_chat_complete.catpaw_chat, "chat_completion_deltas", return_value=iter(pieces)):
+            chunks = list(
+                anthropic_v1_messages.openai_v1_chat_complete.stream_catpaw_tool_chat_completion(
+                    {"tools": _claude_code_tools()},
+                    [{"role": "user", "content": "write file"}],
+                    "claude-sonnet-4-20250514",
+                )
+            )
+
+        text = "".join(str(chunk["choices"][0]["delta"].get("content") or "") for chunk in chunks)
+        self.assertIn("<tool_call>Bash</tool_call>", text)
+
     def test_catpaw_stream_body_disables_official_agent_auto_mode(self) -> None:
         body = catpaw_client._build_stream_body([{"role": "user", "content": "hello"}], 59)
 

@@ -30,6 +30,7 @@ from services.protocol.conversation import (
     text_backend,
 )
 from utils.helper import build_chat_image_markdown_content, extract_chat_image, extract_chat_prompt, has_image_message_content, is_image_chat_request, parse_image_count
+from utils.log import logger
 
 
 gpt_chat = chat_adapter("gpt")
@@ -525,6 +526,9 @@ def stream_catpaw_tool_chat_completion(
         return
 
     plain = tool_calls.strip_tool_markup(full_text) if parsed.saw_tool_syntax else full_text
+    if parsed.saw_tool_syntax and not plain.strip() and full_text.strip():
+        logger.warning({"event": "catpaw_tool_parse_empty", "text": full_text[:500]})
+        plain = full_text
     if visible := plain[len(streamed_text):] if plain.startswith(streamed_text) else plain:
         if not sent_role:
             sent_role = True
