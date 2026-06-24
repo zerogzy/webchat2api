@@ -674,10 +674,15 @@ def _parse_loose_tool_call_calls(text: str, available_tools: list[str]) -> list[
     available = {tool for tool in available_tools if tool}
     calls: list[ParsedToolCall] = []
     for match in re.finditer(r"(?is)(?:<)?tool_call>\s*([A-Za-z_][\w.\-]*)", text):
-        obj = _extract_json_value(text[match.end():], "{")
-        if not isinstance(obj, dict):
-            continue
+        rest = text[match.end():]
+        obj = _extract_json_value(rest, "{")
         name = match.group(1)
+        if not isinstance(obj, dict):
+            if name == "Bash" and name in available:
+                command = _command_from_broken_json(rest)
+                if command:
+                    calls.append(_make_call(name, {"command": command}))
+            continue
         if name in available:
             calls.append(_make_call(name, obj))
         elif name == "Glob" and "Bash" in available:
