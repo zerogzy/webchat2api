@@ -80,12 +80,64 @@ def import_state_db(path: str = "", *, account_service: Any, sanitize_account_re
     return sanitize_account_result(account_service.add_account_items([payload]))
 
 
-def _cookie_value(session: requests.Session, name: str) -> str:
-    cookies = session.cookies
-    for cookie in cookies.jar:  # type: ignore[attr-defined]
-        if getattr(cookie, "name", "") == name:
-            return _clean(getattr(cookie, "value", ""))
+def _iter_cookie_items(source: Any) -> list[tuple[str, str]]:
+    cookies = getattr(source, "cookies", source)
+    items: list[tuple[str, str]] = []
+    if isinstance(cookies, dict):
+        items.extend((_clean(name), _clean(value)) for name, value in cookies.items())
+    else:
+        jar = getattr(cookies, "jar", cookies)
+        try:
+            iterator = iter(jar)
+        except TypeError:
+            iterator = iter(())
+        for cookie in iterator:
+            items.append((_clean(getattr(cookie, "name", "")), _clean(getattr(cookie, "value", ""))))
+    headers = getattr(source, "headers", None)
+    if headers:
+        values = []
+        get_list = getattr(headers, "get_list", None) or getattr(headers, "getlist", None)
+        if callable(get_list):
+            values = list(get_list("set-cookie") or get_list("Set-Cookie") or [])
+        elif hasattr(headers, "get"):
+            raw = headers.get("set-cookie") or headers.get("Set-Cookie")
+            values = [raw] if raw else []
+        for raw in values:
+            first = _clean(raw).split(";", 1)[0]
+            if "=" in first:
+                name, value = first.split("=", 1)
+                items.append((_clean(name), _clean(value)))
+    return items
+
+
+def _cookie_value(source: Any, name: str) -> str:
+    for cookie_name, value in _iter_cookie_items(source):
+        if cookie_name == name:
+            return value
     return ""
+
+
+def _follow_validation_url(session: requests.Session, response: Any) -> str:
+    try:
+        payload = response.json()
+    except Exception:
+        try:
+            payload = json.loads(response.text)
+        except Exception:
+            return ""
+    if not isinstance(payload, dict) or int(payload.get("returnCode") or 0) != 0 or int(payload.get("riskCode") or 0) != 0:
+        return ""
+    url = _clean(payload.get("url"))
+    if not url:
+        return ""
+    if url.startswith("http://"):
+        url = "https://" + url[7:]
+    follow = session.get(url, headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx"}, timeout=30)
+    return _cookie_value(session, "pt_key") or _cookie_value(follow, "pt_key")
+
+
+def _validation_pt_key(session: requests.Session, response: Any) -> str:
+    return _cookie_value(session, "pt_key") or _cookie_value(response, "pt_key") or _follow_validation_url(session, response)
 
 
 def start_qr_login() -> dict[str, Any]:
@@ -140,8 +192,8 @@ def poll_qr_login(job_id: str, *, account_service: Any, sanitize_account_result:
         return {"jobId": job_id, "status": "expired"}
     if code != 200 or not payload.get("ticket"):
         return {"jobId": job_id, "status": "failed", "message": f"JD QR status code {code}"}
-    session.get(QR_VALID_URL.format(ticket=payload["ticket"]), headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx"}, timeout=30)
-    pt_key = _cookie_value(session, "pt_key")
+    validation = session.get(QR_VALID_URL.format(ticket=payload["ticket"]), headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx"}, timeout=30)
+    pt_key = _validation_pt_key(session, validation)
     if not pt_key:
         return {"jobId": job_id, "status": "failed", "message": "JD login succeeded but pt_key cookie was not found"}
     result = sanitize_account_result(account_service.add_account_items([_user_payload(pt_key)]))

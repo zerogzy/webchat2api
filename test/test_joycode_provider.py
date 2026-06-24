@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+import importlib.util
+from pathlib import Path
 from unittest import mock
 
 if "curl_cffi" not in sys.modules:
@@ -21,6 +23,11 @@ from services.providers.registry import resolve_model, normalize_account_provide
 from services.providers.base import JOYCODE_PROVIDER
 from services.providers.joycode.accounts import normalize_account, sanitize_account
 from services.providers.joycode.client import JoyCodeClient, parse_oauth_pt_key
+
+_joycode_flow_spec = importlib.util.spec_from_file_location("joycode_flow", Path(__file__).parents[1] / "api/account_flows/joycode.py")
+joycode_flow = importlib.util.module_from_spec(_joycode_flow_spec)
+assert _joycode_flow_spec and _joycode_flow_spec.loader
+_joycode_flow_spec.loader.exec_module(joycode_flow)
 
 
 class JoyCodeProviderTests(unittest.TestCase):
@@ -42,6 +49,12 @@ class JoyCodeProviderTests(unittest.TestCase):
     def test_oauth_url_parser_accepts_url_or_plain_key(self) -> None:
         self.assertEqual(parse_oauth_pt_key("http://127.0.0.1:83/?pt_key=abc&x=1"), "abc")
         self.assertEqual(parse_oauth_pt_key("abc"), "abc")
+
+    def test_jd_qr_validation_reads_pt_key_from_set_cookie(self) -> None:
+        session = types.SimpleNamespace(cookies={})
+        response = types.SimpleNamespace(cookies={}, headers={"set-cookie": "pt_key=qr-key; Path=/; HttpOnly"})
+
+        self.assertEqual(joycode_flow._validation_pt_key(session, response), "qr-key")
 
     def test_prepare_body_uses_joycode_defaults(self) -> None:
         fake_session = types.SimpleNamespace(close=lambda: None)
