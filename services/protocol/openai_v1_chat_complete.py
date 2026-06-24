@@ -525,6 +525,29 @@ def stream_catpaw_tool_chat_completion(
             )
         return
 
+    retry_parsed = _retry_catpaw_tool_call(body, messages, model, full_text)
+    if retry_parsed.calls:
+        if not sent_role:
+            sent_role = True
+            yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": None}, None, completion_id, created), include_usage)
+        for index, call in enumerate(retry_parsed.calls):
+            yield stream_chunk(completion_chunk(
+                model,
+                {
+                    "tool_calls": [{
+                        "index": index,
+                        "id": call.call_id,
+                        "type": "function",
+                        "function": {"name": call.name, "arguments": call.arguments},
+                    }],
+                },
+                None,
+                completion_id,
+                created,
+            ), include_usage)
+        yield stream_chunk(completion_chunk(model, {}, "tool_calls", completion_id, created), include_usage)
+        return
+
     plain = tool_calls.strip_tool_markup(full_text) if parsed.saw_tool_syntax else full_text
     if parsed.saw_tool_syntax and not plain.strip() and full_text.strip():
         logger.warning({"event": "catpaw_tool_parse_empty", "text": full_text[:500]})
@@ -543,6 +566,33 @@ def stream_catpaw_tool_chat_completion(
             model, completion_id, created,
             completion_usage(messages, model, plain),
         )
+
+
+def _retry_catpaw_tool_call(body: dict[str, Any], messages: list[dict[str, Any]], model: str, text: str) -> tool_calls.ToolParseResult:
+    if not _looks_like_unfinished_tool_intent(text):
+        return tool_calls.ToolParseResult()
+    retry_messages = [
+        *messages,
+        {
+            "role": "user",
+            "content": "You said you would perform the file/command task but did not call a tool. Output ONLY the next Claude Code tool call now, using the required tool schema. No prose.",
+        },
+    ]
+    retry_text = "".join(catpaw_chat.chat_completion_deltas(body=body, messages=retry_messages, model=model))
+    parsed = tool_calls.parse_tool_calls_for_tools(retry_text, body.get("tools"))
+    if parsed.calls:
+        return parsed
+    logger.warning({"event": "catpaw_tool_retry_failed", "text": retry_text[:500]})
+    return tool_calls.ToolParseResult()
+
+
+def _looks_like_unfinished_tool_intent(text: str) -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+    return any(marker in text for marker in ("我将", "现在我将", "准备", "接下来", "will", "going to")) and any(
+        marker in text for marker in ("创建", "写", "保存", "运行", "文件", "目录", "folder", "file", "write", "run", "create")
+    )
 
 
 def collect_chat_content(chunks: Iterable[dict[str, Any]]) -> str:
