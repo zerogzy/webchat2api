@@ -408,6 +408,13 @@ def install_fastapi_stubs() -> None:
     setattr(cors, "CORSMiddleware", StubCORSMiddleware)
     staticfiles = types.ModuleType("fastapi.staticfiles")
     setattr(staticfiles, "StaticFiles", StubStaticFiles)
+    starlette = types.ModuleType("starlette")
+    datastructures = types.ModuleType("starlette.datastructures")
+    starlette_exceptions = types.ModuleType("starlette.exceptions")
+    setattr(datastructures, "UploadFile", StubUploadFile)
+    setattr(starlette_exceptions, "HTTPException", StubHTTPException)
+    setattr(starlette, "datastructures", datastructures)
+    setattr(starlette, "exceptions", starlette_exceptions)
 
     setattr(fastapi, "concurrency", concurrency)
     setattr(fastapi, "encoders", encoders)
@@ -428,6 +435,9 @@ def install_fastapi_stubs() -> None:
         "fastapi.middleware": middleware,
         "fastapi.middleware.cors": cors,
         "fastapi.staticfiles": staticfiles,
+        "starlette": starlette,
+        "starlette.datastructures": datastructures,
+        "starlette.exceptions": starlette_exceptions,
     }.items():
         _install_module(name, module)
 

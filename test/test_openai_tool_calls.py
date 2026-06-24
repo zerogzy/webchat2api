@@ -5,12 +5,13 @@ import unittest
 from typing import Any, cast
 from unittest import mock
 
-from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_tiktoken_stub
+from test.optional_stubs import install_curl_cffi_stub, install_fastapi_stubs, install_pil_stub, install_pybase64_stub, install_pydantic_stub, install_tiktoken_stub
 
 install_curl_cffi_stub()
 install_fastapi_stubs()
 install_pil_stub()
 install_pybase64_stub()
+install_pydantic_stub()
 install_tiktoken_stub()
 
 from services.protocol import openai_v1_chat_complete, openai_v1_response

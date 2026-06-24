@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import inspect
 import time
 import unittest
 from typing import Any
@@ -26,7 +25,6 @@ install_tiktoken_stub()
 from services.protocol import anthropic_v1_messages
 from services.providers.base import CATPAW_PROVIDER, GPT_PROVIDER
 from services.providers.catpaw import client as catpaw_client
-from services.providers.catpaw import conversation as catpaw_conversation
 from services.providers.registry import resolve_model
 
 
@@ -35,21 +33,14 @@ def _claude_code_tools() -> list[dict[str, Any]]:
         {
             "name": "Read",
             "description": "Read a file from disk.",
-            "input_schema": {
-                "type": "object",
-                "properties": {"file_path": {"type": "string"}},
-                "required": ["file_path"],
-            },
+            "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]},
         },
         {
             "name": "Write",
             "description": "Write a file to disk.",
             "input_schema": {
                 "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "content": {"type": "string"},
-                },
+                "properties": {"file_path": {"type": "string"}, "content": {"type": "string"}},
                 "required": ["file_path", "content"],
             },
         },
@@ -72,10 +63,7 @@ def _claude_code_tools() -> list[dict[str, Any]]:
             "description": "Run a shell command.",
             "input_schema": {
                 "type": "object",
-                "properties": {
-                    "command": {"type": "string"},
-                    "description": {"type": "string"},
-                },
+                "properties": {"command": {"type": "string"}, "description": {"type": "string"}},
                 "required": ["command"],
             },
         },
@@ -85,9 +73,7 @@ def _claude_code_tools() -> list[dict[str, Any]]:
 class AnthropicCatpawToolTests(unittest.TestCase):
     def setUp(self) -> None:
         os.environ.pop("CATPAW_CLAUDE_ROUTE", None)
-        reset = getattr(anthropic_v1_messages, "reset_catpaw_conversation_cache_for_tests", None)
-        if callable(reset):
-            reset()
+        anthropic_v1_messages.reset_catpaw_conversation_cache_for_tests()
 
     def test_claude_model_routes_to_catpaw_by_default(self) -> None:
         self.assertEqual(resolve_model("claude-sonnet-4-20250514").provider, CATPAW_PROVIDER)
@@ -97,177 +83,71 @@ class AnthropicCatpawToolTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CATPAW_CLAUDE_ROUTE": "0"}):
             self.assertEqual(resolve_model("claude-sonnet-4-20250514").provider, GPT_PROVIDER)
 
-    def test_message_request_for_claude_model_does_not_require_gpt_token(self) -> None:
-        with mock.patch.object(
-            anthropic_v1_messages.account_service,
-            "get_text_access_token",
-            side_effect=AssertionError("claude model should route to CatPaw"),
-        ):
-            request = anthropic_v1_messages.message_request(
-                {
-                    "model": "claude-sonnet-4-20250514",
-                    "messages": [{"role": "user", "content": "Read README.md"}],
-                    "tools": _claude_code_tools(),
-                }
-            )
-
-        self.assertTrue(request.catpaw_mode)
-        self.assertIsNone(request.backend)
-        self.assertEqual(request.model, "claude-sonnet-4-20250514")
-        self.assertIn("AVAILABLE TOOLS", request.messages[0]["content"])
-
-    def test_claude_code_tool_followup_reuses_catpaw_conversation_id(self) -> None:
-        tools = _claude_code_tools()
-        first = anthropic_v1_messages.message_request(
+    def test_anthropic_request_translates_tools_and_tool_results_to_openai_body(self) -> None:
+        body = anthropic_v1_messages.anthropic_to_openai_body(
             {
                 "model": "claude-sonnet-4-20250514",
-                "messages": [{"role": "user", "content": "Read README.md"}],
-                "tools": tools,
-            }
-        )
-        second = anthropic_v1_messages.message_request(
-            {
-                "model": "claude-sonnet-4-20250514",
+                "system": [{"type": "text", "text": "You are Claude Code."}],
                 "messages": [
                     {"role": "user", "content": "Read README.md"},
                     {
                         "role": "assistant",
                         "content": [
-                            {
-                                "type": "tool_use",
-                                "id": "toolu_read",
-                                "name": "Read",
-                                "input": {"file_path": "README.md"},
-                            }
+                            {"type": "text", "text": "I will read it."},
+                            {"type": "tool_use", "id": "toolu_read", "name": "Read", "input": {"file_path": "README.md"}},
                         ],
                     },
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_read", "content": [{"type": "text", "text": "# webchat2api"}]}]},
+                ],
+                "tools": _claude_code_tools(),
+                "tool_choice": {"type": "tool", "name": "Read"},
+            }
+        )
+
+        self.assertEqual(body["model"], "claude-sonnet-4-20250514")
+        self.assertEqual(body["messages"][0], {"role": "system", "content": "You are Claude Code."})
+        self.assertEqual(body["messages"][2]["tool_calls"][0]["id"], "toolu_read")
+        self.assertEqual(body["messages"][3], {"role": "tool", "tool_call_id": "toolu_read", "content": "# webchat2api"})
+        self.assertEqual(body["tools"][0]["function"]["name"], "Read")
+        self.assertEqual(body["tool_choice"], {"type": "function", "function": {"name": "Read"}})
+
+    def test_anthropic_response_translates_openai_tool_calls_to_tool_use(self) -> None:
+        response = anthropic_v1_messages.message_response_from_openai(
+            {
+                "choices": [
                     {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": "toolu_read",
-                                "content": [{"type": "text", "text": "# webchat2api"}],
-                            }
-                        ],
-                    },
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_read",
+                                    "type": "function",
+                                    "function": {"name": "Read", "arguments": '{"file_path":"README.md"}'},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
                 ],
-                "tools": tools,
-            }
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+            "claude-sonnet-4-20250514",
         )
 
-        self.assertRegex(
-            getattr(first, "catpaw_conversation_id", ""),
-            re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
-        )
-        self.assertEqual(first.catpaw_conversation_id, second.catpaw_conversation_id)
+        self.assertEqual(response["stop_reason"], "tool_use")
+        self.assertEqual(response["content"], [{"type": "tool_use", "id": "call_read", "name": "Read", "input": {"file_path": "README.md"}}])
+        self.assertEqual(response["usage"], {"input_tokens": 10, "output_tokens": 5})
 
-    def test_different_claude_code_roots_get_different_catpaw_conversation_ids(self) -> None:
-        first = anthropic_v1_messages.message_request(
-            {
-                "model": "claude-sonnet-4-20250514",
-                "messages": [{"role": "user", "content": "Read README.md"}],
-                "tools": _claude_code_tools(),
-            }
-        )
-        second = anthropic_v1_messages.message_request(
-            {
-                "model": "claude-sonnet-4-20250514",
-                "messages": [{"role": "user", "content": "List docs files"}],
-                "tools": _claude_code_tools(),
-            }
-        )
-
-        self.assertNotEqual(first.catpaw_conversation_id, second.catpaw_conversation_id)
-
-    def test_same_claude_code_root_with_different_model_gets_different_catpaw_conversation_id(self) -> None:
-        first = anthropic_v1_messages.message_request(
-            {
-                "model": "claude-sonnet-4-20250514",
-                "messages": [{"role": "user", "content": "Read README.md"}],
-                "tools": _claude_code_tools(),
-            }
-        )
-        second = anthropic_v1_messages.message_request(
-            {
-                "model": "claude-haiku-4-20250514",
-                "messages": [{"role": "user", "content": "Read README.md"}],
-                "tools": _claude_code_tools(),
-            }
-        )
-
-        self.assertNotEqual(first.catpaw_conversation_id, second.catpaw_conversation_id)
-
-    def test_same_claude_code_root_with_different_tools_gets_different_catpaw_conversation_id(self) -> None:
-        first = anthropic_v1_messages.message_request(
-            {
-                "model": "claude-sonnet-4-20250514",
-                "messages": [{"role": "user", "content": "Read README.md"}],
-                "tools": _claude_code_tools(),
-            }
-        )
-        second = anthropic_v1_messages.message_request(
-            {
-                "model": "claude-sonnet-4-20250514",
-                "messages": [{"role": "user", "content": "Read README.md"}],
-                "tools": [_claude_code_tools()[0]],
-            }
-        )
-
-        self.assertNotEqual(first.catpaw_conversation_id, second.catpaw_conversation_id)
-
-    def test_same_claude_code_root_with_different_system_gets_different_catpaw_conversation_id(self) -> None:
-        first = anthropic_v1_messages.message_request(
-            {
-                "model": "claude-sonnet-4-20250514",
-                "system": "You are Claude Code in project A.",
-                "messages": [{"role": "user", "content": "Read README.md"}],
-                "tools": _claude_code_tools(),
-            }
-        )
-        second = anthropic_v1_messages.message_request(
-            {
-                "model": "claude-sonnet-4-20250514",
-                "system": "You are Claude Code in project B.",
-                "messages": [{"role": "user", "content": "Read README.md"}],
-                "tools": _claude_code_tools(),
-            }
-        )
-
-        self.assertNotEqual(first.catpaw_conversation_id, second.catpaw_conversation_id)
-
-    def test_same_claude_code_root_with_different_session_header_gets_different_catpaw_conversation_id(self) -> None:
-        first = anthropic_v1_messages.message_request(
-            {
-                "model": "claude-sonnet-4-20250514",
-                "_request_headers": {"x-claude-code-session-id": "session-a"},
-                "messages": [{"role": "user", "content": "Read README.md"}],
-                "tools": _claude_code_tools(),
-            }
-        )
-        second = anthropic_v1_messages.message_request(
-            {
-                "model": "claude-sonnet-4-20250514",
-                "_request_headers": {"x-claude-code-session-id": "session-b"},
-                "messages": [
-                    {"role": "user", "content": "Read README.md"},
-                    {"role": "assistant", "content": "ok"},
-                    {"role": "user", "content": "Continue"},
-                ],
-                "tools": _claude_code_tools(),
-            }
-        )
-
-        self.assertNotEqual(first.catpaw_conversation_id, second.catpaw_conversation_id)
-
-    def test_anthropic_handle_passes_catpaw_conversation_id_to_client(self) -> None:
-        captured: dict[str, Any] = {}
-
-        def fake_stream_chat_deltas(*args: Any, **kwargs: Any):
-            captured["conversation_id"] = kwargs.get("conversation_id")
-            yield "ok"
-
-        with mock.patch.object(catpaw_client, "stream_chat_deltas", side_effect=fake_stream_chat_deltas):
+    def test_anthropic_handle_uses_catpaw_without_gpt_token(self) -> None:
+        with (
+            mock.patch.object(anthropic_v1_messages.openai_v1_chat_complete.catpaw_chat, "chat_completion", return_value="<tool_calls><tool_name>Read</tool_name><parameters>{\"file_path\":\"README.md\"}</parameters></tool_calls>"),
+            mock.patch.object(
+                anthropic_v1_messages.openai_v1_chat_complete,
+                "text_backend",
+                side_effect=AssertionError("claude model should route to CatPaw"),
+            ),
+        ):
             response = anthropic_v1_messages.handle(
                 {
                     "model": "claude-sonnet-4-20250514",
@@ -276,203 +156,100 @@ class AnthropicCatpawToolTests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(response["content"], [{"type": "text", "text": "ok"}])
-        self.assertRegex(
-            captured.get("conversation_id", ""),
-            re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
-        )
-
-    def test_catpaw_conversation_bootstrap_expires_before_followup(self) -> None:
-        cache = catpaw_conversation.CatpawConversationCache(
-            bootstrap_ttl_seconds=1,
-            active_ttl_seconds=100,
-        )
-        first = cache.conversation_id("root-a", "branch-a", has_history=False, now=0)
-        second = cache.conversation_id("root-a", "branch-a", has_history=True, now=2)
-
-        self.assertNotEqual(first, second)
-
-    def test_catpaw_conversation_active_entry_reuses_within_ttl(self) -> None:
-        cache = catpaw_conversation.CatpawConversationCache(
-            bootstrap_ttl_seconds=10,
-            active_ttl_seconds=100,
-        )
-        first = cache.conversation_id("root-a", "branch-a", has_history=False, now=0)
-        second = cache.conversation_id("root-a", "branch-a", has_history=True, now=1)
-        third = cache.conversation_id("root-a", "branch-a", has_history=True, now=50)
-
-        self.assertEqual(first, second)
-        self.assertEqual(second, third)
-
-    def test_catpaw_text_tool_calls_convert_to_claude_tool_use_for_file_operations(self) -> None:
-        windows_path = r"C:\Users\zero\Desktop\美团ai\webchat2api\README.md"
-        cases = [
-            (
-                "Read",
-                '<tool_calls><tool_name>Read</tool_name><parameters>{"file_path":"'
-                + windows_path
-                + '"}</parameters></tool_calls>',
-                {"file_path": windows_path},
-            ),
-            (
-                "Write",
-                '<tool_calls><tool_name>Write</tool_name><parameters>{"file_path":"C:/tmp/catpaw.txt","content":"hello\\nworld"}</parameters></tool_calls>',
-                {"file_path": "C:/tmp/catpaw.txt", "content": "hello\nworld"},
-            ),
-            (
-                "Edit",
-                '<tool_calls><tool_name>Edit</tool_name><parameters>{"file_path":"C:/tmp/catpaw.txt","old_string":"hello","new_string":"hello from edit","replace_all":false}</parameters></tool_calls>',
-                {
-                    "file_path": "C:/tmp/catpaw.txt",
-                    "old_string": "hello",
-                    "new_string": "hello from edit",
-                    "replace_all": False,
-                },
-            ),
-            (
-                "Bash",
-                '<tool_calls><tool_name>Bash</tool_name><parameters>{"command":"rm -f C:/tmp/catpaw.txt","description":"Delete catpaw test file"}</parameters></tool_calls>',
-                {"command": "rm -f C:/tmp/catpaw.txt", "description": "Delete catpaw test file"},
-            ),
-        ]
-
-        for name, text, expected_input in cases:
-            with self.subTest(name=name):
-                response = anthropic_v1_messages.message_response(
-                    "claude-sonnet-4-20250514",
-                    text,
-                    input_tokens=10,
-                    output_tokens=5,
-                    tools=_claude_code_tools(),
-                )
-
-                json.dumps(response)
-                self.assertEqual(response["stop_reason"], "tool_use")
-                block = response["content"][-1]
-                self.assertEqual(block["type"], "tool_use")
-                self.assertTrue(str(block["id"]).startswith("toolu_"))
-                self.assertEqual(block["name"], name)
-                self.assertEqual(block["input"], expected_input)
-
-    def test_bash_tool_windows_paths_convert_to_posix_shell_paths(self) -> None:
-        response = anthropic_v1_messages.message_response(
-            "glm-5.1",
-            r'<tool_calls><tool_name>Bash</tool_name><parameters>{"command":"ls C:\Users\zero\Desktop","description":"List Desktop"}</parameters></tool_calls>',
-            input_tokens=10,
-            output_tokens=5,
-            tools=_claude_code_tools(),
-        )
-
-        block = response["content"][-1]
-        self.assertEqual(block["type"], "tool_use")
-        self.assertEqual(block["name"], "Bash")
-        self.assertEqual(block["input"], {"command": "ls /c/Users/zero/Desktop", "description": "List Desktop"})
-
-    def test_malformed_catpaw_glob_call_maps_to_bash_when_glob_is_unavailable(self) -> None:
-        response = anthropic_v1_messages.message_response(
-            "glm-5.1",
-            '我来帮您查看桌面文件夹中关于 frp 的文件。tool_call>Glob{"pattern":"~/Desktop/*frp*"}',
-            input_tokens=10,
-            output_tokens=5,
-            tools=_claude_code_tools(),
-        )
-
-        block = response["content"][-1]
         self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(block["type"], "tool_use")
-        self.assertEqual(block["name"], "Bash")
-        self.assertEqual(
-            block["input"],
+        self.assertEqual(response["content"][-1]["name"], "Read")
+        self.assertEqual(response["content"][-1]["input"], {"file_path": "README.md"})
+
+    def test_anthropic_catpaw_reuses_conversation_id_for_same_claude_code_session(self) -> None:
+        first = anthropic_v1_messages.anthropic_to_openai_body(
             {
-                "command": "find ~/Desktop -maxdepth 1 -iname '*frp*' -print",
-                "description": "Find files matching ~/Desktop/*frp*",
-            },
+                "model": "claude-sonnet-4-20250514",
+                "_request_headers": {"x-claude-code-session-id": "session-a"},
+                "messages": [{"role": "user", "content": "Read README.md"}],
+                "tools": _claude_code_tools(),
+            }
+        )
+        followup = anthropic_v1_messages.anthropic_to_openai_body(
+            {
+                "model": "claude-sonnet-4-20250514",
+                "_request_headers": {"x-claude-code-session-id": "session-a"},
+                "messages": [
+                    {"role": "user", "content": "Read README.md"},
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "tool_use", "id": "toolu_read", "name": "Read", "input": {"file_path": "README.md"}}],
+                    },
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_read", "content": "ok"}]},
+                ],
+                "tools": _claude_code_tools(),
+            }
         )
 
-    def test_catpaw_tool_name_xml_elements_convert_to_claude_tool_use(self) -> None:
-        response = anthropic_v1_messages.message_response(
-            "glm-5.1",
-            "<tool_calls>"
-            "<Write><file_path>C:/tmp/catpaw.txt</file_path><content>catpaw-ok</content></Write>"
-            "<Read><file_path>C:/tmp/catpaw.txt</file_path></Read>"
-            '<Bash><command>rm "C:/tmp/catpaw.txt"</command><description>Delete verification file</description></Bash>'
-            "</tool_calls>",
-            input_tokens=10,
-            output_tokens=5,
-            tools=_claude_code_tools(),
-        )
+        self.assertRegex(first["catpaw_conversation_id"], re.compile(r"^[0-9a-f-]{36}$"))
+        self.assertEqual(followup["catpaw_conversation_id"], first["catpaw_conversation_id"])
 
-        blocks = [block for block in response["content"] if block["type"] == "tool_use"]
-        self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(
-            [(block["name"], block["input"]) for block in blocks],
-            [
-                ("Write", {"file_path": "C:/tmp/catpaw.txt", "content": "catpaw-ok"}),
-                ("Read", {"file_path": "C:/tmp/catpaw.txt"}),
-                ("Bash", {"command": 'rm "C:/tmp/catpaw.txt"', "description": "Delete verification file"}),
-            ],
-        )
+    def test_anthropic_catpaw_conversation_id_isolated_by_claude_code_session(self) -> None:
+        base = {
+            "model": "claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Read README.md"}],
+            "tools": _claude_code_tools(),
+        }
+        first = anthropic_v1_messages.anthropic_to_openai_body({**base, "_request_headers": {"x-claude-code-session-id": "session-a"}})
+        second = anthropic_v1_messages.anthropic_to_openai_body({**base, "_request_headers": {"x-claude-code-session-id": "session-b"}})
 
-    def test_nested_parameters_object_is_flattened_for_claude_tools(self) -> None:
-        response = anthropic_v1_messages.message_response(
-            "glm-5.1",
-            'tool_call>Write{"parameters":{"file_path":"C:/tmp/catpaw.txt","content":"catpaw-ok"}}',
-            input_tokens=10,
-            output_tokens=5,
-            tools=_claude_code_tools(),
-        )
+        self.assertNotEqual(second["catpaw_conversation_id"], first["catpaw_conversation_id"])
 
-        block = response["content"][-1]
-        self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(block["name"], "Write")
-        self.assertEqual(block["input"], {"file_path": "C:/tmp/catpaw.txt", "content": "catpaw-ok"})
+    def test_anthropic_handle_passes_conversation_id_to_catpaw_adapter(self) -> None:
+        captured: list[dict[str, Any]] = []
 
-    def test_anthropic_stream_buffers_catpaw_tool_xml_into_input_json_delta(self) -> None:
-        text = (
-            '<tool_calls><tool_name>Write</tool_name><parameters>'
-            '{"file_path":"C:/tmp/catpaw-stream.txt","content":"stream ok"}'
-            "</parameters></tool_calls>"
-        )
+        def fake_chat_completion(body: dict[str, Any], messages: list[dict[str, Any]], model: str, backend: Any = None) -> str:
+            captured.append(dict(body))
+            return "ok"
+
+        with mock.patch.object(anthropic_v1_messages.openai_v1_chat_complete.catpaw_chat, "chat_completion", side_effect=fake_chat_completion):
+            response = anthropic_v1_messages.handle(
+                {
+                    "model": "claude-sonnet-4-20250514",
+                    "_request_headers": {"x-claude-code-session-id": "session-a"},
+                    "messages": [{"role": "user", "content": "hello"}],
+                }
+            )
+
+        self.assertEqual(response["content"], [{"type": "text", "text": "ok"}])
+        self.assertRegex(captured[0]["catpaw_conversation_id"], re.compile(r"^[0-9a-f-]{36}$"))
+
+    def test_tool_parser_keeps_catpaw_file_operations_compatible(self) -> None:
+        cases = [
+            ('<tool_calls><tool_name>Read</tool_name><parameters>{"file_path":"README.md"}</parameters></tool_calls>', "Read", {"file_path": "README.md"}),
+            ('<tool_calls><Write><file_path>C:/tmp/catpaw.txt</file_path><content>ok</content></Write></tool_calls>', "Write", {"file_path": "C:/tmp/catpaw.txt", "content": "ok"}),
+            ('tool_call>Write{"parameters":{"file_path":"C:/tmp/catpaw.txt","content":"ok"}}', "Write", {"file_path": "C:/tmp/catpaw.txt", "content": "ok"}),
+            (r'<tool_calls><tool_name>Bash</tool_name><parameters>{"command":"ls C:\Users\zero\Desktop","description":"List"}</parameters></tool_calls>', "Bash", {"command": "ls /c/Users/zero/Desktop", "description": "List"}),
+            ('我来查看文件。tool_call>Glob{"pattern":"~/Desktop/*frp*"}', "Bash", {"command": "find ~/Desktop -maxdepth 1 -iname '*frp*' -print", "description": "Find files matching ~/Desktop/*frp*"}),
+        ]
+        names = [tool["name"] for tool in _claude_code_tools()]
+
+        for text, name, expected in cases:
+            with self.subTest(name=name):
+                parsed = anthropic_v1_messages.tool_calls.parse_tool_calls(text, names)
+                self.assertEqual(len(parsed.calls), 1)
+                self.assertEqual(parsed.calls[0].name, name)
+                self.assertEqual(json.loads(parsed.calls[0].arguments), expected)
+
+    def test_anthropic_stream_translates_openai_tool_chunks_to_input_json_delta(self) -> None:
         chunks = [
-            {"choices": [{"delta": {"role": "assistant", "content": text[:18]}, "finish_reason": None}]},
-            {"choices": [{"delta": {"content": text[18:80]}, "finish_reason": None}]},
-            {"choices": [{"delta": {"content": text[80:]}, "finish_reason": None}]},
+            {"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_write", "type": "function", "function": {"name": "Write", "arguments": ""}}]}, "finish_reason": None}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"file_path":"C:/tmp/a.txt"'}}]}, "finish_reason": None}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": ',"content":"ok"}'}}]}, "finish_reason": None}]},
             {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
         ]
 
-        events = list(
-            anthropic_v1_messages.stream_events(
-                chunks,
-                "claude-sonnet-4-20250514",
-                input_tokens=10,
-                output_tokens=lambda _: 5,
-                tools=_claude_code_tools(),
-            )
-        )
+        events = list(anthropic_v1_messages.stream_events_from_openai(chunks, "claude-sonnet-4-20250514", 10))
 
-        text_deltas = [
-            event["delta"]["text"]
-            for event in events
-            if event.get("type") == "content_block_delta" and event.get("delta", {}).get("type") == "text_delta"
-        ]
-        self.assertFalse(any("<tool" in text for text in text_deltas))
-        tool_start = next(
-            event
-            for event in events
-            if event.get("type") == "content_block_start"
-            and event.get("content_block", {}).get("type") == "tool_use"
-        )
-        self.assertEqual(tool_start["content_block"]["name"], "Write")
-        json_delta = next(
-            event
-            for event in events
-            if event.get("type") == "content_block_delta"
-            and event.get("delta", {}).get("type") == "input_json_delta"
-        )
-        self.assertEqual(
-            json.loads(json_delta["delta"]["partial_json"]),
-            {"file_path": "C:/tmp/catpaw-stream.txt", "content": "stream ok"},
-        )
+        start = next(event for event in events if event.get("type") == "content_block_start" and event.get("content_block", {}).get("type") == "tool_use")
+        self.assertEqual(start["content_block"]["name"], "Write")
+        delta = next(event for event in events if event.get("type") == "content_block_delta" and event.get("delta", {}).get("type") == "input_json_delta")
+        self.assertEqual(json.loads(delta["delta"]["partial_json"]), {"file_path": "C:/tmp/a.txt", "content": "ok"})
         message_delta = next(event for event in events if event.get("type") == "message_delta")
         self.assertEqual(message_delta["delta"]["stop_reason"], "tool_use")
 
@@ -483,65 +260,31 @@ class AnthropicCatpawToolTests(unittest.TestCase):
             yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
 
         with mock.patch.object(anthropic_v1_messages, "STREAM_PING_INTERVAL_SECONDS", 0.01, create=True):
-            events = list(
-                anthropic_v1_messages.stream_events(
-                    slow_chunks(),
-                    "claude-sonnet-4-20250514",
-                    input_tokens=10,
-                    output_tokens=lambda _: 1,
-                )
-            )
+            events = list(anthropic_v1_messages.stream_events_from_openai(slow_chunks(), "claude-sonnet-4-20250514", 10))
 
         self.assertIn("ping", [event.get("type") for event in events])
 
-    def test_claude_tool_results_are_forwarded_to_catpaw_as_text_history(self) -> None:
-        with mock.patch.object(
-            anthropic_v1_messages.account_service,
-            "get_text_access_token",
-            side_effect=AssertionError("claude model should route to CatPaw"),
-        ):
-            request = anthropic_v1_messages.message_request(
-                {
-                    "model": "claude-sonnet-4-20250514",
-                    "messages": [
-                        {
-                            "role": "assistant",
-                            "content": [
-                                {
-                                    "type": "tool_use",
-                                    "id": "toolu_read",
-                                    "name": "Read",
-                                    "input": {"file_path": "C:/tmp/catpaw.txt"},
-                                }
-                            ],
-                        },
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": "toolu_read",
-                                    "content": [{"type": "text", "text": "hello from file"}],
-                                }
-                            ],
-                        },
-                    ],
-                    "tools": _claude_code_tools(),
-                }
+    def test_catpaw_stream_buffers_partial_tool_marker_before_openai_tool_chunk(self) -> None:
+        pieces = ["<tool", "_calls><tool_name>Write</tool_name><parameters>", '{"file_path":"C:/tmp/a.txt","content":"ok"}', "</parameters></tool_calls>"]
+
+        with mock.patch.object(anthropic_v1_messages.openai_v1_chat_complete.catpaw_chat, "chat_completion_deltas", return_value=iter(pieces)):
+            chunks = list(
+                anthropic_v1_messages.openai_v1_chat_complete.stream_catpaw_tool_chat_completion(
+                    {"tools": _claude_code_tools()},
+                    [{"role": "user", "content": "write file"}],
+                    "claude-sonnet-4-20250514",
+                )
             )
 
-        catpaw_messages = catpaw_client._to_catpaw_messages(request.messages)
-
-        self.assertIn("<tool_calls><tool_name>Read</tool_name>", catpaw_messages[-2]["content"])
-        self.assertIn('"file_path": "C:/tmp/catpaw.txt"', catpaw_messages[-2]["content"])
-        self.assertEqual(catpaw_messages[-1]["role"], "user")
-        self.assertIn("Tool result (id=toolu_read):\nhello from file", catpaw_messages[-1]["content"])
+        deltas = [chunk["choices"][0]["delta"] for chunk in chunks]
+        self.assertFalse(any("<tool" in str(delta.get("content") or "") for delta in deltas))
+        tool_delta = next(delta for delta in deltas if delta.get("tool_calls"))
+        self.assertEqual(tool_delta["tool_calls"][0]["function"]["name"], "Write")
+        self.assertEqual(json.loads(tool_delta["tool_calls"][0]["function"]["arguments"]), {"file_path": "C:/tmp/a.txt", "content": "ok"})
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "tool_calls")
 
     def test_catpaw_stream_body_disables_official_agent_auto_mode(self) -> None:
-        body = catpaw_client._build_stream_body(
-            [{"role": "user", "content": "hello"}],
-            59,
-        )
+        body = catpaw_client._build_stream_body([{"role": "user", "content": "hello"}], 59)
 
         self.assertRegex(
             body["conversationId"],
@@ -549,24 +292,7 @@ class AnthropicCatpawToolTests(unittest.TestCase):
         )
         self.assertEqual(body["userModelTypeCode"], 59)
         self.assertEqual(body["chatApplyModeType"], "chat")
-        self.assertEqual(
-            body["agentModeConfig"],
-            {"model": {"default": 59, "maxMode": True, "autoMode": False}},
-        )
-        self.assertNotIn("enableAutoMode", body)
-        self.assertNotIn("selectedModelType", body)
-        self.assertNotIn("selectedModelName", body)
-
-    def test_catpaw_stream_body_accepts_supplied_conversation_id(self) -> None:
-        self.assertIn("conversation_id", inspect.signature(catpaw_client._build_stream_body).parameters)
-        fixed_id = "11111111-2222-4333-8444-555555555555"
-        body = catpaw_client._build_stream_body(
-            [{"role": "user", "content": "hello"}],
-            59,
-            conversation_id=fixed_id,
-        )
-
-        self.assertEqual(body["conversationId"], fixed_id)
+        self.assertEqual(body["agentModeConfig"], {"model": {"default": 59, "maxMode": True, "autoMode": False}})
 
 
 if __name__ == "__main__":

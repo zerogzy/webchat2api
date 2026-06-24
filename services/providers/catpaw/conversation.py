@@ -16,7 +16,6 @@ BOOTSTRAP_TTL_SECONDS = int(os.environ.get("CATPAW_CONVERSATION_BOOTSTRAP_TTL_SE
 ACTIVE_TTL_SECONDS = int(os.environ.get("CATPAW_CONVERSATION_ACTIVE_TTL_SECONDS") or 7200)
 MAX_ENTRIES = int(os.environ.get("CATPAW_CONVERSATION_CACHE_MAX_ENTRIES") or 512)
 
-
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -52,11 +51,7 @@ class CatpawConversationCache:
             self._prune(now)
             if not has_history:
                 conversation_id = str(uuid.uuid4())
-                self._bootstrap_by_root[root_key] = _Entry(
-                    conversation_id=conversation_id,
-                    expires_at=now + self.bootstrap_ttl_seconds,
-                    updated_at=now,
-                )
+                self._bootstrap_by_root[root_key] = _Entry(conversation_id, now + self.bootstrap_ttl_seconds, now)
                 self._bootstrap_by_root.move_to_end(root_key)
                 self._enforce_limits()
                 return conversation_id
@@ -69,24 +64,15 @@ class CatpawConversationCache:
                 return active.conversation_id
 
             bootstrap = self._bootstrap_by_root.get(root_key)
-            if bootstrap and bootstrap.expires_at > now:
-                conversation_id = bootstrap.conversation_id
-            else:
-                conversation_id = str(uuid.uuid4())
-
-            self._active_by_branch[branch_key] = _Entry(
-                conversation_id=conversation_id,
-                expires_at=now + self.active_ttl_seconds,
-                updated_at=now,
-            )
+            conversation_id = bootstrap.conversation_id if bootstrap and bootstrap.expires_at > now else str(uuid.uuid4())
+            self._active_by_branch[branch_key] = _Entry(conversation_id, now + self.active_ttl_seconds, now)
             self._active_by_branch.move_to_end(branch_key)
             self._enforce_limits()
             return conversation_id
 
     def _prune(self, now: float) -> None:
         for store in (self._bootstrap_by_root, self._active_by_branch):
-            expired = [key for key, entry in store.items() if entry.expires_at <= now]
-            for key in expired:
+            for key in [key for key, entry in store.items() if entry.expires_at <= now]:
                 store.pop(key, None)
 
     def _enforce_limits(self) -> None:
@@ -116,23 +102,20 @@ def conversation_id_for_anthropic_request(
 
 def _root_key(messages: list[dict[str, Any]], model: str, tools: Any = None, session_key: str = "") -> str:
     system_text = "\n".join(_message_text(message) for message in messages if message.get("role") == "system")
-    first_user = _first_user_text(messages)
     payload = {
         "version": 1,
         "model": str(model or ""),
         "session": _digest(str(session_key or "")),
         "system": _digest(system_text),
         "tools": _digest(_stable_json(_tool_fingerprint(tools))),
-        "root_user": _digest(first_user),
+        "root_user": _digest(_first_user_text(messages)),
     }
     return "root:" + _digest(_stable_json(payload))
 
 
 def _branch_key(messages: list[dict[str, Any]], root_key: str) -> str:
     anchor = _first_history_anchor(messages)
-    if not anchor:
-        return "branch:" + root_key
-    return "branch:" + _digest(_stable_json({"root": root_key, "anchor": _digest(anchor)}))
+    return "branch:" + (root_key if not anchor else _digest(_stable_json({"root": root_key, "anchor": _digest(anchor)})))
 
 
 def _has_history(messages: list[dict[str, Any]]) -> bool:
@@ -192,14 +175,9 @@ def _content_text(content: Any) -> str:
                 elif item.get("type") == "tool_result":
                     parts.append(_content_text(item.get("content")))
                 elif item.get("type") == "tool_use":
-                    parts.append(_stable_json({
-                        "name": item.get("name"),
-                        "input": item.get("input"),
-                    }))
+                    parts.append(_stable_json({"name": item.get("name"), "input": item.get("input")}))
         return _normalize_text("\n".join(part for part in parts if part))
-    if content is None:
-        return ""
-    return _normalize_text(str(content))
+    return "" if content is None else _normalize_text(str(content))
 
 
 def _tool_fingerprint(tools: Any) -> list[dict[str, Any]]:
@@ -209,10 +187,8 @@ def _tool_fingerprint(tools: Any) -> list[dict[str, Any]]:
     for tool in tools:
         if not isinstance(tool, dict):
             continue
-        name = str(tool.get("name") or "").strip()
         function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
-        if not name:
-            name = str(function.get("name") or "").strip()
+        name = str(tool.get("name") or function.get("name") or "").strip()
         schema = tool.get("input_schema") or tool.get("parameters") or function.get("input_schema") or function.get("parameters") or {}
         result.append({"name": name, "schema": schema})
     return sorted(result, key=lambda item: item.get("name") or "")

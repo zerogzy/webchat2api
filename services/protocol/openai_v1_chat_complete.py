@@ -152,9 +152,9 @@ def stream_chunk(chunk: dict[str, Any], include_usage: bool) -> dict[str, Any]:
     return chunk
 
 
-def _text_delta_source(backend, messages: list[dict[str, Any]], model: str) -> Iterator[str]:
+def _text_delta_source(backend, messages: list[dict[str, Any]], model: str, body: dict[str, Any] | None = None) -> Iterator[str]:
     if resolve_model(model).provider == CATPAW_PROVIDER:
-        return catpaw_chat.chat_completion_deltas(body={}, messages=messages, model=model)
+        return catpaw_chat.chat_completion_deltas(body=body or {}, messages=messages, model=model)
     if stream_text_deltas is not gpt_chat.stream_text_deltas:
         return stream_text_deltas(backend, ConversationRequest(model=model, messages=messages))
     return gpt_chat.chat_completion_deltas(body={}, messages=messages, model=model, backend=backend)
@@ -416,7 +416,7 @@ def stream_catpaw_chat_completion(
     created = int(time.time())
     sent_role = False
     content_parts: list[str] = []
-    for delta_text in catpaw_chat.chat_completion_deltas(body={}, messages=messages, model=model):
+    for delta_text in catpaw_chat.chat_completion_deltas(body=body, messages=messages, model=model):
         content_parts.append(delta_text)
         if not sent_role:
             sent_role = True
@@ -437,7 +437,23 @@ def stream_catpaw_chat_completion(
         )
 
 
-_TOOL_MARKER_START = "<tool_calls"
+_TOOL_MARKER_TOKENS = ("<tool_calls", "<tool_call", "<tool_name", "<function_call", "<invoke", "tool_call>")
+_TOOL_MARKER_MAX = max(len(token) for token in _TOOL_MARKER_TOKENS)
+
+
+def _streamable_tool_text(text: str) -> str:
+    lowered = text.lower()
+    starts = [lowered.find(token) for token in _TOOL_MARKER_TOKENS if lowered.find(token) >= 0]
+    if starts:
+        return text[:min(starts)]
+    window = max(0, len(text) - _TOOL_MARKER_MAX + 1)
+    for i in range(window, len(text)):
+        if lowered[i] not in ("<", "t"):
+            continue
+        tail = lowered[i:]
+        if any(token.startswith(tail) for token in _TOOL_MARKER_TOKENS):
+            return text[:i]
+    return text
 
 
 def stream_catpaw_tool_chat_completion(
@@ -458,32 +474,25 @@ def stream_catpaw_tool_chat_completion(
     full_text_parts: list[str] = []
     tool_detected = False
     sent_role = False
-    sent_content_before_tool = False
+    streamed_text = ""
 
-    for delta_text in catpaw_chat.chat_completion_deltas(body={}, messages=messages, model=model):
+    for delta_text in catpaw_chat.chat_completion_deltas(body=body, messages=messages, model=model):
         full_text_parts.append(delta_text)
         accumulated = "".join(full_text_parts)
+        visible = _streamable_tool_text(accumulated)
 
-        if not tool_detected and _TOOL_MARKER_START in accumulated.lower():
+        if len(visible) < len(accumulated):
             tool_detected = True
-            visible = accumulated[:accumulated.lower().index(_TOOL_MARKER_START)]
-            if visible.strip():
-                sent_content_before_tool = True
-                if not sent_role:
-                    sent_role = True
-                    yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": visible}, None, completion_id, created), include_usage)
-                else:
-                    yield stream_chunk(completion_chunk(model, {"content": visible}, None, completion_id, created), include_usage)
-            continue
-
+        if visible.startswith(streamed_text) and len(visible) > len(streamed_text):
+            piece = visible[len(streamed_text):]
+            streamed_text = visible
+            if not sent_role:
+                sent_role = True
+                yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": piece}, None, completion_id, created), include_usage)
+            else:
+                yield stream_chunk(completion_chunk(model, {"content": piece}, None, completion_id, created), include_usage)
         if tool_detected:
             continue
-
-        if not sent_role:
-            sent_role = True
-            yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created), include_usage)
-        else:
-            yield stream_chunk(completion_chunk(model, {"content": delta_text}, None, completion_id, created), include_usage)
 
     full_text = "".join(full_text_parts)
     parsed = tool_calls.parse_tool_calls(full_text, tool_calls.tool_names(body.get("tools")))
@@ -516,12 +525,12 @@ def stream_catpaw_tool_chat_completion(
         return
 
     plain = tool_calls.strip_tool_markup(full_text) if parsed.saw_tool_syntax else full_text
-    if tool_detected and not sent_content_before_tool and plain.strip():
+    if visible := plain[len(streamed_text):] if plain.startswith(streamed_text) else plain:
         if not sent_role:
             sent_role = True
-            yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": plain}, None, completion_id, created), include_usage)
+            yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": visible}, None, completion_id, created), include_usage)
         else:
-            yield stream_chunk(completion_chunk(model, {"content": plain}, None, completion_id, created), include_usage)
+            yield stream_chunk(completion_chunk(model, {"content": visible}, None, completion_id, created), include_usage)
     if not sent_role:
         yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created), include_usage)
     yield stream_chunk(completion_chunk(model, {}, "stop", completion_id, created), include_usage)
@@ -749,7 +758,7 @@ def non_stream_text_chat_response(body: dict[str, Any], model: str, messages: li
             return tool_response
         return completion_response(model, response.content, messages=original_messages, tool_call_messages=messages)
     if spec.provider == CATPAW_PROVIDER:
-        content = catpaw_chat.chat_completion(body={}, messages=messages, model=model)
+        content = catpaw_chat.chat_completion(body=body, messages=messages, model=model)
         tool_response = parsed_chat_tool_response(body, model, content, messages)
         if tool_response:
             return tool_response

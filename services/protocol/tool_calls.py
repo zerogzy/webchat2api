@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import shlex
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -42,6 +43,17 @@ def normalize_openai_tools(tools: object) -> list[dict[str, Any]]:
                     "name": str(tool.get("name") or "").strip(),
                     "description": str(tool.get("description") or ""),
                     "parameters": tool.get("parameters") or {},
+                },
+            })
+            continue
+        name = str(tool.get("name") or "").strip()
+        if name:
+            normalized.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": str(tool.get("description") or ""),
+                    "parameters": tool.get("input_schema") or tool.get("parameters") or {},
                 },
             })
     return normalized
@@ -184,9 +196,14 @@ def parse_gemini_json_tool_calls(text: str, available_tools: list[str] | None = 
 def tool_choice_mode(tool_choice: object) -> tuple[str, str]:
     if tool_choice == "none":
         return "none", ""
-    if tool_choice in ("required", True):
+    if tool_choice in ("required", "any", True):
         return "required", ""
     if isinstance(tool_choice, dict):
+        choice_type = str(tool_choice.get("type") or "").strip()
+        if choice_type == "none":
+            return "none", ""
+        if choice_type == "any":
+            return "required", ""
         raw_function = tool_choice.get("function")
         function = raw_function if isinstance(raw_function, dict) else {}
         name = str(function.get("name") or tool_choice.get("name") or "").strip()
@@ -239,10 +256,20 @@ def parse_tool_calls(text: str, available_tools: list[str] | None = None) -> Too
     saw_tool_syntax = bool(_TOOL_SYNTAX_RE.search(text))
     if not saw_tool_syntax:
         return ToolParseResult()
-    calls = _parse_xml_tool_calls(text) or _parse_json_envelope(text) or _parse_json_array(text) or _parse_alt_xml(text)
+    calls = (
+        _parse_xml_tool_calls(text)
+        or _parse_json_envelope(text)
+        or _parse_json_array(text)
+        or _parse_alt_xml(text)
+        or _parse_tool_element_calls(text, available_tools or [])
+        or _parse_loose_tool_call_calls(text, available_tools or [])
+        or _parse_name_near_json_calls(text, available_tools or [])
+    )
     if available_tools:
         available = set(available_tools)
         calls = [call for call in calls if call.name in available]
+        if not calls and "Bash" in available:
+            calls = _parse_glob_as_bash(text)
     return ToolParseResult(calls=calls, saw_tool_syntax=saw_tool_syntax)
 
 
@@ -302,6 +329,11 @@ def _tool_choice_instruction(tools: list[dict[str, Any]], tool_choice: object) -
     if tool_choice in ("required", True):
         return "WHEN TO CALL: You must call one or more tools."
     if isinstance(tool_choice, dict):
+        choice_type = str(tool_choice.get("type") or "").strip()
+        if choice_type == "none":
+            return "WHEN TO CALL: Do not call tools; respond in plain text only."
+        if choice_type == "any":
+            return "WHEN TO CALL: You must call one or more tools."
         raw_function = tool_choice.get("function")
         function = raw_function if isinstance(raw_function, dict) else {}
         name = str(function.get("name") or tool_choice.get("name") or "").strip()
@@ -312,11 +344,15 @@ def _tool_choice_instruction(tools: list[dict[str, Any]], tool_choice: object) -
     return "WHEN TO CALL: Call a tool when it is needed; otherwise respond in plain text."
 
 
-_TOOL_SYNTAX_RE = re.compile(r"<tool_calls\b|<tool_call\b|<function_call\b|<invoke\b|\"tool_calls\"\s*:|\btool_calls\b|^\s*\[", re.IGNORECASE)
+_TOOL_SYNTAX_RE = re.compile(r"<tool_calls\b|<tool_call\b|<function_call\b|<invoke\b|\"tool_calls\"\s*:|\btool_calls\b|^\s*\[|<([A-Za-z_][\w.-]*)\b|\btool_call>", re.IGNORECASE)
 _TOOL_MARKUP_RE = re.compile(r"(?is)<tool_calls\b[^>]*>.*?</tool_calls>|<tool_call\b[^>]*>.*?</tool_call>|<function_call\b[^>]*>.*?</function_call>|<invoke\b[^>]*>.*?</invoke>")
 _XML_ROOT_RE = re.compile(r"(?is)<tool_calls\b[^>]*>(.*?)</tool_calls>")
 _XML_CALL_RE = re.compile(r"(?is)<tool_call\b[^>]*>(.*?)</tool_call>")
 _JSON_DECODER = json.JSONDecoder()
+_PATH_LIKE_JSON_VALUE_RE = re.compile(
+    r'(?is)("(?:(?:file_)?path|path|cwd|notebook_path|command)"\s*:\s*")((?:\\.|[^"\\])*)(")'
+)
+_WINDOWS_PATH_IN_COMMAND_RE = re.compile(r"(?<![\w/])([A-Za-z]):\\+([^\s\"'<>|;&]+(?:\\+[^\s\"'<>|;&]+)*)")
 
 
 def _parse_xml_tool_calls(text: str) -> list[ParsedToolCall]:
@@ -409,7 +445,16 @@ def _calls_from_items(items: list[Any]) -> list[ParsedToolCall]:
 
 
 def _make_call(name: str, arguments: Any) -> ParsedToolCall:
-    return ParsedToolCall(call_id=f"call_{uuid.uuid4().hex}", name=name, arguments=_json_arguments(arguments))
+    return ParsedToolCall(call_id=f"call_{uuid.uuid4().hex}", name=name, arguments=_json_arguments(_normalize_tool_arguments(name, arguments)))
+
+
+def _normalize_tool_arguments(name: str, arguments: Any) -> Any:
+    if isinstance(arguments, dict) and isinstance(arguments.get("parameters"), dict) and len(arguments) == 1:
+        arguments = dict(arguments["parameters"])
+    if name == "Bash" and isinstance(arguments, dict) and isinstance(arguments.get("command"), str):
+        arguments = dict(arguments)
+        arguments["command"] = _windows_paths_to_posix_command(str(arguments.get("command") or ""))
+    return arguments
 
 
 def _json_arguments(arguments: Any) -> str:
@@ -430,12 +475,14 @@ def _parse_arguments(raw: Any) -> Any:
     cdata = re.fullmatch(r"(?is)<!\[CDATA\[(.*?)]]>", raw)
     if cdata:
         raw = cdata.group(1).strip()
-    try:
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else {}
-    except (json.JSONDecodeError, ValueError):
-        xml_args = {match.group(1): _parse_xml_scalar(match.group(2)) for match in re.finditer(r"(?is)<([\w.-]+)\b[^>]*>(.*?)</\1>", raw)}
-        return xml_args or None
+    for candidate in _json_candidates(raw):
+        try:
+            parsed = json.loads(candidate)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            pass
+    xml_args = {match.group(1): _parse_xml_scalar(match.group(2)) for match in re.finditer(r"(?is)<([\w.-]+)\b[^>]*>(.*?)</\1>", raw)}
+    return xml_args or None
 
 
 def _parse_xml_scalar(raw: str) -> Any:
@@ -458,12 +505,135 @@ def _xml_value(text: str, tag: str) -> str:
 def _extract_json_value(text: str, opener: str) -> Any:
     start = text.find(opener)
     while start != -1:
-        try:
-            value, _ = _JSON_DECODER.raw_decode(text, start)
-            return value
-        except (json.JSONDecodeError, ValueError):
-            start = text.find(opener, start + 1)
+        for candidate in _json_candidates(text):
+            try:
+                value, _ = _JSON_DECODER.raw_decode(candidate, start)
+                return value
+            except (json.JSONDecodeError, ValueError):
+                pass
+        start = text.find(opener, start + 1)
     return None
+
+
+def _json_candidates(raw: str) -> list[str]:
+    repaired = _escape_path_like_json_values(raw)
+    return [repaired, raw] if repaired != raw else [raw]
+
+
+def _escape_path_like_json_values(raw: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        return match.group(1) + _escape_single_backslashes(match.group(2)) + match.group(3)
+
+    return _PATH_LIKE_JSON_VALUE_RE.sub(repl, raw)
+
+
+def _escape_single_backslashes(value: str) -> str:
+    result: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char != "\\":
+            result.append(char)
+            index += 1
+            continue
+        result.append("\\\\")
+        if index + 1 < len(value) and value[index + 1] == "\\":
+            index += 2
+        else:
+            index += 1
+    return "".join(result)
+
+
+def _windows_paths_to_posix_command(command: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        return f"/{match.group(1).lower()}/{match.group(2).replace('\\', '/').lstrip('/')}"
+
+    return _WINDOWS_PATH_IN_COMMAND_RE.sub(repl, command)
+
+
+def _parse_tool_element_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
+    available = {tool for tool in available_tools if tool}
+    if not available:
+        return []
+    region = _tool_calls_region(text)
+    calls: list[ParsedToolCall] = []
+    for match in re.finditer(r"(?is)<([A-Za-z_][\w.\-]*)\b[^>]*>(.*?)</\1\s*>", region):
+        name = match.group(1)
+        if name not in available:
+            continue
+        args = {child.group(1): _parse_xml_scalar(child.group(2)) for child in re.finditer(r"(?is)<([\w.\-]+)\b[^>]*>(.*?)</\1\s*>", match.group(2))}
+        calls.append(_make_call(name, args or (_parse_arguments(match.group(2)) or {})))
+    return calls
+
+
+def _parse_loose_tool_call_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
+    available = {tool for tool in available_tools if tool}
+    calls: list[ParsedToolCall] = []
+    for match in re.finditer(r"(?is)(?:<)?tool_call>\s*([A-Za-z_][\w.\-]*)", text):
+        obj = _extract_json_value(text[match.end():], "{")
+        if not isinstance(obj, dict):
+            continue
+        name = match.group(1)
+        if name in available:
+            calls.append(_make_call(name, obj))
+        elif name == "Glob" and "Bash" in available:
+            bash_args = _glob_args_to_bash(obj)
+            if bash_args:
+                calls.append(_make_call("Bash", bash_args))
+    return calls
+
+
+def _parse_name_near_json_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
+    if not available_tools:
+        return []
+    obj = _extract_json_value(text, "{")
+    if not isinstance(obj, dict):
+        return []
+    start = text.find("{")
+    prefix = re.sub(r"(?is)<[^>]+>", " ", text[:start])
+    for name in sorted({str(item) for item in available_tools if item}, key=len, reverse=True):
+        if re.search(rf"(?is)(^|[^\w.\-]){re.escape(name)}([^\w.\-]|$)", prefix):
+            return [_make_call(name, obj)]
+    return []
+
+
+def _parse_glob_as_bash(text: str) -> list[ParsedToolCall]:
+    obj = _extract_json_value(text, "{")
+    if not isinstance(obj, dict):
+        return []
+    if not re.search(r"(?is)\bGlob\b", text):
+        return []
+    args = _glob_args_to_bash(obj)
+    return [_make_call("Bash", args)] if args else []
+
+
+def _glob_args_to_bash(args: dict[str, Any]) -> dict[str, str]:
+    pattern = str(args.get("pattern") or "").strip()
+    if not pattern:
+        return {}
+    normalized = re.sub(r"^([A-Za-z]):[\\/]+", lambda m: f"/{m.group(1).lower()}/", pattern)
+    normalized = normalized.replace("\\", "/")
+    parent, leaf = normalized.rsplit("/", 1) if "/" in normalized else (".", normalized)
+    leaf = leaf or "*"
+    return {
+        "command": f"find {_quote_shell_path(parent)} -maxdepth 1 -iname {shlex.quote(leaf)} -print",
+        "description": f"Find files matching {normalized}",
+    }
+
+
+def _quote_shell_path(path: str) -> str:
+    if path == "~" or path.startswith("~/"):
+        return "~" + (shlex.quote(path[1:]) if len(path) > 1 else "")
+    return shlex.quote(path)
+
+
+def _tool_calls_region(text: str) -> str:
+    match = re.search(r"(?is)<tool_calls\b[^>]*>", text)
+    if not match:
+        return text
+    rest = text[match.end():]
+    close = re.search(r"(?is)</tool_calls\s*>", rest)
+    return rest[:close.start()] if close else rest
 
 
 def _strip_fences(text: str) -> str:
