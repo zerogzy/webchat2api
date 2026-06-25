@@ -167,6 +167,18 @@ def _domain_cookie_names(source: Any) -> list[str]:
     return sorted(names)
 
 
+def _jar_cookie_summary(source: Any) -> list[dict[str, str]]:
+    cookies = getattr(source, "cookies", source)
+    jar = getattr(cookies, "jar", cookies)
+    summary: list[dict[str, str]] = []
+    if isinstance(jar, CookieJar):
+        for domain, paths in jar._cookies.items():
+            for path, values in paths.items():
+                for name in values:
+                    summary.append({"domain": domain, "path": path, "name": name})
+    return sorted(summary, key=lambda item: (item["domain"], item["path"], item["name"]))
+
+
 def _json_payload(response: Any) -> dict[str, Any]:
     try:
         payload = response.json()
@@ -219,6 +231,25 @@ def _follow_validation_url(session: requests.Session, response: Any) -> str:
         url = "https://" + url[7:]
     follow = session.get(url, headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}, timeout=30)
     return _cookie_value(session, "pt_key") or _cookie_value(follow, "pt_key")
+
+
+def _follow_validation_debug(session: requests.Session, response: Any) -> dict[str, Any]:
+    payload = _json_payload(response)
+    if not isinstance(payload, dict) or not _can_follow_validation_url(payload):
+        return {}
+    url = _clean(payload.get("url"))
+    if not url:
+        return {}
+    if url.startswith("http://"):
+        url = "https://" + url[7:]
+    follow = session.get(url, headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}, timeout=30)
+    return {
+        "follow_status": getattr(follow, "status_code", None),
+        "follow_url": _safe_url_info(getattr(follow, "url", "")),
+        "follow_response_cookie_names": _cookie_names(follow),
+        "follow_session_cookie_names": _domain_cookie_names(session),
+        "follow_cookie_summary": _jar_cookie_summary(session),
+    }
 
 
 def _validation_pt_key(session: requests.Session, response: Any) -> str:
@@ -280,7 +311,9 @@ def poll_qr_login(job_id: str, *, account_service: Any, sanitize_account_result:
     validation = session.get(QR_VALID_URL.format(ticket=quote(_clean(payload["ticket"]), safe="")), headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx"}, timeout=30)
     pt_key = _validation_pt_key(session, validation)
     if not pt_key:
-        return {"jobId": job_id, "status": "failed", "message": "JD login succeeded but pt_key cookie was not found", "debug": _validation_debug(session, validation)}
+        debug = _validation_debug(session, validation)
+        debug["follow"] = _follow_validation_debug(session, validation)
+        return {"jobId": job_id, "status": "failed", "message": "JD login succeeded but pt_key cookie was not found", "debug": debug}
     result = sanitize_account_result(account_service.add_account_items([_user_payload(pt_key)]))
     _QR_JOBS.pop(job_id, None)
     return {"jobId": job_id, "status": "success", **result}
