@@ -225,8 +225,6 @@ def _openai_tool_choice(choice: object) -> object:
 def count_tokens(body: dict[str, Any]) -> dict[str, Any]:
     payload = anthropic_to_openai_body(dict(body))
     messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
-    if tool_calls.has_function_tools(payload):
-        messages = tool_calls.inject_tool_prompt(messages, payload.get("tools"), payload.get("tool_choice"), payload.get("parallel_tool_calls"))
     return {"input_tokens": count_message_tokens(messages, str(payload.get("model") or "auto"))}
 
 

@@ -645,13 +645,8 @@ def chat_messages_from_body(body: dict[str, Any]) -> list[dict[str, Any]]:
 def prepare_text_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     raw_messages = grok_chat.strip_search_sources_from_messages(chat_messages_from_body(body))
     if tool_calls.has_function_tools(body):
-        injected = tool_calls.inject_tool_prompt(
-            raw_messages,
-            body.get("tools"),
-            body.get("tool_choice"),
-            body.get("parallel_tool_calls"),
-        )
-        return normalize_messages(injected), normalize_messages(raw_messages)
+        messages = [dict(message) for message in raw_messages]
+        return messages, messages
     messages = normalize_text_messages(normalize_messages(raw_messages))
     return messages, messages
 

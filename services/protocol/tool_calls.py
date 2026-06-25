@@ -86,102 +86,6 @@ def has_function_tools(body: dict[str, Any]) -> bool:
     return bool(tool_names(body.get("tools")))
 
 
-def build_tool_system_prompt(tools: object, tool_choice: object = None, parallel_tool_calls: object = None) -> str:
-    normalized = normalize_openai_tools(tools)
-    blocks: list[str] = []
-    for tool in normalized:
-        raw_function = tool.get("function")
-        function = raw_function if isinstance(raw_function, dict) else {}
-        name = str(function.get("name") or "").strip()
-        if not name:
-            continue
-        description = str(function.get("description") or "").strip()
-        parameters = function.get("parameters") or {}
-        blocks.append(
-            "Tool: " + name + "\n"
-            "Description: " + description + "\n"
-            "Parameters: " + json.dumps(parameters, ensure_ascii=False, separators=(",", ":"))
-        )
-    if not blocks:
-        return ""
-    lines = [
-        "You have access to Claude Code local tools. To read, write, edit, delete files, or run commands, you MUST call these tools; describing an action in prose does not execute it.",
-        "AVAILABLE TOOLS:",
-        "\n\n".join(blocks),
-        "TOOL CALL FORMAT:",
-        "- When calling tools, output ONLY a tool-call structure and no prose or markdown fences.",
-        "- Prefer this XML format:",
-        '<tool_calls><tool_name>TOOL_NAME</tool_name><parameters>{"key":"value"}</parameters></tool_calls>',
-        '- A JSON object {"tool_calls":[{"name":"TOOL_NAME","arguments":{"key":"value"}}]} or JSON array [{"name":"TOOL_NAME","arguments":{"key":"value"}}] is also accepted.',
-        "- arguments/parameters must be a valid JSON object.",
-    ]
-    if parallel_tool_calls is False:
-        lines.append("- Call at most one tool.")
-    lines.append(_tool_choice_instruction(normalized, tool_choice))
-    return "\n".join(lines)
-
-
-def inject_tool_prompt(messages: list[dict[str, Any]], tools: object, tool_choice: object = None, parallel_tool_calls: object = None) -> list[dict[str, Any]]:
-    prompt = build_tool_system_prompt(tools, tool_choice, parallel_tool_calls)
-    if not prompt:
-        return messages
-    injected = _serialize_tool_history(messages)
-    for message in injected:
-        if message.get("role") == "system" and isinstance(message.get("content"), str):
-            message["content"] = f"{str(message.get('content') or '').strip()}\n\n{prompt}".strip()
-            return injected
-    return [{"role": "system", "content": prompt}, *injected]
-
-
-def _serialize_tool_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    injected: list[dict[str, Any]] = []
-    for index, message in enumerate(messages):
-        item = dict(message)
-        role = item.get("role")
-        if role == "assistant" and item.get("tool_calls"):
-            content = str(item.get("content") or "").strip()
-            xml = tool_calls_to_xml(item.get("tool_calls"))
-            item["content"] = f"{content}\n{xml}".strip() if content else xml
-            item.pop("tool_calls", None)
-        elif role == "tool":
-            content_text = str(item.get("content") or "")
-            tool_call_id = str(item.get("tool_call_id") or "").strip()
-            tool_name = _resolve_tool_name_for_id(tool_call_id, injected)
-            if tool_name:
-                label = f"[result of {tool_name}]"
-            elif tool_call_id:
-                label = f"[tool result (id={tool_call_id})]"
-            else:
-                label = "[tool result]"
-            item["role"] = "user"
-            item["content"] = f"{label}:\n{content_text}" if content_text else f"{label}."
-            item.pop("tool_call_id", None)
-        injected.append(item)
-    return injected
-
-
-def _resolve_tool_name_for_id(tool_call_id: str, prev_messages: list[dict[str, Any]]) -> str:
-    if not tool_call_id:
-        return ""
-    for prev in reversed(prev_messages):
-        if prev.get("role") != "assistant":
-            continue
-        tool_calls_list = prev.get("tool_calls")
-        if not isinstance(tool_calls_list, list):
-            continue
-        for tc in tool_calls_list:
-            if not isinstance(tc, dict):
-                continue
-            if str(tc.get("id") or "").strip() != tool_call_id:
-                continue
-            raw_func = tc.get("function")
-            func = raw_func if isinstance(raw_func, dict) else {}
-            name = str(func.get("name") or tc.get("name") or "").strip()
-            if name:
-                return name
-    return ""
-
-
 def make_parsed_tool_call(name: str, arguments: Any) -> ParsedToolCall:
     return _make_call(name, arguments)
 
@@ -240,25 +144,6 @@ def parse_gemini_openai_tool_response(text: str, body: dict[str, Any]) -> ToolPa
     if mode in {"required", "forced"} and allowed and parsed.saw_tool_syntax:
         return ToolParseResult(saw_tool_syntax=parsed.saw_tool_syntax)
     return parsed
-
-
-def tool_calls_to_xml(calls: object) -> str:
-    if not isinstance(calls, list):
-        return ""
-    parts = ["<tool_calls>"]
-    for call in calls:
-        if not isinstance(call, dict):
-            continue
-        raw_function = call.get("function")
-        function = raw_function if isinstance(raw_function, dict) else {}
-        name = str(function.get("name") or call.get("name") or "").strip()
-        arguments = function.get("arguments") or call.get("arguments") or "{}"
-        if not name:
-            continue
-        parts.append(f"<tool_name>{html.escape(name)}</tool_name>")
-        parts.append(f"<parameters>{html.escape(_json_arguments(arguments))}</parameters>")
-    parts.append("</tool_calls>")
-    return "".join(parts)
 
 
 def parse_tool_calls(text: str, available_tools: list[str] | None = None) -> ToolParseResult:

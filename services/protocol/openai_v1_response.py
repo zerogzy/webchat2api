@@ -133,14 +133,6 @@ def _messages_from_response_item(item: dict[str, Any]) -> list[dict[str, Any]]:
 
 def prepare_response_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     messages = messages_from_input(body.get("input"), body.get("instructions"))
-    if tool_calls.has_function_tools(body):
-        injected = tool_calls.inject_tool_prompt(
-            messages,
-            body.get("tools"),
-            body.get("tool_choice"),
-            body.get("parallel_tool_calls"),
-        )
-        return injected, messages
     return messages, messages
 
 

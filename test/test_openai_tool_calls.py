@@ -75,6 +75,19 @@ class OpenAIToolCallTests(unittest.TestCase):
         self.assertEqual(json.loads(envelope.calls[0].arguments), {"city": "Paris"})
         self.assertEqual(json.loads(array.calls[0].arguments), {"city": "Rome"})
 
+    def test_chat_with_tools_preserves_structured_tool_messages(self) -> None:
+        messages, original = openai_v1_chat_complete.prepare_text_messages({
+            "messages": [
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'}}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "Sunny"},
+            ],
+            "tools": [_weather_tool()],
+        })
+
+        self.assertEqual(messages, original)
+        self.assertEqual(messages[0]["tool_calls"][0]["id"], "call_1")
+        self.assertEqual(messages[1]["tool_call_id"], "call_1")
+
     def test_chat_non_streaming_converts_model_tool_xml_to_tool_calls(self) -> None:
         body = {
             "model": "unit-test-model",
@@ -101,8 +114,7 @@ class OpenAIToolCallTests(unittest.TestCase):
         self.assertEqual(message["tool_calls"][0]["type"], "function")
         self.assertEqual(message["tool_calls"][0]["function"]["name"], "get_weather")
         self.assertEqual(json.loads(message["tool_calls"][0]["function"]["arguments"]), {"city": "Paris"})
-        self.assertIn("TOOL CALL FORMAT", captured["messages"][0]["content"])
-        self.assertEqual(captured["messages"][1], {"role": "user", "content": "What is the weather?"})
+        self.assertEqual(captured["messages"], [{"role": "user", "content": "What is the weather?"}])
 
     def test_responses_non_streaming_converts_model_tool_json_to_function_call_item(self) -> None:
         body = {
@@ -126,8 +138,7 @@ class OpenAIToolCallTests(unittest.TestCase):
         self.assertEqual(response["output"][0]["type"], "function_call")
         self.assertEqual(response["output"][0]["name"], "get_weather")
         self.assertEqual(json.loads(response["output"][0]["arguments"]), {"city": "Paris"})
-        self.assertIn("TOOL CALL FORMAT", captured["messages"][0]["content"])
-        self.assertEqual(captured["messages"][1], {"role": "user", "content": "What is the weather?"})
+        self.assertEqual(captured["messages"], [{"role": "user", "content": "What is the weather?"}])
 
     def test_grok_search_tools_are_not_injected_or_converted(self) -> None:
         body = {
