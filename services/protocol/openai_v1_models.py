@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from services.providers.base import GPT_PROVIDER
 from services.providers.catpaw.models import catpaw_model_metadata, is_catpaw_model_id
+from services.providers.codebuddy.models import codebuddy_model_metadata, is_codebuddy_model_id
 from services.providers.gemini.models import gemini_model_metadata
 from services.providers.gpt.models import GPT_IMAGE_MODEL_IDS, gpt_fallback_model_metadata, gpt_image_model_metadata
 from services.providers.grok.models import grok_model_metadata
@@ -89,6 +90,8 @@ def list_models() -> dict[str, Any]:
         _append_model(normalized_data, seen, item)
     for item in joycode_model_metadata():
         _append_model(normalized_data, seen, item)
+    for item in codebuddy_model_metadata():
+        _append_model(normalized_data, seen, item)
     result["data"] = normalized_data
     return result
 
@@ -103,6 +106,6 @@ def get_model(model_id: str) -> dict[str, Any]:
             if isinstance(item, dict) and str(item.get("id") or "") == model:
                 return item
     spec = MODEL_REGISTRY.get(model)
-    if spec is not None or is_catpaw_model_id(model) or is_joycode_model_id(model) or model.startswith(("claude-", "grok-", "gemini-")):
+    if spec is not None or is_catpaw_model_id(model) or is_joycode_model_id(model) or is_codebuddy_model_id(model) or model.startswith(("claude-", "grok-", "gemini-")):
         return resolve_model(model).model_metadata()
     raise HTTPException(status_code=404, detail={"error": "model not found"})

@@ -126,7 +126,7 @@ export type AccountImportPayload = {
   [key: string]: unknown;
 };
 
-export type AccountExportProvider = "gpt" | "grok" | "gemini" | "catpaw" | "joycode";
+export type AccountExportProvider = "gpt" | "grok" | "gemini" | "catpaw" | "joycode" | "codebuddy";
 
 export type AccountDeleteIdentifier = {
   account_id?: string | null;

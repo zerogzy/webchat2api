@@ -90,8 +90,8 @@ class ProviderModelListTests(unittest.TestCase):
         models = {item["id"]: item for item in result["data"]}
         self.assertEqual(models["gpt-4o"]["provider"], "gpt")
         self.assertEqual(models["grok-4.3"]["provider"], "grok")
-        self.assertEqual(models["gemini-2.5-pro"]["provider"], "gemini")
-        self.assertEqual(models["gemini-pro"]["owned_by"], "google")
+        self.assertEqual(models["gemini-3-pro"]["provider"], "gemini")
+        self.assertEqual(models["gemini-3-pro"]["owned_by"], "google")
         self.assertEqual(models["grok-4.20-multi-agent"]["owned_by"], "xai")
         for model_id in ["gpt-5-1", "gpt-5-2", "gpt-5-3", "gpt-5-3-mini", "gpt-5-mini"]:
             self.assertEqual(models[model_id]["provider"], "gpt")
@@ -152,7 +152,7 @@ class ProviderModelListTests(unittest.TestCase):
         fallback = {spec.id for spec in gemini_models.gemini_model_specs(failed_fetch, now=20)}
         recovered = {spec.id for spec in gemini_models.gemini_model_specs(lambda: "gemini-2.5-later", now=21)}
 
-        self.assertIn("gemini-2.5-pro", fallback)
+        self.assertIn("gemini-3-pro", fallback)
         self.assertNotIn("gemini-2.5-later", fallback)
         self.assertIn("gemini-2.5-later", recovered)
 
@@ -172,8 +172,8 @@ class ProviderModelListTests(unittest.TestCase):
         self.assertNotIn("anon-gpt", models)
         self.assertIn("gpt-image-2", models)
         self.assertIn("grok-4.3", models)
-        self.assertIn("gemini-2.5-flash", models)
-        self.assertIn("gemini-2.5-pro", models)
+        self.assertIn("gemini-3-flash", models)
+        self.assertIn("gemini-3-pro", models)
 
     def test_list_models_falls_back_to_anonymous_when_account_fetch_fails(self) -> None:
         account_service = FakeAccountService("stored-token")
@@ -225,7 +225,7 @@ class ProviderModelListTests(unittest.TestCase):
         self.assertEqual(resolve_model("gpt-image-2").capability, "image")
         self.assertEqual(resolve_model("codex-gpt-image-2").capability, "image")
         self.assertEqual(models["grok-4.3"]["provider"], "grok")
-        self.assertEqual(models["gemini-pro"]["provider"], "gemini")
+        self.assertEqual(models["gemini-3-pro"]["provider"], "gemini")
 
     def test_gpt_image_alias_routes_to_upstream_model_and_preserves_response_model(self) -> None:
         seen_models: list[str] = []
@@ -283,9 +283,9 @@ class ProviderModelListTests(unittest.TestCase):
             result = openai_v1_models.list_models()
 
         models = {item["id"]: item for item in result["data"]}
-        self.assertEqual(models["gemini-2.5-pro"]["provider"], "gemini")
-        self.assertEqual(models["gemini-2.5-flash"]["owned_by"], "google")
-        self.assertEqual(models["gemini-pro"]["provider"], "gemini")
+        self.assertEqual(models["gemini-3-pro"]["provider"], "gemini")
+        self.assertEqual(models["gemini-3-flash"]["owned_by"], "google")
+        self.assertEqual(models["gemini-3-pro"]["provider"], "gemini")
         self.assertFalse(hasattr(openai_v1_models, "_dynamic_gemini_model_metadata"))
 
 

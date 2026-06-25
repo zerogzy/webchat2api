@@ -8,7 +8,7 @@ from typing import Any, Iterable, Iterator, cast
 
 from fastapi import HTTPException
 
-from services.providers.base import ConversationRequest, CATPAW_PROVIDER, GEMINI_PROVIDER, GPT_PROVIDER, GROK_PROVIDER, JOYCODE_PROVIDER, ImageGenerationError, ImageOutput
+from services.providers.base import ConversationRequest, CATPAW_PROVIDER, CODEBUDDY_PROVIDER, GEMINI_PROVIDER, GPT_PROVIDER, GROK_PROVIDER, JOYCODE_PROVIDER, ImageGenerationError, ImageOutput
 from services.providers.registry import chat_adapter, image_adapter, image_generation_outputs, resolve_model
 from services.config import config
 import services.protocol.tool_calls as tool_calls
@@ -38,6 +38,7 @@ grok_chat = chat_adapter("grok")
 gemini_chat = chat_adapter("gemini")
 catpaw_chat = chat_adapter("catpaw")
 joycode_chat = chat_adapter("joycode")
+codebuddy_chat = chat_adapter("codebuddy")
 
 
 def is_grok_app_chat_model(spec: Any) -> bool:
@@ -159,6 +160,8 @@ def _text_delta_source(backend, messages: list[dict[str, Any]], model: str, body
         return catpaw_chat.chat_completion_deltas(body=body or {}, messages=messages, model=model)
     if resolve_model(model).provider == JOYCODE_PROVIDER:
         return joycode_chat.chat_completion_deltas(body=body or {}, messages=messages, model=model)
+    if resolve_model(model).provider == CODEBUDDY_PROVIDER:
+        return codebuddy_chat.chat_completion_deltas(body=body or {}, messages=messages, model=model)
     if stream_text_deltas is not gpt_chat.stream_text_deltas:
         return stream_text_deltas(backend, ConversationRequest(model=model, messages=messages))
     return gpt_chat.chat_completion_deltas(body={}, messages=messages, model=model, backend=backend)
@@ -838,24 +841,10 @@ def non_stream_text_chat_response(body: dict[str, Any], model: str, messages: li
         return completion_response(model, content, messages=original_messages)
     if spec.provider == JOYCODE_PROVIDER:
         raw_response = joycode_chat.raw_chat_completion(body=body, messages=messages, model=model)
-        choices = raw_response.get("choices") if isinstance(raw_response, dict) else None
-        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
-        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
-        if isinstance(message.get("tool_calls"), list) and message.get("tool_calls"):
-            response = completion_response(model, str(message.get("content") or ""), messages=original_messages)
-            response["choices"][0]["message"]["tool_calls"] = message["tool_calls"]
-            response["choices"][0]["finish_reason"] = "tool_calls"
-            if isinstance(raw_response.get("usage"), dict):
-                response["usage"] = raw_response["usage"]
-            return response
-        content = str(message.get("content") or "")
-        tool_response = parsed_chat_tool_response(body, model, content, messages)
-        if tool_response:
-            return tool_response
-        response = completion_response(model, content, messages=original_messages)
-        if isinstance(raw_response.get("usage"), dict):
-            response["usage"] = raw_response["usage"]
-        return response
+        return _raw_openai_provider_response(body, model, messages, original_messages, raw_response)
+    if spec.provider == CODEBUDDY_PROVIDER:
+        raw_response = codebuddy_chat.raw_chat_completion(body=body, messages=messages, model=model)
+        return _raw_openai_provider_response(body, model, messages, original_messages, raw_response)
     if collect_text is not gpt_chat.collect_text:
         request = ConversationRequest(model=model, messages=messages)
         content = collect_text(text_backend(), request)
@@ -865,6 +854,27 @@ def non_stream_text_chat_response(body: dict[str, Any], model: str, messages: li
     if tool_response:
         return tool_response
     return completion_response(model, content, messages=original_messages)
+
+
+def _raw_openai_provider_response(body: dict[str, Any], model: str, messages: list[dict[str, Any]], original_messages: list[dict[str, Any]], raw_response: dict[str, Any]) -> dict[str, Any]:
+    choices = raw_response.get("choices") if isinstance(raw_response, dict) else None
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    if isinstance(message.get("tool_calls"), list) and message.get("tool_calls"):
+        response = completion_response(model, str(message.get("content") or ""), messages=original_messages)
+        response["choices"][0]["message"]["tool_calls"] = message["tool_calls"]
+        response["choices"][0]["finish_reason"] = "tool_calls"
+        if isinstance(raw_response.get("usage"), dict):
+            response["usage"] = raw_response["usage"]
+        return response
+    content = str(message.get("content") or "")
+    tool_response = parsed_chat_tool_response(body, model, content, messages)
+    if tool_response:
+        return tool_response
+    response = completion_response(model, content, messages=original_messages)
+    if isinstance(raw_response.get("usage"), dict):
+        response["usage"] = raw_response["usage"]
+    return response
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
@@ -919,10 +929,19 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
                     model,
                     include_usage=stream_include_usage(body),
                 )
+            if spec.provider == CODEBUDDY_PROVIDER:
+                response = codebuddy_chat.raw_chat_completion(body=body, messages=messages, model=model)
+                return stream_tool_chat_completion_from_response(
+                    response,
+                    model,
+                    include_usage=stream_include_usage(body),
+                )
             return stream_tool_text_chat_completion(text_backend(), body, messages, model, stream_include_usage(body))
         if spec.provider == CATPAW_PROVIDER:
             return stream_catpaw_chat_completion(body, messages, model, stream_include_usage(body), original_messages)
         if spec.provider == JOYCODE_PROVIDER:
+            return stream_text_chat_completion(None, messages, model, stream_include_usage(body), original_messages)
+        if spec.provider == CODEBUDDY_PROVIDER:
             return stream_text_chat_completion(None, messages, model, stream_include_usage(body), original_messages)
         if spec.provider == GROK_PROVIDER:
             return stream_grok_chat_completion(body, spec, messages, model)
