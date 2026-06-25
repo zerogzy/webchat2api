@@ -275,6 +275,7 @@ def parse_tool_calls(text: str, available_tools: list[str] | None = None) -> Too
         or _parse_json_envelope(text)
         or _parse_json_array(text)
         or _parse_alt_xml(text)
+        or _parse_loose_xml_tool_calls(text, available_tools or [])
         or _parse_tool_element_calls(text, available_tools or [])
         or _parse_tagless_tool_call_calls(text, available_tools or [])
         or _parse_loose_tool_call_calls(text, available_tools or [])
@@ -466,6 +467,28 @@ def _parse_alt_xml(text: str) -> list[ParsedToolCall]:
     for match in re.finditer(r"(?is)<invoke\b[^>]*name=[\"']?([\w.-]+)[\"']?[^>]*>(.*?)</invoke>", text):
         arguments = _parse_arguments(match.group(2).strip())
         calls.append(_make_call(match.group(1).strip(), arguments if arguments is not None else {}))
+    return calls
+
+
+def _parse_loose_xml_tool_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
+    if "<tool_name" not in text or "<parameters" not in text:
+        return []
+    available = {tool for tool in available_tools if tool}
+    calls: list[ParsedToolCall] = []
+    for match in re.finditer(r"(?is)<tool_name\b[^>]*>(.*?)</tool_name\s*>", text):
+        name = _unwrap_xml(match.group(1))
+        if available and name not in available:
+            continue
+        rest = text[match.end():]
+        params_match = re.search(r"(?is)<parameters\b[^>]*>(.*?)(?:</parameters\s*>|</tool_calls\s*>|$)", rest)
+        if not params_match:
+            continue
+        raw = _unwrap_xml(params_match.group(1))
+        arguments = _parse_arguments(raw)
+        if not isinstance(arguments, dict):
+            arguments = _parse_jsonish_arguments(raw)
+        if arguments:
+            calls.append(_make_call(name, arguments))
     return calls
 
 
@@ -673,7 +696,10 @@ def _jsonish_string_value(raw: str, key: str) -> str:
         value = rest[:next_key.start() + 1] if next_key else rest.rstrip().removesuffix("}")
         return _clean_jsonish_string(value)
     match = re.match(r'(?is)"((?:\\.|[^"\\])*)"', rest)
-    return html.unescape(match.group(1)) if match else ""
+    if match:
+        return html.unescape(match.group(1))
+    bare = re.match(r"(?is)([^,}\s<>]+)", rest)
+    return html.unescape(bare.group(1).strip()) if bare else ""
 
 
 def _clean_jsonish_string(value: str) -> str:

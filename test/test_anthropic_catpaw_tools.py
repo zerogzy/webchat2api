@@ -257,6 +257,7 @@ class AnthropicCatpawToolTests(unittest.TestCase):
             ('<tool_calls><Write><file_path>C:/tmp/catpaw.txt</file_path><content>ok</content></Write></tool_calls>', "Write", {"file_path": "C:/tmp/catpaw.txt", "content": "ok"}),
             ('tool_call>Write{"parameters":{"file_path":"C:/tmp/catpaw.txt","content":"ok"}}', "Write", {"file_path": "C:/tmp/catpaw.txt", "content": "ok"}),
             (r'<tool_calls><tool_name>Bash</tool_name><parameters>{"command":"ls C:\Users\zero\Desktop","description":"List"}</parameters></tool_calls>', "Bash", {"command": "ls /c/Users/zero/Desktop", "description": "List"}),
+            ('<tool_calls><tool_name>Read</tool_name><parameters>{&quot;file_path&quot;:/home/claude/api/calculator.py}</parameters></tool_calls', "Read", {"file_path": "/home/claude/api/calculator.py"}),
             ('我来查看文件。tool_call>Glob{"pattern":"~/Desktop/*frp*"}', "Glob", {"pattern": "~/Desktop/*frp*"}),
             ('tool_call>Bash{"cmd":"pwd"}', "Bash", {"command": "pwd"}),
             ('tool_call>Bash{"shell_command":"ls -la"}', "Bash", {"command": "ls -la"}),
