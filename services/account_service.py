@@ -538,6 +538,34 @@ class AccountService:
             self._set_account_locked(account)
             self._save_accounts()
 
+    def mark_codebuddy_success(self, access_token: str) -> None:
+        if not access_token:
+            return
+        now = self._timestamp_string()
+        self.update_account(access_token, {
+            "status": "正常",
+            "last_used_at": now,
+            "last_success_at": now,
+            "last_check_status": "valid_by_call",
+            "last_check_error": "",
+            "last_check_http_status": None,
+            "state_reason": "",
+        }, provider=CODEBUDDY_PROVIDER)
+
+    def mark_codebuddy_quota_exhausted(self, access_token: str, exc: Exception | None = None) -> None:
+        if not access_token:
+            return
+        now = self._timestamp_string()
+        self.update_account(access_token, {
+            "status": "限流",
+            "quota": 0,
+            "state_reason": "quota_exhausted",
+            "last_check_status": "limited",
+            "last_check_error": "quota_exhausted",
+            "last_check_http_status": getattr(exc, "status_code", None),
+            "last_check_at": now,
+        }, provider=CODEBUDDY_PROVIDER)
+
     def mark_grok_console_used(self, access_token: str, success: bool = True) -> None:
         if not access_token:
             return
@@ -593,6 +621,16 @@ class AccountService:
                 for item in self._all_accounts_locked()
                 if item.get("status") == "限流"
                    and normalize_provider(item.get("provider")) == GPT_PROVIDER
+                   and (token := item.get("access_token") or "")
+            ]
+
+    def list_codebuddy_limited_tokens(self) -> list[str]:
+        with self._lock:
+            return [
+                token
+                for item in self._all_accounts_locked()
+                if item.get("status") == "限流"
+                   and normalize_provider(item.get("provider")) == CODEBUDDY_PROVIDER
                    and (token := item.get("access_token") or "")
             ]
 
@@ -924,6 +962,36 @@ class AccountService:
         strategy = cast(RemoteAccountValidator, account_strategy(JOYCODE_PROVIDER))
         payload = strategy.validate_remote_info(access_token, account)
         return self.update_account(access_token, payload, provider=provider_filter)
+
+    def check_codebuddy_limited_accounts(self) -> dict[str, Any]:
+        from services.providers.codebuddy.client import is_quota_exhausted_error, validate_key
+
+        tokens = self.list_codebuddy_limited_tokens()
+        recovered = 0
+        failed = 0
+        errors: list[dict[str, str]] = []
+        for token in tokens:
+            account = self.get_account(token, provider=CODEBUDDY_PROVIDER) or {}
+            try:
+                validate_key(account)
+            except Exception as exc:
+                failed += 1
+                status = getattr(exc, "status_code", None)
+                exhausted = is_quota_exhausted_error(exc)
+                updates = {
+                    "status": "限流",
+                    "state_reason": "quota_exhausted" if exhausted else "validation_failed",
+                    "last_check_status": "limited" if exhausted else "invalid",
+                    "last_check_error": "quota_exhausted" if exhausted else type(exc).__name__,
+                    "last_check_http_status": status,
+                    "last_check_at": self._timestamp_string(),
+                }
+                self.update_account(token, updates, provider=CODEBUDDY_PROVIDER)
+                errors.append({"token": anonymize_token(token), "error": updates["last_check_error"]})
+                continue
+            recovered += 1
+            self.mark_codebuddy_success(token)
+        return {"checked": len(tokens), "recovered": recovered, "failed": failed, "errors": errors, "items": self.list_accounts(CODEBUDDY_PROVIDER)}
 
     def get_catpaw_account_for_chat(self, excluded_ids: set[str] | None = None) -> dict[str, Any] | None:
         return catpaw_account_pool.select_account_for_chat(self, excluded_ids)

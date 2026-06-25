@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+import base64
 from unittest import mock
 
 if "curl_cffi" not in sys.modules:
@@ -26,7 +27,9 @@ from services.protocol import anthropic_v1_messages, openai_v1_models
 from services.providers.base import CODEBUDDY_PROVIDER
 from services.providers.codebuddy.accounts import normalize_account, sanitize_account
 from services.providers.codebuddy.client import CodeBuddyClient
+from services.providers.codebuddy import chat as codebuddy_chat
 from services.providers.registry import normalize_account_provider, resolve_model
+from utils.helper import UpstreamHTTPError
 
 
 class FakeResponse:
@@ -59,6 +62,10 @@ class FakeSession:
 
     def close(self):
         pass
+
+
+def json_chunk(content: str) -> dict[str, object]:
+    return {"choices": [{"delta": {"content": content}, "finish_reason": None}]}
 
 
 class CodeBuddyProviderTests(unittest.TestCase):
@@ -119,6 +126,66 @@ class CodeBuddyProviderTests(unittest.TestCase):
 
         self.assertEqual(session.payload["tool_choice"], "Read")
 
+    def test_client_base64_wraps_system_without_rewriting_content(self) -> None:
+        session = FakeSession([b"data: [DONE]"])
+        messages = [
+            {"role": "system", "content": "Claude Code cwd is /tmp/claude-code-smoke. Anthropic's official CLI for Claude."},
+            {"role": "user", "content": "Claude Code should remain here"},
+        ]
+        with mock.patch("services.providers.codebuddy.client.create_session", return_value=session):
+            with CodeBuddyClient({"bearer_token": "fake-codebuddy-key"}) as client:
+                client.chat_completion({}, messages, "tx-deepseek-v3")
+
+        self.assertEqual(session.payload["messages"][0]["role"], "system")
+        encoded = session.payload["messages"][0]["content"].rsplit(" ", 1)[1]
+        decoded = base64.b64decode(encoded).decode()
+        self.assertIn("Claude Code cwd is /tmp/claude-code-smoke", decoded)
+        self.assertIn("Anthropic's official CLI for Claude", decoded)
+        self.assertEqual(session.payload["messages"][1]["content"], "Claude Code should remain here")
+
+    def test_client_preserves_system_reminder_from_user_message(self) -> None:
+        session = FakeSession([b"data: [DONE]"])
+        messages = [{"role": "user", "content": "<system-reminder>date stuff</system-reminder>\n\nDo the task"}]
+        with mock.patch("services.providers.codebuddy.client.create_session", return_value=session):
+            with CodeBuddyClient({"bearer_token": "fake-codebuddy-key"}) as client:
+                client.chat_completion({}, messages, "tx-deepseek-v3")
+
+        self.assertEqual(session.payload["messages"][1]["content"], "<system-reminder>date stuff</system-reminder>\n\nDo the task")
+
+    def test_client_preserves_tool_schema_descriptions(self) -> None:
+        session = FakeSession([b"data: [DONE]"])
+        body = {
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "Read",
+                    "description": "Use with Claude Code by Anthropic",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"file_path": {"type": "string", "description": "Path from Claude Code"}},
+                    },
+                },
+            }]
+        }
+        with mock.patch("services.providers.codebuddy.client.create_session", return_value=session):
+            with CodeBuddyClient({"bearer_token": "fake-codebuddy-key"}) as client:
+                client.chat_completion(body, [{"role": "user", "content": "hello"}], "tx-deepseek-v3")
+
+        self.assertEqual(session.payload["tools"][0]["function"]["description"], "Use with Claude Code by Anthropic")
+        self.assertEqual(session.payload["tools"][0]["function"]["parameters"]["properties"]["file_path"]["description"], "Path from Claude Code")
+
+    def test_client_filters_api_errors_and_maps_tool_messages_to_user(self) -> None:
+        session = FakeSession([b"data: [DONE]"])
+        messages = [
+            {"role": "assistant", "content": "Error: API error: refused"},
+            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+        ]
+        with mock.patch("services.providers.codebuddy.client.create_session", return_value=session):
+            with CodeBuddyClient({"bearer_token": "fake-codebuddy-key"}) as client:
+                client.chat_completion({}, messages, "tx-deepseek-v3")
+
+        self.assertEqual(session.payload["messages"], [{"role": "user", "tool_call_id": "call_1", "content": "ok"}])
+
     def test_client_aggregates_tool_calls(self) -> None:
         lines = [
             b'data: {"id":"chatcmpl_1","choices":[{"delta":{"tool_calls":[{"id":"tooluse_abc","type":"function","function":{"name":"Read","arguments":"{\\"file_path\\":"}}]},"finish_reason":null}]}',
@@ -133,6 +200,53 @@ class CodeBuddyProviderTests(unittest.TestCase):
         self.assertEqual(call["id"], "call_abc")
         self.assertEqual(call["function"]["name"], "Read")
         self.assertEqual(call["function"]["arguments"], '{"file_path": "README.md"}')
+
+    def test_chat_retries_next_account_when_quota_exhausted_before_output(self) -> None:
+        accounts = {
+            "token-a": {"access_token": "token-a", "bearer_token": "key-a"},
+            "token-b": {"access_token": "token-b", "bearer_token": "key-b"},
+        }
+        selected: list[str] = []
+        marked_limited: list[str] = []
+        marked_success: list[str] = []
+
+        class FakeAccountService:
+            def get_text_access_token(self, excluded_tokens=None, provider=None):
+                selected.append(",".join(sorted(excluded_tokens or [])))
+                return "token-b" if excluded_tokens else "token-a"
+
+            def get_account(self, token, provider=None):
+                return accounts[token]
+
+            def mark_codebuddy_quota_exhausted(self, token, exc):
+                marked_limited.append(token)
+
+            def mark_codebuddy_success(self, token):
+                marked_success.append(token)
+
+        class FakeClient:
+            def __init__(self, account):
+                self.account = account
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                pass
+
+            def buffered_chunks(self, body, messages, model):
+                if self.account["access_token"] == "token-a":
+                    raise UpstreamHTTPError("CodeBuddy chat", 429, {"msg": "quota exhausted"})
+                return [json_chunk("ok")]
+
+        with mock.patch.dict("sys.modules", {"services.account_service": types.SimpleNamespace(account_service=FakeAccountService())}):
+            with mock.patch("services.providers.codebuddy.client.CodeBuddyClient", FakeClient):
+                chunks = codebuddy_chat._run_with_account({}, [{"role": "user", "content": "hi"}], "tx-glm-5.1")
+
+        self.assertEqual(selected, ["", "token-a"])
+        self.assertEqual(marked_limited, ["token-a"])
+        self.assertEqual(marked_success, ["token-b"])
+        self.assertEqual(chunks[0]["choices"][0]["delta"]["content"], "ok")
 
     def test_anthropic_messages_routes_tx_model_through_openai_bridge(self) -> None:
         captured: dict[str, object] = {}

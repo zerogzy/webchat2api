@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from datetime import datetime
 from threading import Event, Thread
 
 from fastapi import HTTPException, Request
@@ -96,8 +97,11 @@ def sanitize_remote_account_sources(sources: list[dict]) -> list[dict]:
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
     interval_seconds = config.refresh_account_interval_minute * 60
+    start_time = datetime.now()
+    initial_codebuddy_check_date = start_time.strftime("%Y-%m-%d") if start_time.hour >= 3 else ""
 
     def worker() -> None:
+        last_codebuddy_check_date = initial_codebuddy_check_date
         while not stop_event.is_set():
             try:
                 limited_tokens = account_service.list_limited_tokens()
@@ -112,6 +116,17 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                     print(f"[catpaw-renew] renewed {renewed} CatPaw token(s)")
             except Exception as exc:
                 print(f"[catpaw-renew] fail {exc}")
+            try:
+                now = datetime.now()
+                today = now.strftime("%Y-%m-%d")
+                if now.hour >= 3 and last_codebuddy_check_date != today:
+                    result = account_service.check_codebuddy_limited_accounts()
+                    last_codebuddy_check_date = today
+                    checked = int(result.get("checked") or 0)
+                    if checked:
+                        print(f"[codebuddy-limited-check] checked {checked}, recovered {result.get('recovered')}, failed {result.get('failed')}")
+            except Exception as exc:
+                print(f"[codebuddy-limited-check] fail {exc}")
             stop_event.wait(interval_seconds)
 
     thread = Thread(target=worker, name="limited-account-watcher", daemon=True)

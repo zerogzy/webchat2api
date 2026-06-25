@@ -1419,6 +1419,45 @@ class AccountProviderTests(unittest.TestCase):
         self.assertTrue(any(spec.provider == JOYCODE_PROVIDER for spec in definitions[JOYCODE_PROVIDER].model_specs))
         self.assertTrue(any(spec.provider == CODEBUDDY_PROVIDER for spec in definitions[CODEBUDDY_PROVIDER].model_specs))
 
+    def test_codebuddy_limited_account_is_skipped_and_can_recover(self) -> None:
+        from services.providers.base import CODEBUDDY_PROVIDER
+
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"provider": CODEBUDDY_PROVIDER, "access_token": "limited-key", "status": "限流"},
+            {"provider": CODEBUDDY_PROVIDER, "access_token": "ok-key"},
+        ])
+
+        ok_token = next(item["access_token"] for item in service.list_accounts(CODEBUDDY_PROVIDER) if item["bearer_token"] == "ok-key")
+        self.assertEqual(service.get_text_access_token(provider=CODEBUDDY_PROVIDER), ok_token)
+        limited_token = service.list_codebuddy_limited_tokens()[0]
+
+        with patch("services.providers.codebuddy.client.validate_key", return_value=None) as validate:
+            result = service.check_codebuddy_limited_accounts()
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["recovered"], 1)
+        validate.assert_called_once()
+        recovered = service.get_account(limited_token, provider=CODEBUDDY_PROVIDER)
+        self.assertEqual(recovered["status"], "正常")
+        self.assertEqual(recovered["last_check_status"], "valid_by_call")
+
+    def test_codebuddy_limited_recovery_failure_keeps_account_limited(self) -> None:
+        from services.providers.base import CODEBUDDY_PROVIDER
+
+        service = AccountService(MemoryStorage())
+        service.add_account_items([{"provider": CODEBUDDY_PROVIDER, "access_token": "limited-key", "status": "限流"}])
+        limited_token = service.list_codebuddy_limited_tokens()[0]
+
+        with patch("services.providers.codebuddy.client.validate_key", side_effect=RuntimeError("still limited")):
+            result = service.check_codebuddy_limited_accounts()
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["failed"], 1)
+        account = service.get_account(limited_token, provider=CODEBUDDY_PROVIDER)
+        self.assertEqual(account["status"], "限流")
+        self.assertEqual(account["state_reason"], "validation_failed")
+
     def test_gemini_account_deletes_by_sanitized_account_id_identifier(self) -> None:
         service = AccountService(MemoryStorage())
         service.add_account_items([

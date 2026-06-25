@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import secrets
 import time
 import uuid
@@ -8,11 +9,24 @@ from typing import Any, Iterator
 
 from services.network.client import create_session
 from services.providers.codebuddy.models import UPSTREAM_MODEL_BY_ID
+from utils.helper import UpstreamHTTPError
 from utils.helper import ensure_ok
 
 BASE_URL = "https://www.codebuddy.cn"
 CHAT_ENDPOINT = "/v2/chat/completions"
 USER_AGENT = "CLI/1.0.7 CodeBuddy/1.0.7"
+QUOTA_EXHAUSTED_MARKERS = (
+    "quota",
+    "insufficient",
+    "exhaust",
+    "rate limit",
+    "ratelimit",
+    "too many requests",
+    "余额不足",
+    "额度",
+    "限流",
+)
+HY3_PREVIEW_MODEL = "hy3-preview"
 
 
 class CodeBuddyError(RuntimeError):
@@ -23,6 +37,46 @@ class CodeBuddyError(RuntimeError):
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _payload_text(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value or "")
+
+
+def _sanitize_system_content(content: Any) -> Any:
+    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return f"Decode this base64 UTF-8 instruction and follow it exactly: {encoded}"
+
+
+def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized = []
+    for message in messages:
+        item = dict(message)
+        content = item.get("content")
+        if item.get("role") == "assistant" and isinstance(content, str) and (
+            "Error: API error" in content or "API error:" in content
+        ):
+            continue
+        if item.get("role") == "system":
+            item["content"] = _sanitize_system_content(item.get("content"))
+        elif item.get("role") == "tool":
+            item["role"] = "user"
+        sanitized.append(item)
+    return sanitized
+
+
+def _sanitize_tool_schema(tools: Any) -> Any:
+    return tools
+
+
+def is_quota_exhausted_error(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    body = getattr(exc, "body", None)
+    text = f"{_payload_text(body)} {exc}".lower()
+    return status in {402, 429} or any(marker in text for marker in QUOTA_EXHAUSTED_MARKERS)
 
 
 def _json_args(value: str) -> str:
@@ -207,13 +261,15 @@ class CodeBuddyClient:
 
     def chat_body(self, body: dict[str, Any], messages: list[dict[str, Any]], model: str) -> dict[str, Any]:
         payload = {key: value for key, value in body.items() if key not in {"stream", "messages"}}
+        if "tools" in payload:
+            payload["tools"] = _sanitize_tool_schema(payload.get("tools"))
         if "tool_choice" in payload:
             payload["tool_choice"] = _codebuddy_tool_choice(payload.get("tool_choice"))
         payload["model"] = UPSTREAM_MODEL_BY_ID.get(model, model.removeprefix("tx-"))
-        payload["messages"] = messages
+        payload["messages"] = _sanitize_messages(messages)
         payload["stream"] = True
         if len(messages) == 1 and messages[0].get("role") == "user":
-            payload["messages"] = [{"role": "system", "content": "You are a helpful assistant."}, *messages]
+            payload["messages"] = [{"role": "system", "content": "You are a helpful assistant."}, *_sanitize_messages(messages)]
         return payload
 
     def stream_chunks(self, body: dict[str, Any], messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
@@ -231,8 +287,22 @@ class CodeBuddyClient:
             if payload is not None:
                 yield convert_stream_chunk(payload, index_by_id)
 
+    def buffered_chunks(self, body: dict[str, Any], messages: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
+        return list(self.stream_chunks(body, messages, model))
+
     def chat_completion(self, body: dict[str, Any], messages: list[dict[str, Any]], model: str) -> dict[str, Any]:
         aggregator = StreamAggregator()
         for chunk in self.stream_chunks(body, messages, model):
             aggregator.process(chunk)
         return aggregator.response()
+
+
+def validate_key(account: dict[str, Any], *, model: str = HY3_PREVIEW_MODEL) -> None:
+    with CodeBuddyClient(account, timeout=60) as client:
+        chunks = client.buffered_chunks(
+            {"max_tokens": 8},
+            [{"role": "system", "content": "Reply OK only."}, {"role": "user", "content": "ping"}],
+            model,
+        )
+    if not chunks:
+        raise CodeBuddyError("CodeBuddy validation returned no chunks", 502)
