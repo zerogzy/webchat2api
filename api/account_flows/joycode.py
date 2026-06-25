@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import base64
+from http.cookiejar import CookieJar
 import json
 import time
 import uuid
 from typing import Any, Callable
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import HTTPException
 from curl_cffi import requests
@@ -18,6 +19,7 @@ QR_CHECK_URL = "https://qr.m.jd.com/check?appid=133&token={token}&callback=jsonp
 QR_VALID_URL = "https://passport.jd.com/uc/qrCodeTicketValidation?t={ticket}"
 JD_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 QR_TTL = 180
+JD_COOKIE_HOSTS = ("www.jd.com", "passport.jd.com", "home.jd.com", "jd.com", "plogin.m.jd.com", "m.jd.com", "qr.m.jd.com")
 _QR_JOBS: dict[str, dict[str, Any]] = {}
 
 
@@ -110,7 +112,39 @@ def _iter_cookie_items(source: Any) -> list[tuple[str, str]]:
     return items
 
 
+def _cookie_from_domain_jar(source: Any, name: str) -> str:
+    cookies = getattr(source, "cookies", source)
+    getter = getattr(cookies, "get", None)
+    if callable(getter):
+        for domain in JD_COOKIE_HOSTS:
+            for candidate in (domain, f".{domain}"):
+                try:
+                    value = getter(name, domain=candidate)
+                except Exception:
+                    value = None
+                if value:
+                    return _clean(value)
+        try:
+            value = getter(name)
+        except Exception:
+            value = None
+        if value:
+            return _clean(value)
+    jar = getattr(cookies, "jar", cookies)
+    if isinstance(jar, CookieJar):
+        for domain in JD_COOKIE_HOSTS:
+            values = jar._cookies.get(domain) or jar._cookies.get(f".{domain}") or {}
+            for path_values in values.values():
+                cookie = path_values.get(name)
+                if cookie:
+                    return _clean(cookie.value)
+    return ""
+
+
 def _cookie_value(source: Any, name: str) -> str:
+    value = _cookie_from_domain_jar(source, name)
+    if value:
+        return value
     for cookie_name, value in _iter_cookie_items(source):
         if cookie_name == name:
             return value
@@ -192,7 +226,7 @@ def poll_qr_login(job_id: str, *, account_service: Any, sanitize_account_result:
         return {"jobId": job_id, "status": "expired"}
     if code != 200 or not payload.get("ticket"):
         return {"jobId": job_id, "status": "failed", "message": f"JD QR status code {code}"}
-    validation = session.get(QR_VALID_URL.format(ticket=payload["ticket"]), headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx"}, timeout=30)
+    validation = session.get(QR_VALID_URL.format(ticket=quote(_clean(payload["ticket"]), safe="")), headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx"}, timeout=30)
     pt_key = _validation_pt_key(session, validation)
     if not pt_key:
         return {"jobId": job_id, "status": "failed", "message": "JD login succeeded but pt_key cookie was not found"}

@@ -4,6 +4,7 @@ import sys
 import types
 import unittest
 import importlib.util
+from http.cookiejar import Cookie, CookieJar
 from pathlib import Path
 from unittest import mock
 
@@ -55,6 +56,28 @@ class JoyCodeProviderTests(unittest.TestCase):
         response = types.SimpleNamespace(cookies={}, headers={"set-cookie": "pt_key=qr-key; Path=/; HttpOnly"})
 
         self.assertEqual(joycode_flow._validation_pt_key(session, response), "qr-key")
+
+    def test_jd_qr_validation_reads_domain_cookie_jar(self) -> None:
+        jar = CookieJar()
+        jar.set_cookie(Cookie(0, "pt_key", "domain-key", None, False, ".jd.com", True, True, "/", True, False, None, False, None, None, {}, False))
+        session = types.SimpleNamespace(cookies=types.SimpleNamespace(jar=jar))
+        response = types.SimpleNamespace(cookies={}, headers={})
+
+        self.assertEqual(joycode_flow._validation_pt_key(session, response), "domain-key")
+
+    def test_jd_qr_validation_quotes_ticket(self) -> None:
+        get = mock.Mock(side_effect=[
+            types.SimpleNamespace(text='jsonpCallback({"code":200,"ticket":"a+b/c="})'),
+            types.SimpleNamespace(cookies={"pt_key": "quoted-key"}, headers={}),
+        ])
+        session = types.SimpleNamespace(get=get, cookies={})
+        job_id = "job"
+        joycode_flow._QR_JOBS[job_id] = {"session": session, "token": "token", "created_at": 0}
+        with mock.patch("time.time", return_value=1), mock.patch.object(joycode_flow, "_user_payload", return_value={"pt_key": "quoted-key"}):
+            result = joycode_flow.poll_qr_login(job_id, account_service=types.SimpleNamespace(add_account_items=lambda items: {"accounts": items}), sanitize_account_result=lambda value: value)
+
+        self.assertIn("a%2Bb%2Fc%3D", get.call_args_list[1].args[0])
+        self.assertEqual(result["status"], "success")
 
     def test_prepare_body_uses_joycode_defaults(self) -> None:
         fake_session = types.SimpleNamespace(close=lambda: None)
