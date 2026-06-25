@@ -148,6 +148,30 @@ class AnthropicCatpawToolTests(unittest.TestCase):
         self.assertEqual(response["content"], [{"type": "tool_use", "id": "call_read", "name": "Read", "input": {"file_path": "README.md"}}])
         self.assertEqual(response["usage"], {"input_tokens": 10, "output_tokens": 5})
 
+    def test_stream_tool_completion_preserves_openai_tool_calls(self) -> None:
+        response = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_bash",
+                        "type": "function",
+                        "function": {"name": "Bash", "arguments": '{"command":"echo ok"}'},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }]
+        }
+
+        chunks = list(anthropic_v1_messages.openai_v1_chat_complete.stream_tool_chat_completion_from_response(response, "jd-glm-5.1"))
+        events = list(anthropic_v1_messages.stream_events_from_openai(chunks, "jd-glm-5.1", 10))
+
+        start = next(event for event in events if event.get("type") == "content_block_start" and event.get("content_block", {}).get("type") == "tool_use")
+        self.assertEqual(start["content_block"]["name"], "Bash")
+        delta = next(event for event in events if event.get("type") == "content_block_delta" and event.get("delta", {}).get("type") == "input_json_delta")
+        self.assertEqual(json.loads(delta["delta"]["partial_json"]), {"command": "echo ok"})
+
     def test_anthropic_handle_uses_catpaw_without_gpt_token(self) -> None:
         with (
             mock.patch.object(anthropic_v1_messages.openai_v1_chat_complete.catpaw_chat, "chat_completion", return_value="<tool_calls><tool_name>Read</tool_name><parameters>{\"file_path\":\"README.md\"}</parameters></tool_calls>"),

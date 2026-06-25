@@ -248,6 +248,27 @@ def stream_tool_chat_completion_from_text(
         )
 
 
+def stream_tool_chat_completion_from_response(
+    response: dict[str, Any],
+    model: str,
+    include_usage: bool = False,
+) -> Iterator[dict[str, Any]]:
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    content = message.get("content")
+    raw_calls = message.get("tool_calls")
+    if isinstance(raw_calls, list) and raw_calls:
+        yield stream_chunk(completion_chunk(model, {"role": "assistant", "content": None}), include_usage)
+        for index, call in enumerate(raw_calls):
+            item = dict(call) if isinstance(call, dict) else {}
+            item["index"] = index
+            yield stream_chunk(completion_chunk(model, {"tool_calls": [item]}), include_usage)
+        yield stream_chunk(completion_chunk(model, {}, "tool_calls"), include_usage)
+        return
+    yield from stream_tool_chat_completion_from_text(str(content or ""), {}, model, [], include_usage=include_usage)
+
+
 def stream_tool_text_chat_completion(
     backend,
     body: dict[str, Any],
@@ -897,12 +918,10 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
                     include_usage=stream_include_usage(body),
                 )
             if spec.provider == JOYCODE_PROVIDER:
-                response = joycode_chat.chat_completion(body=body, messages=messages, model=model)
-                return stream_tool_chat_completion_from_text(
+                response = joycode_chat.raw_chat_completion(body=body, messages=messages, model=model)
+                return stream_tool_chat_completion_from_response(
                     response,
-                    body,
                     model,
-                    messages,
                     include_usage=stream_include_usage(body),
                 )
             return stream_tool_text_chat_completion(text_backend(), body, messages, model, stream_include_usage(body))
