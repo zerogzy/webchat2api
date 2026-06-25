@@ -244,7 +244,7 @@ function methodDescription(method: AccountImportMethod, provider: ImportProvider
   const definition = getAccountProviderDefinition(provider);
   if (method === "token") return definition.importTokenCopy.fileHelp ?? definition.importTokenCopy.placeholder;
   if (method === "session") return definition.importSessionCopy.help || definition.importSessionCopy.placeholder;
-  if (method === "browser-login") return "通过后端真实浏览器登录 Gemini，并自动提取可用 Cookie。";
+  if (method === "browser-login") return provider === "joycode" ? "打开 JoyCode 官方 OAuth 页面，完成授权后粘贴回调 URL 或 pt_key。" : "通过后端真实浏览器登录 Gemini，并自动提取可用 Cookie。";
   if (method === "qr-login") return "扫描二维码登录 CatPawAI，登录成功后自动获取并续期 token。";
   if (method === "cpa") return definition.importFlowCopy.cpaHelp;
   if (method === "remote-cpa") return definition.importFlowCopy.remoteCpaDescription;
@@ -726,6 +726,19 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     }
   };
 
+  const handleJoyCodeBrowserLogin = async () => {
+    setIsSubmitting(true);
+    try {
+      const data = await startJoyCodeBrowserLogin();
+      setJoycodeLoginUrl(data.url);
+      window.open(data.url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "生成 JoyCode OAuth 链接失败");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handleCpaSelected = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
@@ -897,18 +910,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
               <Button
                 type="button"
                 className="rounded-xl bg-stone-950 text-white hover:bg-stone-800"
-                onClick={async () => {
-                  setIsSubmitting(true);
-                  try {
-                    const data = await startJoyCodeBrowserLogin();
-                    setJoycodeLoginUrl(data.url);
-                    window.open(data.url, "_blank", "noopener,noreferrer");
-                  } catch (error) {
-                    toast.error(error instanceof Error ? error.message : "生成 JoyCode OAuth 链接失败");
-                  } finally {
-                    setIsSubmitting(false);
-                  }
-                }}
+                onClick={() => void handleJoyCodeBrowserLogin()}
                 disabled={isSubmitting}
               >
                 <ExternalLink className="size-4" />
@@ -1063,6 +1065,21 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             <div className="font-medium">风险提示</div>
             <div>不要使用自己的大号，尽量使用不常用的小号进行导入，避免出现封号风险。本项目不承担任何封号风险责任。</div>
           </div>
+          {importProvider === "joycode" ? (
+            <div className="rounded-2xl border border-stone-200 bg-white p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="space-y-1">
+                  <div className="text-sm font-medium text-stone-800">JoyCode OAuth</div>
+                  <div className="text-sm leading-6 text-stone-500">先打开官方登录页，授权后把回调 URL 或 pt_key 粘贴到下方。</div>
+                </div>
+                <Button type="button" className="rounded-xl bg-stone-950 text-white hover:bg-stone-800" onClick={() => void handleJoyCodeBrowserLogin()} disabled={isSubmitting}>
+                  <ExternalLink className="size-4" />
+                  打开浏览器登录
+                </Button>
+              </div>
+              {joycodeLoginUrl ? <Input value={joycodeLoginUrl} readOnly className="mt-3 h-11 rounded-xl border-stone-200 bg-white font-mono text-xs" /> : null}
+            </div>
+          ) : null}
           {renderImportProxyField()}
           <div className="grid gap-4 sm:grid-cols-2">
             {importProvider === "gemini" ? (
@@ -1173,16 +1190,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                 className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
                 onClick={async () => {
                   if (importProvider === "joycode") {
-                    setIsSubmitting(true);
-                    try {
-                      const data = await startJoyCodeBrowserLogin();
-                      setJoycodeLoginUrl(data.url);
-                      window.open(data.url, "_blank", "noopener,noreferrer");
-                    } catch (error) {
-                      toast.error(error instanceof Error ? error.message : "生成 JoyCode OAuth 链接失败");
-                    } finally {
-                      setIsSubmitting(false);
-                    }
+                    await handleJoyCodeBrowserLogin();
                     return;
                   }
                   await handleGeminiBrowserLogin();
