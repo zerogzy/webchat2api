@@ -275,6 +275,7 @@ def parse_tool_calls(text: str, available_tools: list[str] | None = None) -> Too
         or _parse_json_envelope(text)
         or _parse_json_array(text)
         or _parse_alt_xml(text)
+        or _parse_arg_key_value_tool_calls(text, available_tools or [])
         or _parse_loose_xml_tool_calls(text, available_tools or [])
         or _parse_tool_element_calls(text, available_tools or [])
         or _parse_tagless_tool_call_calls(text, available_tools or [])
@@ -490,6 +491,39 @@ def _parse_loose_xml_tool_calls(text: str, available_tools: list[str]) -> list[P
         if arguments:
             calls.append(_make_call(name, arguments))
     return calls
+
+
+def _parse_arg_key_value_tool_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
+    if "<arg_key" not in text or "<arg_value" not in text:
+        return []
+    name = _loose_tool_name(text, available_tools)
+    if not name:
+        return []
+    args: dict[str, Any] = {}
+    broken_first_key = re.search(r"(?is)<tool_name\b[^>]*>.*?</([\w.\-]+)\s*</arg_key\s*>\s*<arg_value\b[^>]*>(.*?)(?:</arg_value\s*>|<arg_key\b|$)", text)
+    if broken_first_key:
+        args[_unwrap_xml(broken_first_key.group(1))] = _coerce_tool_scalar(_unwrap_xml(broken_first_key.group(2)))
+    for match in re.finditer(r"(?is)<arg_key\b[^>]*>(.*?)</arg_key\s*>\s*<arg_value\b[^>]*>(.*?)(?:</arg_value\s*>|<arg_key\b|$)", text):
+        key = _unwrap_xml(match.group(1))
+        value = _unwrap_xml(match.group(2))
+        if key:
+            args[key] = _coerce_tool_scalar(value)
+    return [_make_call(name, args)] if args else []
+
+
+def _loose_tool_name(text: str, available_tools: list[str]) -> str:
+    available = [tool for tool in available_tools if tool]
+    match = re.search(r"(?is)<tool_name\b[^>]*>(.*?)(?:</tool_name\s*>|<arg_key\b|$)", text)
+    raw = _unwrap_xml(match.group(1)) if match else text
+    for name in sorted(available, key=len, reverse=True):
+        if re.search(rf"(?is)(^|[^\w.\-]){re.escape(name)}([^\w.\-]|$)", raw):
+            return name
+    return ""
+
+
+def _coerce_tool_scalar(value: str) -> Any:
+    text = value.strip()
+    return int(text) if text.isdigit() else text
 
 
 def _calls_from_items(items: list[Any]) -> list[ParsedToolCall]:
