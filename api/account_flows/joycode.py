@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from curl_cffi import requests
 
 from services.providers.base import JOYCODE_PROVIDER
-from services.providers.joycode.client import JoyCodeClient, JoyCodeError, load_from_state_db, parse_oauth_pt_key
+from services.providers.joycode.client import JoyCodeClient, JoyCodeError, load_from_state_db, parse_oauth_credentials
 
 QR_SHOW_URL = "https://qr.m.jd.com/show?appid=133&size=147&t={ts}"
 QR_CHECK_URL = "https://qr.m.jd.com/check?appid=133&token={token}&callback=jsonpCallback&_={ts}"
@@ -58,10 +58,20 @@ def oauth_login_url(port: str = "83") -> dict[str, str]:
 
 
 def import_oauth(value: str, *, account_service: Any, sanitize_account_result: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
-    pt_key = parse_oauth_pt_key(value)
-    if not pt_key:
+    creds = parse_oauth_credentials(value)
+    if not creds.pt_key:
         raise HTTPException(status_code=400, detail={"error": "pt_key is required"})
-    payload = _user_payload(pt_key)
+    try:
+        payload = _user_payload(
+            creds.pt_key,
+            color_base_url=creds.color_base_url,
+            master_base_url=creds.master_base_url,
+            tenant=creds.tenant,
+            login_type=creds.login_type,
+            org_full_name=creds.org_full_name,
+        )
+    except JoyCodeError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"error": str(exc)}) from exc
     return sanitize_account_result(account_service.add_account_items([payload]))
 
 

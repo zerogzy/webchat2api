@@ -66,13 +66,24 @@ def _color_sign(function_id: str) -> tuple[str, str]:
 
 
 def parse_oauth_pt_key(value: str) -> str:
+    return parse_oauth_credentials(value).pt_key
+
+
+def parse_oauth_credentials(value: str) -> Credentials:
     text = _clean(value)
     if not text:
-        return ""
+        return Credentials(pt_key="")
     if text.startswith(("http://", "https://")):
         query = parse_qs(urlparse(text).query)
-        return _clean((query.get("pt_key") or [""])[0])
-    return text
+        return Credentials(
+            pt_key=_clean((query.get("pt_key") or [""])[0]),
+            color_base_url=_clean((query.get("base_url") or query.get("colorBaseUrl") or [""])[0]),
+            master_base_url=_clean((query.get("master_base_url") or query.get("masterBaseUrl") or [""])[0]),
+            tenant=_clean((query.get("tenant") or [""])[0]),
+            login_type=_clean((query.get("loginType") or query.get("login_type") or [""])[0]),
+            org_full_name=_clean((query.get("orgFullName") or query.get("org_full_name") or [""])[0]),
+        )
+    return Credentials(pt_key=text)
 
 
 def default_state_db_path() -> Path:

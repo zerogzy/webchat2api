@@ -23,7 +23,7 @@ install_fastapi_stubs()
 from services.providers.registry import resolve_model, normalize_account_provider
 from services.providers.base import JOYCODE_PROVIDER
 from services.providers.joycode.accounts import normalize_account, sanitize_account
-from services.providers.joycode.client import JoyCodeClient, parse_oauth_pt_key
+from services.providers.joycode.client import JoyCodeClient, parse_oauth_credentials, parse_oauth_pt_key
 
 _joycode_flow_spec = importlib.util.spec_from_file_location("joycode_flow", Path(__file__).parents[1] / "api/account_flows/joycode.py")
 joycode_flow = importlib.util.module_from_spec(_joycode_flow_spec)
@@ -50,6 +50,16 @@ class JoyCodeProviderTests(unittest.TestCase):
     def test_oauth_url_parser_accepts_url_or_plain_key(self) -> None:
         self.assertEqual(parse_oauth_pt_key("http://127.0.0.1:83/?pt_key=abc&x=1"), "abc")
         self.assertEqual(parse_oauth_pt_key("abc"), "abc")
+
+    def test_oauth_url_parser_preserves_joycode_callback_metadata(self) -> None:
+        creds = parse_oauth_credentials(
+            "http://127.0.0.1:83/?pt_key=abc&loginType=PIN_JD_CLOUD&tenant=tenant_jd_x&base_url=https%3A%2F%2Fapi-ai.jd.com"
+        )
+
+        self.assertEqual(creds.pt_key, "abc")
+        self.assertEqual(creds.login_type, "PIN_JD_CLOUD")
+        self.assertEqual(creds.tenant, "tenant_jd_x")
+        self.assertEqual(creds.color_base_url, "https://api-ai.jd.com")
 
     def test_jd_qr_validation_reads_pt_key_from_set_cookie(self) -> None:
         session = types.SimpleNamespace(cookies={})
