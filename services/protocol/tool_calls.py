@@ -683,7 +683,9 @@ def _clean_bash_command(command: str) -> str:
 def _parse_jsonish_arguments(raw: str) -> dict[str, str]:
     file_path = _jsonish_string_value(raw, "file_path")
     content = _jsonish_string_value(raw, "content")
-    return {key: value for key, value in {"file_path": file_path, "content": content}.items() if value}
+    command = _jsonish_string_value(raw, "command")
+    description = _jsonish_string_value(raw, "description")
+    return {key: value for key, value in {"file_path": file_path, "content": content, "command": command, "description": description}.items() if value}
 
 
 def _jsonish_string_value(raw: str, key: str) -> str:
@@ -691,7 +693,7 @@ def _jsonish_string_value(raw: str, key: str) -> str:
     if not match:
         return ""
     rest = raw[match.end():]
-    if key == "content":
+    if key in {"content", "command"}:
         next_key = re.search(r'(?is)",\s*"[\w.-]+"\s*:', rest)
         value = rest[:next_key.start() + 1] if next_key else rest.rstrip().removesuffix("}")
         return _clean_jsonish_string(value)
@@ -699,7 +701,7 @@ def _jsonish_string_value(raw: str, key: str) -> str:
     if match:
         return html.unescape(match.group(1))
     bare = re.match(r"(?is)([^,}\s<>]+)", rest)
-    return html.unescape(bare.group(1).strip()) if bare else ""
+    return _clean_jsonish_string(html.unescape(bare.group(1).strip())) if bare else ""
 
 
 def _clean_jsonish_string(value: str) -> str:
@@ -711,7 +713,12 @@ def _clean_jsonish_string(value: str) -> str:
         value = json.loads(f'"{value}"')
     except (json.JSONDecodeError, ValueError):
         value = value.replace("\\n", "\n").replace('\\"', '"')
-    return value.removeprefix('""').strip()
+    value = value.removeprefix('""').strip()
+    if value.startswith('"') and not value.endswith('"'):
+        value = value[1:].strip()
+    if value.endswith('"') and value.count('"') % 2 == 1:
+        value = value[:-1].strip()
+    return value
 
 
 def _parse_tool_element_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
