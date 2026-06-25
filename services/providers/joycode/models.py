@@ -8,7 +8,6 @@ JOYCODE_PROVIDER = "joycode"
 
 JOYCODE_MODELS: tuple[tuple[str, str, bool, bool, int, int], ...] = (
     ("JoyAI-Code", "joycode", False, False, 200000, 64000),
-    ("Claude-Opus-4.7", "anthropic", False, False, 200000, 32000),
     ("MiniMax-M2.7", "minimax", False, True, 200000, 16384),
     ("Kimi-K2.6", "moonshot", True, True, 200000, 16384),
     ("Kimi-K2.5", "moonshot", True, False, 200000, 16384),

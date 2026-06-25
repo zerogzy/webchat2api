@@ -54,7 +54,7 @@ export const joycodeProvider: AccountProviderDefinition = {
     imageFallbackModels: [],
     imageUnsupportedCopy: "JoyCode 暂未提供图像生成/编辑接口，请切换到文本试验或选择其他服务。",
     imageNoMetadataCopy: "JoyCode 暂未提供图像生成/编辑接口，请切换到文本试验或选择其他服务。",
-    modelIdPrefixes: [],
+    modelIdPrefixes: ["joyai-", "minimax-", "kimi-", "glm-", "doubao-"],
     textModelPrefixes: [],
     imageModelKeywords: [],
     imageCapabilities: [],

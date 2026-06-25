@@ -97,6 +97,7 @@ const DEFAULT_IMAGE_MODEL =
 const DEFAULT_TEXT_MODEL =
   getAccountProviderDefinition(DEFAULT_TEST_PROVIDER).trial.textFallbackModels[0] ??
   "";
+const HIDDEN_TEXT_MODELS = new Set(["Claude-Opus-4.7"]);
 
 type TestProviderId = KnownProviderId;
 type ExperimentMode = "text" | "image";
@@ -285,7 +286,7 @@ function uniqueModelIds(items: string[]) {
   const models: string[] = [];
   for (const item of items) {
     const model = item.trim();
-    if (!model || seen.has(model)) {
+    if (!model || seen.has(model) || HIDDEN_TEXT_MODELS.has(model)) {
       continue;
     }
     seen.add(model);
@@ -381,6 +382,9 @@ function providerMatches(
   provider: TestProviderId,
   metadata?: ModelInfo,
 ) {
+  if (HIDDEN_TEXT_MODELS.has(model)) {
+    return false;
+  }
   return modelProvider(model, metadata) === provider;
 }
 
@@ -1012,7 +1016,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     [imageCount],
   );
   const modelMetadataById = useMemo(
-    () => new Map(modelMetadata.map((model) => [model.id, model])),
+    () => new Map(modelMetadata.map((model) => [`${model.provider || ""}:${model.id}`, model])),
     [modelMetadata],
   );
   const selectedConversation = useMemo(
@@ -1047,7 +1051,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       ...fallbackTextModelsForProvider(textProvider, modelMetadata.length > 0),
       textModel,
     ]).filter((model) =>
-      providerMatches(model, textProvider, modelMetadataById.get(model)),
+      providerMatches(model, textProvider, modelMetadataById.get(`${textProvider}:${model}`)),
     );
   }, [modelMetadata, modelMetadataById, textModel, textProvider]);
   const imageProviderOptions = useMemo(
@@ -1675,7 +1679,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
       setSelectedConversationId(conversationId);
       setImageProvider(
-        modelProvider(turn.model, modelMetadataById.get(turn.model)),
+        modelProvider(turn.model),
       );
       setImagePrompt(turn.prompt);
       setImageModel(turn.model || DEFAULT_IMAGE_MODEL);
@@ -1693,7 +1697,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       textareaRef.current?.focus();
       toast.success("已复用这条提示词配置");
     },
-    [modelMetadataById],
+    [],
   );
 
   const openLightbox = useCallback(
