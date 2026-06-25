@@ -14,7 +14,7 @@ from typing import Any, Iterator
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from services.network.client import create_session
-from services.providers.joycode.models import DEFAULT_MODEL, REASONING_MODEL_IDS
+from services.providers.joycode.models import DEFAULT_MODEL, REASONING_MODEL_IDS, UPSTREAM_MODEL_BY_ID
 
 BASE_URL = "https://joycode-api.jd.com"
 DEFAULT_COLOR_BASE_URL = "https://api-ai.jd.com"
@@ -250,15 +250,16 @@ class JoyCodeClient:
                 yield line.decode("utf-8", "replace") if isinstance(line, bytes) else str(line)
 
     def chat_body(self, body: dict[str, Any], messages: list[dict[str, Any]], model: str, stream: bool) -> dict[str, Any]:
+        requested_model = model or DEFAULT_MODEL
         payload: dict[str, Any] = {
-            "model": model or DEFAULT_MODEL,
+            "model": UPSTREAM_MODEL_BY_ID.get(requested_model, requested_model),
             "messages": messages,
             "stream": stream,
         }
         for key in ("max_tokens", "temperature", "top_p", "tools", "tool_choice", "stop"):
             if key in body and body.get(key) is not None:
                 payload[key] = body[key]
-        if body.get("thinking") is not None and payload["model"] in REASONING_MODEL_IDS:
+        if body.get("thinking") is not None and requested_model in REASONING_MODEL_IDS:
             payload["thinking"] = body["thinking"]
         return payload
 

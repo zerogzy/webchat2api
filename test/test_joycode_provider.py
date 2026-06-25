@@ -33,9 +33,10 @@ _joycode_flow_spec.loader.exec_module(joycode_flow)
 
 class JoyCodeProviderTests(unittest.TestCase):
     def test_model_routes_to_joycode(self) -> None:
-        spec = resolve_model("GLM-5.1")
+        spec = resolve_model("jd-glm-5.1")
 
         self.assertEqual(spec.provider, JOYCODE_PROVIDER)
+        self.assertEqual(spec.upstream_model, "GLM-5.1")
         self.assertEqual(normalize_account_provider("joy-code"), JOYCODE_PROVIDER)
 
     def test_account_normalization_hides_pt_key(self) -> None:
@@ -116,6 +117,18 @@ class JoyCodeProviderTests(unittest.TestCase):
         self.assertEqual(body["userId"], "u")
         self.assertEqual(body["client"], "JoyCode")
         self.assertEqual(body["model"], "JoyAI-Code")
+
+    def test_chat_body_maps_jd_model_to_upstream(self) -> None:
+        fake_session = types.SimpleNamespace(close=lambda: None)
+        with mock.patch("services.providers.joycode.client.create_session", return_value=fake_session):
+            client = JoyCodeClient({"pt_key": "k", "user_id": "u"})
+            try:
+                body = client.chat_body({"thinking": {"type": "enabled"}}, [], "jd-glm-5.1", False)
+            finally:
+                client.close()
+
+        self.assertEqual(body["model"], "GLM-5.1")
+        self.assertEqual(body["thinking"], {"type": "enabled"})
 
     def test_body_bytes_tolerates_false_gzip_header(self) -> None:
         response = types.SimpleNamespace(content=b'{"code":0}', headers={"Content-Encoding": "gzip"})
