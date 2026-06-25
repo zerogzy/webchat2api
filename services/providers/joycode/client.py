@@ -208,7 +208,10 @@ class JoyCodeClient:
     def _body_bytes(response: Any) -> bytes:
         data = response.content
         if str(response.headers.get("Content-Encoding") or "").lower() == "gzip":
-            return gzip.decompress(data)
+            try:
+                return gzip.decompress(data)
+            except gzip.BadGzipFile:
+                return data
         return data
 
     def post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:

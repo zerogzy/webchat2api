@@ -117,6 +117,11 @@ class JoyCodeProviderTests(unittest.TestCase):
         self.assertEqual(body["client"], "JoyCode")
         self.assertEqual(body["model"], "JoyAI-Code")
 
+    def test_body_bytes_tolerates_false_gzip_header(self) -> None:
+        response = types.SimpleNamespace(content=b'{"code":0}', headers={"Content-Encoding": "gzip"})
+
+        self.assertEqual(JoyCodeClient._body_bytes(response), b'{"code":0}')
+
 
 if __name__ == "__main__":
     unittest.main()
