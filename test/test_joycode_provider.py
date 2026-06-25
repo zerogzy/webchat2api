@@ -65,6 +65,20 @@ class JoyCodeProviderTests(unittest.TestCase):
 
         self.assertEqual(joycode_flow._validation_pt_key(session, response), "domain-key")
 
+    def test_jd_qr_validation_follows_login_relay_risk_1100(self) -> None:
+        response = types.SimpleNamespace(
+            cookies={},
+            headers={},
+            json=lambda: {"returnCode": 0, "riskCode": 1100, "url": "http://passport.jd.com/relay/loginRelay?x=1"},
+        )
+        session = types.SimpleNamespace(
+            cookies={},
+            get=mock.Mock(return_value=types.SimpleNamespace(cookies={"pt_key": "relay-key"}, headers={})),
+        )
+
+        self.assertEqual(joycode_flow._validation_pt_key(session, response), "relay-key")
+        self.assertEqual(session.get.call_args.args[0], "https://passport.jd.com/relay/loginRelay?x=1")
+
     def test_jd_qr_validation_quotes_ticket(self) -> None:
         get = mock.Mock(side_effect=[
             types.SimpleNamespace(text='jsonpCallback({"code":200,"ticket":"a+b/c="})'),

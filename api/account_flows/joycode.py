@@ -185,6 +185,14 @@ def _safe_url_info(value: Any) -> dict[str, str]:
     return {"scheme": parsed.scheme, "host": parsed.netloc, "path": parsed.path}
 
 
+def _can_follow_validation_url(payload: dict[str, Any]) -> bool:
+    if int(payload.get("returnCode") or 0) != 0:
+        return False
+    url_info = _safe_url_info(payload.get("url"))
+    risk_code = int(payload.get("riskCode") or 0)
+    return bool(url_info) and (risk_code == 0 or (risk_code == 1100 and url_info.get("host") == "passport.jd.com" and url_info.get("path") == "/relay/loginRelay"))
+
+
 def _validation_debug(session: requests.Session, response: Any) -> dict[str, Any]:
     payload = _json_payload(response)
     return {
@@ -202,14 +210,14 @@ def _validation_debug(session: requests.Session, response: Any) -> dict[str, Any
 
 def _follow_validation_url(session: requests.Session, response: Any) -> str:
     payload = _json_payload(response)
-    if not isinstance(payload, dict) or int(payload.get("returnCode") or 0) != 0 or int(payload.get("riskCode") or 0) != 0:
+    if not isinstance(payload, dict) or not _can_follow_validation_url(payload):
         return ""
     url = _clean(payload.get("url"))
     if not url:
         return ""
     if url.startswith("http://"):
         url = "https://" + url[7:]
-    follow = session.get(url, headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx"}, timeout=30)
+    follow = session.get(url, headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}, timeout=30)
     return _cookie_value(session, "pt_key") or _cookie_value(follow, "pt_key")
 
 
