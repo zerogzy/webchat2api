@@ -23,9 +23,9 @@ export const joycodeProvider: AccountProviderDefinition = {
     submitLabel: "提交 JoyCode OAuth",
     parseJsonAccessToken: false,
   },
-  importMethods: ["session", "browser-login", "qr-login", "token"],
+  importMethods: ["session", "browser-login", "token"],
   importFlowCopy: {
-    providerDescription: "通过 JoyCode OAuth、JD 扫码或手动 pt_key 导入账号。",
+    providerDescription: "通过 JoyCode OAuth、本机 JoyCode state 或手动 pt_key 导入账号。",
     methodIntro: "推荐使用 OAuth 回调 URL 导入；本机安装 JoyCode IDE 时也可使用后端自动导入接口。",
     emptyMethodsLabel: "当前没有可用的 JoyCode 导入方式。",
     cpaHelp: "当前 JoyCode 不支持本地 JSON 文件导入。",

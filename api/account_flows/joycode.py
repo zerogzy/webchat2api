@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 from typing import Any, Callable
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlencode
 
 from fastapi import HTTPException
 from curl_cffi import requests
@@ -151,34 +151,6 @@ def _cookie_value(source: Any, name: str) -> str:
     return ""
 
 
-def _cookie_names(source: Any) -> list[str]:
-    return sorted({name for name, value in _iter_cookie_items(source) if name and value})
-
-
-def _domain_cookie_names(source: Any) -> list[str]:
-    cookies = getattr(source, "cookies", source)
-    jar = getattr(cookies, "jar", cookies)
-    names: set[str] = set()
-    if isinstance(jar, CookieJar):
-        for domain in JD_COOKIE_HOSTS:
-            values = jar._cookies.get(domain) or jar._cookies.get(f".{domain}") or {}
-            for path_values in values.values():
-                names.update(path_values)
-    return sorted(names)
-
-
-def _jar_cookie_summary(source: Any) -> list[dict[str, str]]:
-    cookies = getattr(source, "cookies", source)
-    jar = getattr(cookies, "jar", cookies)
-    summary: list[dict[str, str]] = []
-    if isinstance(jar, CookieJar):
-        for domain, paths in jar._cookies.items():
-            for path, values in paths.items():
-                for name in values:
-                    summary.append({"domain": domain, "path": path, "name": name})
-    return sorted(summary, key=lambda item: (item["domain"], item["path"], item["name"]))
-
-
 def _json_payload(response: Any) -> dict[str, Any]:
     try:
         payload = response.json()
@@ -190,39 +162,9 @@ def _json_payload(response: Any) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _safe_url_info(value: Any) -> dict[str, str]:
-    parsed = urlparse(_clean(value))
-    if not parsed.scheme or not parsed.netloc:
-        return {}
-    return {"scheme": parsed.scheme, "host": parsed.netloc, "path": parsed.path}
-
-
-def _can_follow_validation_url(payload: dict[str, Any]) -> bool:
-    if int(payload.get("returnCode") or 0) != 0:
-        return False
-    url_info = _safe_url_info(payload.get("url"))
-    risk_code = int(payload.get("riskCode") or 0)
-    return bool(url_info) and (risk_code == 0 or (risk_code == 1100 and url_info.get("host") == "passport.jd.com" and url_info.get("path") == "/relay/loginRelay"))
-
-
-def _validation_debug(session: requests.Session, response: Any) -> dict[str, Any]:
-    payload = _json_payload(response)
-    return {
-        "validation_status": getattr(response, "status_code", None),
-        "validation_url": _safe_url_info(getattr(response, "url", "")),
-        "response_cookie_names": _cookie_names(response),
-        "session_cookie_names": _domain_cookie_names(session),
-        "json_keys": sorted(payload) if payload else [],
-        "returnCode": payload.get("returnCode") if payload else None,
-        "riskCode": payload.get("riskCode") if payload else None,
-        "has_url": bool(_clean(payload.get("url"))) if payload else False,
-        "url": _safe_url_info(payload.get("url")) if payload else {},
-    }
-
-
 def _follow_validation_url(session: requests.Session, response: Any) -> str:
     payload = _json_payload(response)
-    if not isinstance(payload, dict) or not _can_follow_validation_url(payload):
+    if not isinstance(payload, dict) or int(payload.get("returnCode") or 0) != 0:
         return ""
     url = _clean(payload.get("url"))
     if not url:
@@ -231,25 +173,6 @@ def _follow_validation_url(session: requests.Session, response: Any) -> str:
         url = "https://" + url[7:]
     follow = session.get(url, headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}, timeout=30)
     return _cookie_value(session, "pt_key") or _cookie_value(follow, "pt_key")
-
-
-def _follow_validation_debug(session: requests.Session, response: Any) -> dict[str, Any]:
-    payload = _json_payload(response)
-    if not isinstance(payload, dict) or not _can_follow_validation_url(payload):
-        return {}
-    url = _clean(payload.get("url"))
-    if not url:
-        return {}
-    if url.startswith("http://"):
-        url = "https://" + url[7:]
-    follow = session.get(url, headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}, timeout=30)
-    return {
-        "follow_status": getattr(follow, "status_code", None),
-        "follow_url": _safe_url_info(getattr(follow, "url", "")),
-        "follow_response_cookie_names": _cookie_names(follow),
-        "follow_session_cookie_names": _domain_cookie_names(session),
-        "follow_cookie_summary": _jar_cookie_summary(session),
-    }
 
 
 def _validation_pt_key(session: requests.Session, response: Any) -> str:
@@ -311,9 +234,7 @@ def poll_qr_login(job_id: str, *, account_service: Any, sanitize_account_result:
     validation = session.get(QR_VALID_URL.format(ticket=quote(_clean(payload["ticket"]), safe="")), headers={"User-Agent": JD_USER_AGENT, "Referer": "https://passport.jd.com/new/login.aspx"}, timeout=30)
     pt_key = _validation_pt_key(session, validation)
     if not pt_key:
-        debug = _validation_debug(session, validation)
-        debug["follow"] = _follow_validation_debug(session, validation)
-        return {"jobId": job_id, "status": "failed", "message": "JD login succeeded but pt_key cookie was not found", "debug": debug}
+        return {"jobId": job_id, "status": "failed", "message": "JD QR login no longer returns JoyCode pt_key. Use JoyCode browser OAuth or local JoyCode state import."}
     result = sanitize_account_result(account_service.add_account_items([_user_payload(pt_key)]))
     _QR_JOBS.pop(job_id, None)
     return {"jobId": job_id, "status": "success", **result}
