@@ -5,15 +5,15 @@ from typing import Any
 from services.providers.base import CODEBUDDY_PROVIDER, ModelSpec
 
 CODEBUDDY_MODELS: tuple[tuple[str, str, str], ...] = (
-    ("tx-claude-4.0", "claude-4.0", "anthropic"),
-    ("tx-claude-3.7", "claude-3.7", "anthropic"),
-    ("tx-gpt-5", "gpt-5", "openai"),
-    ("tx-gpt-5-mini", "gpt-5-mini", "openai"),
-    ("tx-gpt-5-nano", "gpt-5-nano", "openai"),
-    ("tx-o4-mini", "o4-mini", "openai"),
-    ("tx-gemini-2.5-flash", "gemini-2.5-flash", "google"),
-    ("tx-gemini-2.5-pro", "gemini-2.5-pro", "google"),
-    ("tx-auto-chat", "auto-chat", "codebuddy"),
+    ("tx-auto", "auto", "codebuddy"),
+    ("tx-deepseek-v3", "deepseek-v3", "deepseek"),
+    ("tx-deepseek-v3-0324", "deepseek-v3-0324", "deepseek"),
+    ("tx-deepseek-r1", "deepseek-r1", "deepseek"),
+    ("tx-glm-5.1", "glm-5.1", "zhipu"),
+    ("tx-glm-5.2", "glm-5.2", "zhipu"),
+    ("tx-glm-4.6", "glm-4.6", "zhipu"),
+    ("tx-minimax-m3", "minimax-m3", "minimax"),
+    ("tx-kimi-k2.6", "kimi-k2.6", "moonshot"),
 )
 
 UPSTREAM_MODEL_BY_ID = {model_id: upstream for model_id, upstream, _owner in CODEBUDDY_MODELS}

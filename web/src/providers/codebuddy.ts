@@ -47,7 +47,17 @@ export const codebuddyProvider: AccountProviderDefinition = {
   },
   trial: {
     enabled: true,
-    textFallbackModels: ["tx-claude-4.0", "tx-gpt-5", "tx-gemini-2.5-pro", "tx-auto-chat"],
+    textFallbackModels: [
+      "tx-auto",
+      "tx-deepseek-v3",
+      "tx-deepseek-v3-0324",
+      "tx-deepseek-r1",
+      "tx-glm-5.1",
+      "tx-glm-5.2",
+      "tx-glm-4.6",
+      "tx-minimax-m3",
+      "tx-kimi-k2.6",
+    ],
     textFallbackMode: "always",
     imageFallbackModels: [],
     imageUnsupportedCopy: "CodeBuddy 暂未提供图像生成/编辑接口，请切换到文本试验或选择其他服务。",

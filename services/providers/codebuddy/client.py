@@ -10,7 +10,7 @@ from services.network.client import create_session
 from services.providers.codebuddy.models import UPSTREAM_MODEL_BY_ID
 from utils.helper import ensure_ok
 
-BASE_URL = "https://www.codebuddy.ai"
+BASE_URL = "https://www.codebuddy.cn"
 CHAT_ENDPOINT = "/v2/chat/completions"
 USER_AGENT = "CLI/1.0.7 CodeBuddy/1.0.7"
 
@@ -46,6 +46,14 @@ def _parse_sse_payload(line: object) -> dict[str, Any] | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _codebuddy_tool_choice(value: Any) -> Any:
+    if isinstance(value, dict):
+        function = value.get("function") if isinstance(value.get("function"), dict) else {}
+        name = _clean(function.get("name"))
+        return name or "auto"
+    return value
 
 
 def _convert_tool_id(tool_id: str) -> str:
@@ -171,7 +179,7 @@ class CodeBuddyClient:
     def headers(self) -> dict[str, str]:
         request_id = uuid.uuid4().hex
         return {
-            "Host": "www.codebuddy.ai",
+            "Host": "www.codebuddy.cn",
             "Accept": "application/json",
             "Content-Type": "application/json",
             "X-Requested-With": "XMLHttpRequest",
@@ -190,8 +198,8 @@ class CodeBuddyClient:
             "X-IDE-Type": "CLI",
             "X-IDE-Name": "CLI",
             "X-IDE-Version": "1.0.7",
-            "Authorization": f"Bearer {self.bearer_token}",
-            "X-Domain": "www.codebuddy.ai",
+            "X-API-Key": self.bearer_token,
+            "X-Domain": "www.codebuddy.cn",
             "User-Agent": USER_AGENT,
             "X-Product": "SaaS",
             "X-User-Id": self.user_id,
@@ -199,6 +207,8 @@ class CodeBuddyClient:
 
     def chat_body(self, body: dict[str, Any], messages: list[dict[str, Any]], model: str) -> dict[str, Any]:
         payload = {key: value for key, value in body.items() if key not in {"stream", "messages"}}
+        if "tool_choice" in payload:
+            payload["tool_choice"] = _codebuddy_tool_choice(payload.get("tool_choice"))
         payload["model"] = UPSTREAM_MODEL_BY_ID.get(model, model.removeprefix("tx-"))
         payload["messages"] = messages
         payload["stream"] = True

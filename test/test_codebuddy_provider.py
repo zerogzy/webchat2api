@@ -47,10 +47,12 @@ class FakeResponse:
 class FakeSession:
     def __init__(self, lines: list[bytes]) -> None:
         self.lines = lines
+        self.url = None
         self.payload = None
         self.headers = None
 
     def post(self, url, headers=None, json=None, stream=False, timeout=None):
+        self.url = url
         self.headers = headers
         self.payload = json
         return FakeResponse(self.lines)
@@ -61,10 +63,10 @@ class FakeSession:
 
 class CodeBuddyProviderTests(unittest.TestCase):
     def test_model_routes_to_codebuddy_with_tx_prefix(self) -> None:
-        spec = resolve_model("tx-gpt-5")
+        spec = resolve_model("tx-deepseek-v3")
 
         self.assertEqual(spec.provider, CODEBUDDY_PROVIDER)
-        self.assertEqual(spec.upstream_model, "gpt-5")
+        self.assertEqual(spec.upstream_model, "deepseek-v3")
         self.assertEqual(normalize_account_provider("tx"), CODEBUDDY_PROVIDER)
 
     def test_account_sanitization_hides_bearer_token(self) -> None:
@@ -80,8 +82,13 @@ class CodeBuddyProviderTests(unittest.TestCase):
         result = openai_v1_models.list_models()
         models = {item["id"]: item for item in result["data"]}
 
-        self.assertEqual(models["tx-gpt-5"]["provider"], CODEBUDDY_PROVIDER)
-        self.assertEqual(models["tx-gpt-5"]["root"], "gpt-5")
+        self.assertEqual(models["tx-deepseek-v3"]["provider"], CODEBUDDY_PROVIDER)
+        self.assertEqual(models["tx-deepseek-v3"]["root"], "deepseek-v3")
+        self.assertEqual(models["tx-glm-5.1"]["root"], "glm-5.1")
+        self.assertEqual(models["tx-glm-5.2"]["root"], "glm-5.2")
+        self.assertEqual(models["tx-glm-4.6"]["root"], "glm-4.6")
+        self.assertEqual(models["tx-minimax-m3"]["root"], "minimax-m3")
+        self.assertEqual(models["tx-kimi-k2.6"]["root"], "kimi-k2.6")
 
     def test_client_aggregates_stream_and_strips_tx_prefix_upstream(self) -> None:
         lines = [
@@ -92,11 +99,25 @@ class CodeBuddyProviderTests(unittest.TestCase):
         session = FakeSession(lines)
         with mock.patch("services.providers.codebuddy.client.create_session", return_value=session):
             with CodeBuddyClient({"bearer_token": "fake-codebuddy-key", "user_id": "u"}) as client:
-                response = client.chat_completion({}, [{"role": "user", "content": "hello"}], "tx-gpt-5")
+                response = client.chat_completion({}, [{"role": "user", "content": "hello"}], "tx-deepseek-v3")
 
-        self.assertEqual(session.payload["model"], "gpt-5")
+        self.assertEqual(session.payload["model"], "deepseek-v3")
         self.assertEqual(session.payload["stream"], True)
+        self.assertEqual(session.url, "https://www.codebuddy.cn/v2/chat/completions")
+        self.assertEqual(session.headers["Host"], "www.codebuddy.cn")
+        self.assertEqual(session.headers["X-Domain"], "www.codebuddy.cn")
+        self.assertEqual(session.headers["X-API-Key"], "fake-codebuddy-key")
+        self.assertNotIn("Authorization", session.headers)
         self.assertEqual(response["choices"][0]["message"]["content"], "hi")
+
+    def test_client_converts_forced_tool_choice_to_codebuddy_string(self) -> None:
+        session = FakeSession([b"data: [DONE]"])
+        body = {"tool_choice": {"type": "function", "function": {"name": "Read"}}}
+        with mock.patch("services.providers.codebuddy.client.create_session", return_value=session):
+            with CodeBuddyClient({"bearer_token": "fake-codebuddy-key"}) as client:
+                client.chat_completion(body, [{"role": "user", "content": "hello"}], "tx-deepseek-v3")
+
+        self.assertEqual(session.payload["tool_choice"], "Read")
 
     def test_client_aggregates_tool_calls(self) -> None:
         lines = [
@@ -106,7 +127,7 @@ class CodeBuddyProviderTests(unittest.TestCase):
         ]
         with mock.patch("services.providers.codebuddy.client.create_session", return_value=FakeSession(lines)):
             with CodeBuddyClient({"bearer_token": "fake-codebuddy-key"}) as client:
-                response = client.chat_completion({"tools": [{"type": "function", "function": {"name": "Read"}}]}, [], "tx-claude-4.0")
+                response = client.chat_completion({"tools": [{"type": "function", "function": {"name": "Read"}}]}, [], "tx-deepseek-v3")
 
         call = response["choices"][0]["message"]["tool_calls"][0]
         self.assertEqual(call["id"], "call_abc")
@@ -122,12 +143,12 @@ class CodeBuddyProviderTests(unittest.TestCase):
 
         with mock.patch.object(anthropic_v1_messages.openai_v1_chat_complete, "handle", side_effect=fake_handle):
             response = anthropic_v1_messages.handle({
-                "model": "tx-claude-4.0",
+                "model": "tx-deepseek-v3",
                 "max_tokens": 32,
                 "messages": [{"role": "user", "content": "hello"}],
             })
 
-        self.assertEqual(captured["model"], "tx-claude-4.0")
+        self.assertEqual(captured["model"], "tx-deepseek-v3")
         self.assertEqual(response["content"][0]["text"], "ok")
 
 
