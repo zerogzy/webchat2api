@@ -11,6 +11,7 @@ from services.providers.gemini.models import gemini_model_metadata
 from services.providers.gpt.models import GPT_IMAGE_MODEL_IDS, gpt_fallback_model_metadata, gpt_image_model_metadata
 from services.providers.grok.models import grok_model_metadata
 from services.providers.joycode.models import is_joycode_model_id, joycode_model_metadata
+from services.providers.qoder.models import is_qoder_model_id, qoder_model_metadata
 from services.providers.registry import MODEL_REGISTRY, resolve_model
 
 
@@ -92,6 +93,8 @@ def list_models() -> dict[str, Any]:
         _append_model(normalized_data, seen, item)
     for item in codebuddy_model_metadata():
         _append_model(normalized_data, seen, item)
+    for item in qoder_model_metadata():
+        _append_model(normalized_data, seen, item)
     result["data"] = normalized_data
     return result
 
@@ -106,6 +109,6 @@ def get_model(model_id: str) -> dict[str, Any]:
             if isinstance(item, dict) and str(item.get("id") or "") == model:
                 return item
     spec = MODEL_REGISTRY.get(model)
-    if spec is not None or is_catpaw_model_id(model) or is_joycode_model_id(model) or is_codebuddy_model_id(model) or model.startswith(("claude-", "grok-", "gemini-")):
+    if spec is not None or is_catpaw_model_id(model) or is_joycode_model_id(model) or is_codebuddy_model_id(model) or is_qoder_model_id(model) or model.startswith(("claude-", "grok-", "gemini-")):
         return resolve_model(model).model_metadata()
     raise HTTPException(status_code=404, detail={"error": "model not found"})

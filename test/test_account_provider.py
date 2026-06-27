@@ -1401,23 +1401,25 @@ class AccountProviderTests(unittest.TestCase):
         self.assertIsNot(grok_strategy, gemini_strategy)
 
     def test_registry_provider_definitions_expose_capabilities_and_models(self) -> None:
-        from services.providers.base import CATPAW_PROVIDER, CODEBUDDY_PROVIDER, JOYCODE_PROVIDER
+        from services.providers.base import CATPAW_PROVIDER, CODEBUDDY_PROVIDER, JOYCODE_PROVIDER, QODER_PROVIDER
 
         definitions = provider_registry.provider_definitions()
 
-        self.assertEqual(set(definitions), {GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER, JOYCODE_PROVIDER, CODEBUDDY_PROVIDER})
+        self.assertEqual(set(definitions), {GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER, JOYCODE_PROVIDER, CODEBUDDY_PROVIDER, QODER_PROVIDER})
         self.assertIn("image", definitions[GPT_PROVIDER].capabilities)
         self.assertIn("image_edit", definitions[GROK_PROVIDER].capabilities)
         self.assertEqual(definitions[GEMINI_PROVIDER].capabilities, frozenset({"chat", "image"}))
         self.assertEqual(definitions[CATPAW_PROVIDER].capabilities, frozenset({"chat"}))
         self.assertEqual(definitions[JOYCODE_PROVIDER].capabilities, frozenset({"chat"}))
         self.assertEqual(definitions[CODEBUDDY_PROVIDER].capabilities, frozenset({"chat"}))
+        self.assertEqual(definitions[QODER_PROVIDER].capabilities, frozenset({"chat"}))
         self.assertTrue(any(spec.provider == GPT_PROVIDER for spec in definitions[GPT_PROVIDER].model_specs))
         self.assertTrue(any(spec.provider == GROK_PROVIDER for spec in definitions[GROK_PROVIDER].model_specs))
         self.assertTrue(any(spec.provider == GEMINI_PROVIDER for spec in definitions[GEMINI_PROVIDER].model_specs))
         self.assertTrue(any(spec.provider == CATPAW_PROVIDER for spec in definitions[CATPAW_PROVIDER].model_specs))
         self.assertTrue(any(spec.provider == JOYCODE_PROVIDER for spec in definitions[JOYCODE_PROVIDER].model_specs))
         self.assertTrue(any(spec.provider == CODEBUDDY_PROVIDER for spec in definitions[CODEBUDDY_PROVIDER].model_specs))
+        self.assertTrue(any(spec.provider == QODER_PROVIDER for spec in definitions[QODER_PROVIDER].model_specs))
 
     def test_codebuddy_limited_account_is_skipped_and_can_recover(self) -> None:
         from services.providers.base import CODEBUDDY_PROVIDER

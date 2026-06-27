@@ -18,6 +18,7 @@ from services.providers.base import (
     GPT_PROVIDER,
     GROK_PROVIDER,
     JOYCODE_PROVIDER,
+    QODER_PROVIDER,
     AccountStateDecision,
     AccountStateDecisionInput,
     ModelSpec,
@@ -364,7 +365,7 @@ class AccountService:
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
         provider_strategy = account_strategy(normalized["provider"])
-        if normalized["provider"] in {GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER, JOYCODE_PROVIDER, CODEBUDDY_PROVIDER}:
+        if normalized["provider"] in {GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER, JOYCODE_PROVIDER, CODEBUDDY_PROVIDER, QODER_PROVIDER}:
             normalized = provider_strategy.normalize_account(normalized)
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
@@ -930,6 +931,8 @@ class AccountService:
             return self.fetch_joycode_remote_info(access_token, event, provider=account_provider)
         if account_provider == CODEBUDDY_PROVIDER:
             return dict(account) if account else None
+        if account_provider == QODER_PROVIDER:
+            return dict(account) if account else None
         if account_provider != GPT_PROVIDER:
             return dict(account) if account else None
         from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
@@ -1132,7 +1135,7 @@ class AccountService:
             return []
         target_tokens: list[str] = []
         seen: set[tuple[str, str]] = set()
-        candidate_providers = [provider_filter] if provider_filter else [GEMINI_PROVIDER, GROK_PROVIDER, CATPAW_PROVIDER, CODEBUDDY_PROVIDER]
+        candidate_providers = [provider_filter] if provider_filter else [GEMINI_PROVIDER, GROK_PROVIDER, CATPAW_PROVIDER, CODEBUDDY_PROVIDER, QODER_PROVIDER]
         for candidate_provider in candidate_providers:
             if not candidate_provider:
                 continue
@@ -1317,7 +1320,7 @@ class AccountService:
     ) -> list[dict[str, str]]:
         requested_tokens = [token for token in dict.fromkeys(access_tokens or []) if token]
         provider_filter = normalize_provider(provider) if provider else None
-        if provider_filter not in {None, GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER}:
+        if provider_filter not in {None, GPT_PROVIDER, GROK_PROVIDER, GEMINI_PROVIDER, CATPAW_PROVIDER, JOYCODE_PROVIDER, CODEBUDDY_PROVIDER, QODER_PROVIDER}:
             return []
         with self._lock:
             if requested_tokens or identifiers:
@@ -1337,7 +1340,7 @@ class AccountService:
 
     @staticmethod
     def build_export_text(items: list[dict[str, str]]) -> str:
-        lines = [credential for item in items if (credential := _clean_string(item.get("access_token") or item.get("sso")))]
+        lines = [credential for item in items if (credential := _clean_string(item.get("access_token") or item.get("sso") or item.get("pat_token") or item.get("bearer_token")))]
         return "\n".join(lines) + ("\n" if lines else "")
 
 

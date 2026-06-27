@@ -6,9 +6,10 @@ import { grokProvider } from "./grok";
 import { catpawProvider } from "./catpaw";
 import { codebuddyProvider } from "./codebuddy";
 import { joycodeProvider } from "./joycode";
+import { qoderProvider } from "./qoder";
 import type { AccountProviderDefinition, ImportProviderOption, ProviderId } from "./types";
 
-export const accountProviderDefinitions = [gptProvider, grokProvider, geminiProvider, catpawProvider, joycodeProvider, codebuddyProvider] as const satisfies readonly AccountProviderDefinition[];
+export const accountProviderDefinitions = [gptProvider, grokProvider, geminiProvider, catpawProvider, joycodeProvider, codebuddyProvider, qoderProvider] as const satisfies readonly AccountProviderDefinition[];
 
 export const knownProviderIds = accountProviderDefinitions.map((provider) => provider.id) as ProviderId[];
 
@@ -21,6 +22,7 @@ export const accountProviderRegistry: Record<ProviderId, AccountProviderDefiniti
   catpaw: catpawProvider,
   joycode: joycodeProvider,
   codebuddy: codebuddyProvider,
+  qoder: qoderProvider,
 };
 
 export const accountImportProviderOptions: ImportProviderOption[] = accountProviderDefinitions.map((provider) => ({

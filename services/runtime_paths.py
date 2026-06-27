@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import sys
 
 
@@ -17,6 +18,9 @@ def resource_base_dir() -> Path:
 
 
 def writable_base_dir() -> Path:
+    override = os.getenv("WEBCHAT2API_BASE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return _source_base_dir()

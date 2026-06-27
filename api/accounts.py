@@ -52,7 +52,7 @@ class UserKeyUpdateRequest(BaseModel):
 class AccountCreateRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
     accounts: list[dict[str, Any]] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy", "qoder"] | None = None
 
 
 class AccountDeleteIdentifier(BaseModel):
@@ -64,25 +64,25 @@ class AccountDeleteRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
     mode: Literal["tokens", "limited"] = "tokens"
-    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy", "qoder"] | None = None
 
 
 class AccountRefreshRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy", "qoder"] | None = None
 
 
 class AccountValidateRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy"] | None = None
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy", "qoder"] | None = None
 
 
 class AccountExportRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     identifiers: list[AccountDeleteIdentifier] = Field(default_factory=list)
-    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy"]
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy", "qoder"]
 
 
 class GeminiBrowserLoginRequest(BaseModel):
@@ -117,7 +117,7 @@ class AccountUpdateRequest(BaseModel):
     row_id: str | None = None
     type: str | None = None
     provider: str | None = None
-    target_provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy"] | None = None
+    target_provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy", "qoder"] | None = None
     status: str | None = None
     quota: int | None = None
     proxy: str | None = None
@@ -194,7 +194,7 @@ class RemoteAccountInjectRequest(BaseModel):
     strategy: Literal["merge", "replace"] = "merge"
     source_id: str = ""
     source_name: str = ""
-    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy"] = "gpt"
+    provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy", "qoder"] = "gpt"
 
 
 def _account_payload_provider(item: dict[str, Any], provider: str | None) -> str:
@@ -254,7 +254,7 @@ def _account_strategy(provider: Any):
 
 
 
-def _export_filename(provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy"]) -> str:
+def _export_filename(provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy", "qoder"]) -> str:
     return _account_strategy(provider).export_filename()
 
 
@@ -326,7 +326,7 @@ def create_router() -> APIRouter:
         return {"items": auth_service.list_keys(role="user")}
 
     @router.get("/api/accounts")
-    async def get_accounts(provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy"] | None = None, authorization: str | None = Header(default=None)):
+    async def get_accounts(provider: Literal["gpt", "grok", "gemini", "catpaw", "joycode", "codebuddy", "qoder"] | None = None, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"items": sanitize_accounts(account_service.list_accounts(provider=provider))}
 

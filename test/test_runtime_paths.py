@@ -14,6 +14,12 @@ class RuntimePathTests(unittest.TestCase):
         self.assertEqual(runtime_paths.resource_base_dir(), Path(runtime_paths.__file__).resolve().parents[1])
         self.assertEqual(runtime_paths.writable_base_dir(), Path(runtime_paths.__file__).resolve().parents[1])
 
+    def test_writable_runtime_can_be_overridden_for_temp_runs(self) -> None:
+        from services import runtime_paths
+
+        with patch.dict(runtime_paths.os.environ, {"WEBCHAT2API_BASE_DIR": "/tmp/webchat2api-runtime"}):
+            self.assertEqual(runtime_paths.writable_base_dir(), Path("/tmp/webchat2api-runtime").resolve())
+
     def test_frozen_runtime_separates_resource_and_writable_roots(self) -> None:
         from services import runtime_paths
 

@@ -288,6 +288,16 @@ class AccountExportTests(unittest.TestCase):
 
         self.assertEqual(content, "access-token\nsso-token\n")
 
+    def test_account_txt_content_includes_key_only_provider_tokens(self) -> None:
+        content = AccountService.build_export_text(
+            [
+                {"provider": "qoder", "pat_token": "pt-qoder"},
+                {"provider": "codebuddy", "bearer_token": "ck-codebuddy"},
+            ]
+        )
+
+        self.assertEqual(content, "pt-qoder\nck-codebuddy\n")
+
     def test_export_filename_for_provider(self) -> None:
         api_stub = types.ModuleType("api")
         api_stub.__path__ = []
@@ -318,6 +328,12 @@ class AccountExportTests(unittest.TestCase):
         sub2api_stub.sub2api_config = object()
         sub2api_stub.sub2api_import_service = object()
         sys.modules.setdefault("api", api_stub)
+        account_flows_stub = types.ModuleType("api.account_flows")
+        for flow_name in ("catpaw", "gemini", "grok", "joycode"):
+            flow_stub = types.ModuleType(f"api.account_flows.{flow_name}")
+            setattr(account_flows_stub, flow_name, flow_stub)
+            sys.modules.setdefault(f"api.account_flows.{flow_name}", flow_stub)
+        sys.modules.setdefault("api.account_flows", account_flows_stub)
         sys.modules.setdefault("api.support", support_stub)
         sys.modules.setdefault("services.auth_service", auth_stub)
         sys.modules.setdefault("services.cpa_service", cpa_stub)
@@ -333,6 +349,7 @@ class AccountExportTests(unittest.TestCase):
         self.assertEqual(accounts_api._export_filename("gpt"), "webchat2api-gpt.txt")
         self.assertEqual(accounts_api._export_filename("grok"), "webchat2api_grok.txt")
         self.assertEqual(accounts_api._export_filename("gemini"), "webchat2api_gemini.txt")
+        self.assertEqual(accounts_api._export_filename("qoder"), "webchat2api_qoder.txt")
         with self.assertRaises(ValueError):
             accounts_api._account_strategy("mystery")
 
