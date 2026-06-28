@@ -22,8 +22,9 @@ _MAX_CONTENT_UNWRAP_DEPTH = 8
 STREAM_PING_INTERVAL_SECONDS = 10.0
 _PING = object()
 _CLAUDE_CODE_TOOL_HINT = (
-    "Claude Code tool rules for this environment: prefer Read/Edit/Write for file operations. "
+    "Claude Code tool rules for this environment: use Edit for file writes and file creation; create files with old_string empty and new_string set to the full file content. "
     "Do not use Bash heredocs, shell redirection, or inline multi-line Python to write files; these are blocked by local safety checks. "
+    "Do not use unavailable tools such as Write unless they are explicitly listed in the available tools. "
     "After each tool result, continue the original task until all requested files, commands, and tests are complete."
 )
 
@@ -60,6 +61,29 @@ def _tool_input(arguments: object) -> dict[str, object]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _tool_names(tools: object) -> set[str]:
+    return set(tool_calls.tool_names(tools))
+
+
+def _tool_use_block(call_id: str, name: str, arguments: object, tools: object) -> dict[str, object] | None:
+    args = _tool_input(arguments)
+    available = _tool_names(tools)
+    if name == "Write" and "Write" not in available and "Edit" in available:
+        file_path = str(args.get("file_path") or "").strip()
+        content = str(args.get("content") or "")
+        if not file_path:
+            return None
+        return {
+            "type": "tool_use",
+            "id": call_id,
+            "name": "Edit",
+            "input": {"file_path": file_path, "old_string": "", "new_string": content, "replace_all": False},
+        }
+    if available and name not in available:
+        return None
+    return {"type": "tool_use", "id": call_id, "name": name, "input": args}
 
 
 def _text_from_tool_result(content: object) -> str:
@@ -316,23 +340,26 @@ def _response_parts(response: dict[str, Any]) -> tuple[list[dict[str, object]], 
             name = str(function.get("name") or call.get("name") or "")
             if not name:
                 continue
-            content.append({
-                "type": "tool_use",
-                "id": str(call.get("id") or f"toolu_{uuid.uuid4().hex}"),
-                "name": name,
-                "input": _tool_input(function.get("arguments") if "arguments" in function else call.get("arguments")),
-            })
+            block = _tool_use_block(
+                str(call.get("id") or f"toolu_{uuid.uuid4().hex}"),
+                name,
+                function.get("arguments") if "arguments" in function else call.get("arguments"),
+                response.get("_qoder_tools"),
+            )
+            if block:
+                content.append(block)
+    if any(block.get("type") == "tool_use" for block in content):
+        content = [block for block in content if block.get("type") != "text" or str(block.get("text") or "").strip()]
     text = "\n".join(str(block.get("text") or "") for block in content if block.get("type") == "text")
     parsed = tool_calls.parse_tool_calls_for_tools(text, response.get("_qoder_tools"))
     if parsed.calls:
         content = []
         for call in parsed.calls:
-            content.append({
-                "type": "tool_use",
-                "id": call.call_id,
-                "name": call.name,
-                "input": _tool_input(call.arguments),
-            })
+            block = _tool_use_block(call.call_id, call.name, call.arguments, response.get("_qoder_tools"))
+            if block:
+                content.append(block)
+        if not content:
+            return [{"type": "text", "text": ""}], "stop", response.get("usage") if isinstance(response.get("usage"), dict) else {}
         return content, "tool_calls", response.get("usage") if isinstance(response.get("usage"), dict) else {}
     return content or [{"type": "text", "text": ""}], str(choice.get("finish_reason") or ""), response.get("usage") if isinstance(response.get("usage"), dict) else {}
 

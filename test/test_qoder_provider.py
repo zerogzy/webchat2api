@@ -382,6 +382,7 @@ class QoderProviderTests(unittest.TestCase):
         system = payload["messages"][0]["content"]
         self.assertIn("You are Claude Code.", system)
         self.assertIn("Do not use Bash heredocs", system)
+        self.assertIn("use Edit for file writes", system)
         self.assertIn("After each tool result, continue the original task", system)
 
     def test_qoder_anthropic_converts_parameter_style_text_tool_call(self) -> None:
@@ -403,6 +404,35 @@ class QoderProviderTests(unittest.TestCase):
         self.assertEqual(response["stop_reason"], "tool_use")
         self.assertEqual(response["content"][0]["name"], "Bash")
         self.assertEqual(response["content"][0]["input"]["command"], "ls -la")
+
+    def test_qoder_anthropic_maps_unavailable_write_to_edit(self) -> None:
+        raw_response = {
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_write",
+                        "type": "function",
+                        "function": {"name": "Write", "arguments": json.dumps({"file_path": "todo.py", "content": "print(1)\n"})},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {},
+        }
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", return_value=raw_response):
+            response = anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "messages": [{"role": "user", "content": "write file"}],
+                "tools": [{"name": "Edit", "input_schema": {"type": "object"}}],
+            })
+
+        self.assertEqual(response["stop_reason"], "tool_use")
+        self.assertEqual(response["content"][0]["name"], "Edit")
+        self.assertEqual(response["content"][0]["input"]["file_path"], "todo.py")
+        self.assertEqual(response["content"][0]["input"]["old_string"], "")
+        self.assertEqual(response["content"][0]["input"]["new_string"], "print(1)\n")
 
 
 if __name__ == "__main__":
