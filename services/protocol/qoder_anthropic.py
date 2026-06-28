@@ -23,7 +23,7 @@ STREAM_PING_INTERVAL_SECONDS = 10.0
 _PING = object()
 _CLAUDE_CODE_TOOL_HINT = (
     "Claude Code tool rules for this environment: use Edit for file writes and file creation; create files with old_string empty and new_string set to the full file content. "
-    "If Edit reports that a file already exists, Read the file and then use Edit with an exact non-empty old_string; do not recreate the same file. "
+    "If Edit reports that a file already exists or the string to replace was not found, Read the file and then use Edit with an exact non-empty old_string; do not recreate the same file. "
     "Do not use Bash heredocs, shell redirection, or inline multi-line Python to write files; these are blocked by local safety checks. "
     "Do not use unavailable tools such as Write unless they are explicitly listed in the available tools. "
     "After each tool result, continue the original task until all requested files, commands, and tests are complete."
@@ -31,11 +31,11 @@ _CLAUDE_CODE_TOOL_HINT = (
 _EMPTY_TOOL_REPLY_RETRY = (
     "Continue the original task now. Return a tool call when the next step needs a tool; do not only describe the step. "
     "If files need to be created or changed, use the available Edit tool. "
-    "If Edit failed because a file exists, Read it and patch it with a non-empty old_string. "
+    "If Edit failed because a file exists or the string to replace was not found, Read it and patch it with a non-empty old_string. "
     "If checks are needed, use Bash only for safe read/test commands."
 )
 _INCOMPLETE_TOOL_TEXT_RE = re.compile(
-    r"\b(now\s+)?(let me(?:\s+start\s+by)?|i will|i'll|i need to)\s+(run|execute|test|check|continue|read|inspect|list|create|creating|write|edit)\b|(?:\[\{\s*$)",
+    r"\b(now\s+)?(let me(?:\s+start\s+by)?|i will|i'll|i need to)\s+(run|execute|test|check|continue|read|inspect|list|create|creating|write|edit)\b|(?:\[\{\s*$)|(?:我来|让我|让我先|先|现在|继续).{0,12}(读取|查看|运行|执行|测试|创建|修改|编辑)",
     re.IGNORECASE,
 )
 
