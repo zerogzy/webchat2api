@@ -663,8 +663,12 @@ def _infer_calls_from_json_items(items: list[Any], available_tools: list[str]) -
     available = set(available_tools)
     calls: list[ParsedToolCall] = []
     for item in items:
-        if isinstance(item, dict) and "Read" in available and isinstance(item.get("file_path"), str):
+        if not isinstance(item, dict):
+            continue
+        if "Read" in available and isinstance(item.get("file_path"), str):
             calls.append(_make_call("Read", {"file_path": item["file_path"]}))
+        if isinstance(item.get("text"), str):
+            calls.extend(_parse_function_style_calls(str(item["text"]), available_tools))
     return calls
 
 
@@ -731,13 +735,16 @@ def _parse_function_style_calls(text: str, available_tools: list[str]) -> list[P
     if not available:
         return []
     for name in sorted(available, key=len, reverse=True):
-        match = re.search(rf"(?is)(^|[^\w.\-]){re.escape(name)}\s*\((.*)\)\s*$", text)
+        match = re.search(rf"(?is)(^|[^\w.\-]){re.escape(name)}\s*\(([^)]*)\)", text)
         if not match:
             continue
         raw = match.group(2).strip()
         parsed = _parse_arguments(raw)
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict) and parsed:
             return [_make_call(name, parsed)]
+        key_values = _parse_key_value_arguments(raw)
+        if key_values:
+            return [_make_call(name, key_values)]
         if name == "Bash":
             command = _command_from_broken_json(raw) or raw
             return [_make_call(name, {"command": command})]
@@ -746,6 +753,13 @@ def _parse_function_style_calls(text: str, available_tools: list[str]) -> list[P
 
 def _has_function_style_tool_call(text: str, available_tools: list[str]) -> bool:
     return any(re.search(rf"(?is)(^|[^\w.\-]){re.escape(str(name))}\s*\(", text) for name in available_tools if name)
+
+
+def _parse_key_value_arguments(raw: str) -> dict[str, str]:
+    args: dict[str, str] = {}
+    for match in re.finditer(r"(?is)([\w.\-]+)\s*=\s*([^,]+)", raw):
+        args[match.group(1)] = match.group(2).strip().strip("\"'")
+    return args
 
 
 def _command_from_broken_json(raw: str) -> str:
