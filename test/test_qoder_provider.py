@@ -371,6 +371,19 @@ class QoderProviderTests(unittest.TestCase):
         self.assertIn({"type": "ping"}, events)
         self.assertTrue(any(event.get("type") == "content_block_delta" and event.get("delta", {}).get("text") == "OK" for event in events))
 
+    def test_qoder_anthropic_adds_claude_code_tool_hint(self) -> None:
+        payload = anthropic_v1_messages.qoder_anthropic.qoder_body({
+            "model": "al-qwen3.7-plus",
+            "system": [{"type": "text", "text": "You are Claude Code."}],
+            "messages": [{"role": "user", "content": "write a file"}],
+            "tools": [{"name": "Bash", "input_schema": {"type": "object"}}],
+        })
+
+        system = payload["messages"][0]["content"]
+        self.assertIn("You are Claude Code.", system)
+        self.assertIn("Do not use Bash heredocs", system)
+        self.assertIn("After each tool result, continue the original task", system)
+
 
 if __name__ == "__main__":
     unittest.main()

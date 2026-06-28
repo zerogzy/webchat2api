@@ -21,6 +21,11 @@ _TEXT_WRAPPER_RE = re.compile(
 _MAX_CONTENT_UNWRAP_DEPTH = 8
 STREAM_PING_INTERVAL_SECONDS = 10.0
 _PING = object()
+_CLAUDE_CODE_TOOL_HINT = (
+    "Claude Code tool rules for this environment: prefer Read/Edit/Write for file operations. "
+    "Do not use Bash heredocs, shell redirection, or inline multi-line Python to write files; these are blocked by local safety checks. "
+    "After each tool result, continue the original task until all requested files, commands, and tests are complete."
+)
 
 
 def _system_text(system: object) -> str:
@@ -136,6 +141,8 @@ def _openai_tool_choice(choice: object) -> object:
 def qoder_body(body: dict[str, Any]) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     system = _system_text(body.get("system"))
+    if body.get("tools") is not None:
+        system = "\n\n".join(part for part in (system, _CLAUDE_CODE_TOOL_HINT) if part)
     if system:
         messages.append({"role": "system", "content": system})
     raw_messages = body.get("messages")
