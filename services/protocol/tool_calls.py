@@ -158,7 +158,7 @@ def parse_tool_calls(text: str, available_tools: list[str] | None = None) -> Too
     calls = (
         _parse_xml_tool_calls(text)
         or _parse_json_envelope(text)
-        or _parse_json_array(text)
+        or _parse_json_array(text, available_tools or [])
         or _parse_alt_xml(text)
         or _parse_arg_key_value_tool_calls(text, available_tools or [])
         or _parse_parameter_style_calls(text, available_tools or [])
@@ -337,9 +337,11 @@ def _parse_json_envelope(text: str) -> list[ParsedToolCall]:
     return _calls_from_items(raw_calls) if isinstance(raw_calls, list) else []
 
 
-def _parse_json_array(text: str) -> list[ParsedToolCall]:
+def _parse_json_array(text: str, available_tools: list[str] | None = None) -> list[ParsedToolCall]:
     array = _extract_json_value(text, "[")
-    return _calls_from_items(array) if isinstance(array, list) else []
+    if not isinstance(array, list):
+        return []
+    return _calls_from_items(array) or _infer_calls_from_json_items(array, available_tools or [])
 
 
 def _parse_alt_xml(text: str) -> list[ParsedToolCall]:
@@ -654,6 +656,15 @@ def _parse_tool_element_calls(text: str, available_tools: list[str]) -> list[Par
         args = {child.group(1): _parse_xml_scalar(child.group(2)) for child in re.finditer(r"(?is)<([\w.\-]+)\b[^>]*>(.*?)</\1\s*>", match.group(2))}
         parsed = _parse_arguments(match.group(2))
         calls.append(_make_call(name, args or (parsed if isinstance(parsed, dict) else match.group(2).strip())))
+    return calls
+
+
+def _infer_calls_from_json_items(items: list[Any], available_tools: list[str]) -> list[ParsedToolCall]:
+    available = set(available_tools)
+    calls: list[ParsedToolCall] = []
+    for item in items:
+        if isinstance(item, dict) and "Read" in available and isinstance(item.get("file_path"), str):
+            calls.append(_make_call("Read", {"file_path": item["file_path"]}))
     return calls
 
 
