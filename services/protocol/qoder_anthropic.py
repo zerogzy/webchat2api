@@ -387,7 +387,11 @@ def _raw_completion_with_empty_retry(payload: dict[str, Any]) -> dict[str, Any]:
     content, finish_reason, _ = _response_parts(response)
     if not _should_retry_tool_response(content, finish_reason, payload.get("tools")):
         return response
-    retry_payload = {**payload, "messages": [*payload["messages"], {"role": "user", "content": _EMPTY_TOOL_REPLY_RETRY}]}
+    retry_payload = {
+        **payload,
+        "tool_choice": payload.get("tool_choice") or "required",
+        "messages": [*payload["messages"], {"role": "user", "content": _EMPTY_TOOL_REPLY_RETRY}],
+    }
     retry = qoder_chat.raw_chat_completion(retry_payload, retry_payload["messages"], str(retry_payload["model"]))
     if payload.get("tools") is not None:
         retry["_qoder_tools"] = payload.get("tools")

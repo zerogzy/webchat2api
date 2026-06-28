@@ -496,8 +496,10 @@ class QoderProviderTests(unittest.TestCase):
 
     def test_qoder_anthropic_retries_empty_tool_response_once(self) -> None:
         calls: list[list[dict[str, object]]] = []
+        bodies: list[dict[str, object]] = []
 
         def fake_raw(body, messages, model):
+            bodies.append(body)
             calls.append(messages)
             if len(calls) == 1:
                 return {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}], "usage": {}}
@@ -525,6 +527,7 @@ class QoderProviderTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertIn("Continue the original task", calls[1][-1]["content"])
+        self.assertEqual(bodies[1]["tool_choice"], "required")
         self.assertEqual(response["stop_reason"], "tool_use")
         self.assertEqual(response["content"][0]["name"], "Bash")
 
