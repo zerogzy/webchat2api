@@ -9,9 +9,9 @@ from collections.abc import Iterable, Iterator, Mapping
 from typing import Any
 
 from services.protocol import openai_v1_chat_complete, tool_calls
-from services.protocol import joycode_anthropic
+from services.protocol import joycode_anthropic, qoder_anthropic
 from services.protocol.conversation import count_message_tokens, count_text_tokens
-from services.providers.base import CATPAW_PROVIDER
+from services.providers.base import CATPAW_PROVIDER, QODER_PROVIDER
 from services.providers.catpaw import conversation as catpaw_conversation
 from services.providers.registry import resolve_model
 
@@ -223,6 +223,8 @@ def _openai_tool_choice(choice: object) -> object:
 
 
 def count_tokens(body: dict[str, Any]) -> dict[str, Any]:
+    if resolve_model(str(body.get("model") or "")).provider == QODER_PROVIDER:
+        return qoder_anthropic.count_tokens(body)
     payload = anthropic_to_openai_body(dict(body))
     messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
     return {"input_tokens": count_message_tokens(messages, str(payload.get("model") or "auto"))}
@@ -400,6 +402,8 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     request_model = str(body.get("model") or "auto").strip() or "auto"
     if joycode_anthropic.enabled() and joycode_anthropic.is_native_model(request_model):
         return joycode_anthropic.stream_events(body) if body.get("stream") else joycode_anthropic.non_stream_response(body)
+    if resolve_model(request_model).provider == QODER_PROVIDER:
+        return qoder_anthropic.handle(body)
     payload = anthropic_to_openai_body(dict(body))
     if payload.get("stream"):
         chunks = openai_v1_chat_complete.handle(payload)

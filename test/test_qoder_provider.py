@@ -23,7 +23,7 @@ install_pil_stub()
 install_pybase64_stub()
 install_tiktoken_stub()
 
-from services.protocol import openai_v1_chat_complete, openai_v1_models
+from services.protocol import anthropic_v1_messages, openai_v1_chat_complete, openai_v1_models
 from services.providers.base import QODER_PROVIDER
 from services.providers.qoder.accounts import normalize_account, sanitize_account
 from services.providers.qoder.client import QoderClient, QoderError
@@ -222,6 +222,136 @@ class QoderProviderTests(unittest.TestCase):
         self.assertEqual(response["choices"][0]["finish_reason"], "tool_calls")
         self.assertEqual(message["tool_calls"][0]["function"]["name"], "Read")
         self.assertEqual(json.loads(message["tool_calls"][0]["function"]["arguments"]), {"file_path": "README.md"})
+
+    def test_anthropic_messages_routes_al_model_through_qoder_bridge(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_raw(body, messages, model):
+            captured.update({"body": body, "messages": messages, "model": model})
+            return {"choices": [{"message": {"content": [{"type": "text", "text": "OK"}]}, "finish_reason": "stop"}], "usage": {}}
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", side_effect=fake_raw), \
+             mock.patch.object(anthropic_v1_messages.openai_v1_chat_complete, "handle", side_effect=AssertionError("shared bridge should not be used")):
+            response = anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "max_tokens": 32,
+                "system": [{"type": "text", "text": "You are Claude Code."}],
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+        self.assertEqual(captured["model"], "al-qwen3.7-plus")
+        self.assertEqual(captured["messages"][0], {"role": "system", "content": "You are Claude Code."})
+        self.assertEqual(response["content"], [{"type": "text", "text": "OK"}])
+
+    def test_qoder_anthropic_decodes_typed_content_json_string(self) -> None:
+        raw_response = {
+            "choices": [{
+                "message": {"content": json.dumps([{"text": "", "type": "text"}], ensure_ascii=False)},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        }
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", return_value=raw_response):
+            response = anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "messages": [{"role": "user", "content": "UI界面不好看，改得美观一些"}],
+            })
+
+        self.assertEqual(response["content"], [{"type": "text", "text": ""}])
+
+    def test_qoder_anthropic_recovers_malformed_typed_text_wrapper(self) -> None:
+        raw_response = {
+            "choices": [{
+                "message": {"content": '● [{"text":"","type":"text"}]","type":"text"}]'},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        }
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", return_value=raw_response):
+            response = anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+        self.assertEqual(response["content"], [{"type": "text", "text": ""}])
+
+    def test_qoder_anthropic_recursively_unwraps_nested_typed_text(self) -> None:
+        inner = json.dumps([{"text": "python\nprint('ok')", "type": "text"}], ensure_ascii=False)
+        outer = json.dumps([{"text": inner, "type": "text"}], ensure_ascii=False)
+        raw_response = {
+            "choices": [{
+                "message": {"content": json.dumps([{"text": outer, "type": "text"}], ensure_ascii=False)},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        }
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", return_value=raw_response):
+            response = anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+        self.assertEqual(response["content"], [{"type": "text", "text": "python\nprint('ok')"}])
+
+    def test_qoder_anthropic_unwraps_nested_typed_text_inside_noisy_wrapper(self) -> None:
+        inner = json.dumps([{"text": "python\n# ui.py", "type": "text"}], ensure_ascii=False)
+        raw_response = {
+            "choices": [{
+                "message": {"content": '● [{"text":"' + json.dumps(inner)[1:-1] + '","type":"text"}]","type":"text"}]'},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        }
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", return_value=raw_response):
+            response = anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+        self.assertEqual(response["content"], [{"type": "text", "text": "python\n# ui.py"}])
+
+    def test_qoder_anthropic_streams_tool_use_and_tool_result_roundtrip(self) -> None:
+        captured: dict[str, object] = {}
+        raw_response = {
+            "choices": [{
+                "message": {
+                    "content": [{"type": "text", "text": ""}],
+                    "tool_calls": [{
+                        "id": "call_read",
+                        "type": "function",
+                        "function": {"name": "Read", "arguments": json.dumps({"file_path": "README.md"})},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {},
+        }
+
+        def fake_raw(body, messages, model):
+            captured.update({"messages": messages})
+            return raw_response
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", side_effect=fake_raw):
+            events = list(anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "stream": True,
+                "messages": [
+                    {"role": "user", "content": "read README"},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "call_prev", "name": "Read", "input": {"file_path": "README.md"}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_prev", "content": [{"type": "text", "text": "# webchat2api"}]}]},
+                ],
+                "tools": [{"name": "Read", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}}}],
+            }))
+
+        self.assertIn({"role": "tool", "tool_call_id": "call_prev", "content": "# webchat2api"}, captured["messages"])
+        start = next(event for event in events if event.get("type") == "content_block_start" and event.get("content_block", {}).get("type") == "tool_use")
+        self.assertEqual(start["content_block"]["name"], "Read")
+        delta = next(event for event in events if event.get("type") == "content_block_delta" and event.get("delta", {}).get("type") == "input_json_delta")
+        self.assertEqual(json.loads(delta["delta"]["partial_json"]), {"file_path": "README.md"})
 
 
 if __name__ == "__main__":
