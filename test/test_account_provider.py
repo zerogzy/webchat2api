@@ -141,7 +141,7 @@ def patched_grok_app_chat_validation(events: list[dict[str, Any]] | None = None,
 from services.account_service import AccountService
 import services.account_service as account_service_module
 from services.providers import registry as provider_registry
-from services.providers.base import AccountStateDecisionInput, decide_account_state
+from services.providers.base import AccountStateDecisionInput, QODER_PROVIDER, decide_account_state
 from services.models import GEMINI_PROVIDER, GROK_PROVIDER, GPT_PROVIDER, resolve_model
 
 account_service_module.log_service.add = lambda *args, **kwargs: None
@@ -1514,6 +1514,33 @@ class AccountProviderTests(unittest.TestCase):
 
         self.assertEqual(result["removed"], 1)
         self.assertEqual(service.list_accounts(provider=GROK_PROVIDER), [])
+
+    def test_qoder_account_deletes_by_sanitized_account_id_identifier(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"provider": QODER_PROVIDER, "device_token": "dt-a", "user_id": "qoder-user-a", "machine_id": "machine-a"},
+            {"provider": QODER_PROVIDER, "device_token": "dt-b", "user_id": "qoder-user-b", "machine_id": "machine-b"},
+        ])
+
+        result = service.delete_accounts([], provider=QODER_PROVIDER, identifiers=[{"account_id": "qoder-user-a"}])
+
+        self.assertEqual(result["removed"], 1)
+        remaining = service.list_accounts(provider=QODER_PROVIDER)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["account_id"], "qoder-user-b")
+
+    def test_qoder_account_deletes_by_sanitized_row_id_identifier(self) -> None:
+        service = AccountService(MemoryStorage())
+        service.add_account_items([
+            {"provider": QODER_PROVIDER, "device_token": "dt-row", "user_id": "qoder-row-user", "machine_id": "machine-row"},
+        ])
+        [account] = service.list_accounts(provider=QODER_PROVIDER)
+        row_id = provider_registry.account_strategy(QODER_PROVIDER).sanitize_account(account)["row_id"]
+
+        result = service.delete_accounts([], provider=QODER_PROVIDER, identifiers=[{"row_id": row_id}])
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(service.list_accounts(provider=QODER_PROVIDER), [])
 
     def test_gemini_account_identifier_delete_is_provider_scoped(self) -> None:
         service = AccountService(MemoryStorage())
