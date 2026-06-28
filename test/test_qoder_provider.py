@@ -384,6 +384,26 @@ class QoderProviderTests(unittest.TestCase):
         self.assertIn("Do not use Bash heredocs", system)
         self.assertIn("After each tool result, continue the original task", system)
 
+    def test_qoder_anthropic_converts_parameter_style_text_tool_call(self) -> None:
+        raw_response = {
+            "choices": [{
+                "message": {"content": 'Bash>\n<parameter name="command">ls -la</parameter>\n<parameter=description">List files</parameter>\n</function>'},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        }
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", return_value=raw_response):
+            response = anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "messages": [{"role": "user", "content": "list files"}],
+                "tools": [{"name": "Bash", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}],
+            })
+
+        self.assertEqual(response["stop_reason"], "tool_use")
+        self.assertEqual(response["content"][0]["name"], "Bash")
+        self.assertEqual(response["content"][0]["input"]["command"], "ls -la")
+
 
 if __name__ == "__main__":
     unittest.main()

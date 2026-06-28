@@ -322,12 +322,26 @@ def _response_parts(response: dict[str, Any]) -> tuple[list[dict[str, object]], 
                 "name": name,
                 "input": _tool_input(function.get("arguments") if "arguments" in function else call.get("arguments")),
             })
+    text = "\n".join(str(block.get("text") or "") for block in content if block.get("type") == "text")
+    parsed = tool_calls.parse_tool_calls_for_tools(text, response.get("_qoder_tools"))
+    if parsed.calls:
+        content = []
+        for call in parsed.calls:
+            content.append({
+                "type": "tool_use",
+                "id": call.call_id,
+                "name": call.name,
+                "input": _tool_input(call.arguments),
+            })
+        return content, "tool_calls", response.get("usage") if isinstance(response.get("usage"), dict) else {}
     return content or [{"type": "text", "text": ""}], str(choice.get("finish_reason") or ""), response.get("usage") if isinstance(response.get("usage"), dict) else {}
 
 
 def non_stream_response(body: dict[str, Any]) -> dict[str, Any]:
     payload = qoder_body(dict(body))
     response = qoder_chat.raw_chat_completion(payload, payload["messages"], str(payload["model"]))
+    if payload.get("tools") is not None:
+        response["_qoder_tools"] = payload.get("tools")
     content, finish_reason, usage = _response_parts(response)
     text = "\n".join(str(block.get("text") or "") for block in content if block.get("type") == "text")
     return {
@@ -358,6 +372,8 @@ def stream_events(body: dict[str, Any]) -> Iterator[dict[str, object]]:
             response = item
     if response is None:
         response = {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}], "usage": {}}
+    if payload.get("tools") is not None:
+        response["_qoder_tools"] = payload.get("tools")
     content, finish_reason, usage = _response_parts(response)
     output_text: list[str] = []
     for index, block in enumerate(content):

@@ -161,6 +161,7 @@ def parse_tool_calls(text: str, available_tools: list[str] | None = None) -> Too
         or _parse_json_array(text)
         or _parse_alt_xml(text)
         or _parse_arg_key_value_tool_calls(text, available_tools or [])
+        or _parse_parameter_style_calls(text, available_tools or [])
         or _parse_loose_xml_tool_calls(text, available_tools or [])
         or _parse_tool_element_calls(text, available_tools or [])
         or _parse_tagless_tool_call_calls(text, available_tools or [])
@@ -654,6 +655,25 @@ def _parse_tool_element_calls(text: str, available_tools: list[str]) -> list[Par
         parsed = _parse_arguments(match.group(2))
         calls.append(_make_call(name, args or (parsed if isinstance(parsed, dict) else match.group(2).strip())))
     return calls
+
+
+def _parse_parameter_style_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
+    available = {tool for tool in available_tools if tool}
+    if not available:
+        return []
+    for name in sorted(available, key=len, reverse=True):
+        match = re.search(rf"(?is)(^|[^\w.\-]){re.escape(name)}\s*>\s*(.*)", text)
+        if not match:
+            continue
+        rest = match.group(2)
+        args = {}
+        for item in re.finditer(r"(?is)<parameter(?:\s+name\s*=\s*['\"]?([\w.\-]+)['\"]?|\s*=\s*['\"]?([\w.\-]+)['\"]?)['\"]?\s*>(.*?)</parameter>", rest):
+            key = item.group(1) or item.group(2)
+            if key:
+                args[key] = html.unescape(item.group(3).strip())
+        if args:
+            return [_make_call(name, args)]
+    return []
 
 
 def _parse_loose_tool_call_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
