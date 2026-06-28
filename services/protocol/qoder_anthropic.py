@@ -33,7 +33,7 @@ _EMPTY_TOOL_REPLY_RETRY = (
     "If checks are needed, use Bash only for safe read/test commands."
 )
 _INCOMPLETE_TOOL_TEXT_RE = re.compile(
-    r"\b(now\s+)?(let me|i will|i'll|i need to)\s+(run|execute|test|check|continue|read|inspect|list|create|write|edit)\b",
+    r"\b(now\s+)?(let me(?:\s+start\s+by)?|i will|i'll|i need to)\s+(run|execute|test|check|continue|read|inspect|list|create|creating|write|edit)\b|(?:\[\{\s*$)",
     re.IGNORECASE,
 )
 
