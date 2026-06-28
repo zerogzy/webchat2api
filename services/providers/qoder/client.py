@@ -212,6 +212,13 @@ def _result_text(stdout: str) -> str:
     return text
 
 
+def _is_empty_typed_text_response(response: dict[str, Any]) -> bool:
+    choices = response.get("choices") if isinstance(response, dict) else None
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    return message.get("content") == '[{"text":"","type":"text"}]' and not message.get("tool_calls")
+
+
 class QoderClient:
     def __init__(self, account: dict[str, Any], *, timeout: int = 300) -> None:
         self.account = account
@@ -407,9 +414,12 @@ class QoderClient:
         if QODER_TRANSPORT == "api":
             return self._api_chat_completion(body, messages, model)
         try:
-            return self._wasm_chat_completion(body, messages, model)
+            response = self._wasm_chat_completion(body, messages, model)
         except (QoderError, UpstreamHTTPError):
             return self._cli_response(body, messages, model)
+        if _is_empty_typed_text_response(response):
+            return self._cli_response(body, messages, model)
+        return response
 
     def _api_chat_completion(self, body: dict[str, Any], messages: list[dict[str, Any]], model: str) -> dict[str, Any]:
         aggregator = StreamAggregator()

@@ -151,6 +151,23 @@ class QoderProviderTests(unittest.TestCase):
         self.assertEqual(captured["env"]["QODERCN_PERSONAL_ACCESS_TOKEN"], "fake-qoder-pat")
         self.assertEqual(captured["env"]["NO_BROWSER"], "1")
 
+    def test_auto_transport_falls_back_to_cli_on_empty_typed_text_response(self) -> None:
+        with mock.patch("services.providers.qoder.client.create_session", return_value=FakeSession([])), \
+             mock.patch("services.providers.qoder.client.QoderClient._wasm_chat_completion", return_value={
+                 "choices": [{"message": {"role": "assistant", "content": '[{"text":"","type":"text"}]'}, "finish_reason": "stop"}],
+             }), \
+             mock.patch("services.providers.qoder.client.QoderClient._cli_response", return_value={
+                 "choices": [{"message": {"role": "assistant", "content": "continued"}, "finish_reason": "stop"}],
+             }) as cli:
+            response = QoderClient({"access_token": "qoder:abc", "pat_token": "fake-qoder-pat"}).chat_completion(
+                {"max_tokens": 8},
+                [{"role": "user", "content": "继续"}],
+                "al-qwen3.7-plus",
+            )
+
+        self.assertEqual(response["choices"][0]["message"]["content"], "continued")
+        cli.assert_called_once()
+
     def test_wasm_transport_invokes_node_helper_and_aggregates_chunks(self) -> None:
         stdout = "\n".join([
             json.dumps({"id": "chatcmpl-wasm", "model": "qmodel", "choices": [{"delta": {"content": "O"}, "finish_reason": None}]}),
