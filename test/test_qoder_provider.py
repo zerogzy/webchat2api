@@ -382,6 +382,7 @@ class QoderProviderTests(unittest.TestCase):
         system = payload["messages"][0]["content"]
         self.assertIn("You are Claude Code.", system)
         self.assertIn("Do not use Bash heredocs", system)
+        self.assertIn("non-empty command", system)
         self.assertIn("use Edit for file writes", system)
         self.assertIn("file already exists", system)
         self.assertIn("string to replace was not found", system)

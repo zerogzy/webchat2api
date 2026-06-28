@@ -25,6 +25,7 @@ _CLAUDE_CODE_TOOL_HINT = (
     "Claude Code tool rules for this environment: use Edit for file writes and file creation; create files with old_string empty and new_string set to the full file content. "
     "If Edit reports that a file already exists or the string to replace was not found, Read the file and then use Edit with an exact non-empty old_string; do not recreate the same file. "
     "Do not use Bash heredocs, shell redirection, or inline multi-line Python to write files; these are blocked by local safety checks. "
+    "Bash calls must include a non-empty command string; never send an empty Bash call. "
     "Do not use unavailable tools such as Write unless they are explicitly listed in the available tools. "
     "After each tool result, continue the original task until all requested files, commands, and tests are complete."
 )
