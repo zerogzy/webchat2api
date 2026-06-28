@@ -139,14 +139,22 @@ def _openai_tool_choice(choice: object) -> object:
 
 def qoder_body(body: dict[str, Any]) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
+    system_parts: list[str] = []
     system = _system_text(body.get("system"))
     if system:
-        messages.append({"role": "system", "content": system})
+        system_parts.append(system)
     raw_messages = body.get("messages")
     if isinstance(raw_messages, list):
         for message in raw_messages:
             if isinstance(message, dict):
+                if str(message.get("role") or "") == "system":
+                    text = _system_text(message.get("content"))
+                    if text:
+                        system_parts.append(text)
+                    continue
                 messages.extend(_message_to_qoder(message))
+    if system_parts:
+        messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
     payload: dict[str, Any] = {
         "model": str(body.get("model") or "auto").strip() or "auto",
         "messages": messages,

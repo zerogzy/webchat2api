@@ -381,6 +381,22 @@ class QoderProviderTests(unittest.TestCase):
 
         self.assertEqual(payload["messages"][0], {"role": "system", "content": "You are Claude Code."})
 
+    def test_qoder_anthropic_hoists_mid_conversation_system_messages(self) -> None:
+        payload = anthropic_v1_messages.qoder_anthropic.qoder_body({
+            "model": "al-qwen3.7-plus",
+            "system": [{"type": "text", "text": "top system"}],
+            "messages": [
+                {"role": "user", "content": "start"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "call_write", "name": "Write", "input": {"file_path": "ui.py"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_write", "content": [{"type": "text", "text": "updated"}]}]},
+                {"role": "system", "content": [{"type": "text", "text": "mid reminder"}]},
+                {"role": "user", "content": "继续"},
+            ],
+        })
+
+        self.assertEqual(payload["messages"][0], {"role": "system", "content": "top system\n\nmid reminder"})
+        self.assertEqual([message["role"] for message in payload["messages"][1:]], ["user", "assistant", "tool", "user"])
+
     def test_qoder_anthropic_returns_text_tool_syntax_as_text(self) -> None:
         raw_response = {
             "choices": [{
