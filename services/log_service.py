@@ -196,6 +196,17 @@ class LoggedCall:
             return _protocol_error_response(exc, 502, sse)
 
         if isinstance(result, dict):
+            from services.raw_debug_log import raw_debug_log
+
+            raw_debug_log(
+                "API response body",
+                {
+                    "endpoint": self.endpoint,
+                    "model": self.model,
+                    "request_text": self.request_text,
+                    "response": result,
+                },
+            )
             self.log("调用完成", result)
             return result
 
@@ -221,6 +232,17 @@ class LoggedCall:
         failed = False
         try:
             for item in items:
+                from services.raw_debug_log import raw_debug_log
+
+                raw_debug_log(
+                    "API stream chunk",
+                    {
+                        "endpoint": self.endpoint,
+                        "model": self.model,
+                        "request_text": self.request_text,
+                        "chunk": item,
+                    },
+                )
                 urls.extend(_collect_urls(item))
                 yield item
         except Exception as exc:

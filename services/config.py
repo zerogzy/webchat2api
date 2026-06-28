@@ -50,6 +50,7 @@ PERSISTENT_CONFIG_KEYS = {
     "auto_remove_invalid_accounts",
     "auto_remove_rate_limited_accounts",
     "show_search_sources",
+    "raw_debug_logging",
     "log_levels",
     "sensitive_words",
     "ai_review",
@@ -440,6 +441,10 @@ class ConfigStore:
         return bool(value)
 
     @property
+    def raw_debug_logging(self) -> bool:
+        return _normalize_bool(self.data.get("raw_debug_logging"), False)
+
+    @property
     def log_levels(self) -> list[str]:
         levels = self.data.get("log_levels")
         if not isinstance(levels, list):
@@ -531,6 +536,7 @@ class ConfigStore:
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["show_search_sources"] = self.show_search_sources
+        data["raw_debug_logging"] = self.raw_debug_logging
         data["log_levels"] = self.log_levels
         data["sensitive_words"] = self.sensitive_words
         data["ai_review"] = self.ai_review

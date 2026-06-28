@@ -14,9 +14,35 @@ def _account_for_chat() -> dict[str, Any]:
 
 def raw_chat_completion(body: dict[str, Any], messages: list[dict[str, Any]], model: str) -> dict[str, Any]:
     from services.providers.qoder.client import QoderClient
+    from services.raw_debug_log import raw_debug_log
 
     with QoderClient(_account_for_chat()) as client:
-        return client.chat_completion(body, messages, model)
+        try:
+            response = client.chat_completion(body, messages, model)
+        except Exception as exc:
+            raw_debug_log(
+                "Qoder raw completion failed",
+                {
+                    "provider": "qoder",
+                    "model": model,
+                    "body": body,
+                    "messages": messages,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            raise
+        raw_debug_log(
+            "Qoder raw completion",
+            {
+                "provider": "qoder",
+                "model": model,
+                "body": body,
+                "messages": messages,
+                "response": response,
+            },
+        )
+        return response
 
 
 def chat_completion(body: dict[str, Any], messages: list[dict[str, Any]], model: str, backend: Any = None) -> str:
