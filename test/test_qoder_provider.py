@@ -468,6 +468,40 @@ class QoderProviderTests(unittest.TestCase):
         self.assertEqual(response["stop_reason"], "tool_use")
         self.assertEqual(response["content"][0]["name"], "Bash")
 
+    def test_qoder_anthropic_retries_described_tool_step_once(self) -> None:
+        calls: list[list[dict[str, object]]] = []
+
+        def fake_raw(body, messages, model):
+            calls.append(messages)
+            if len(calls) == 1:
+                return {"choices": [{"message": {"content": "Now let me run the tests.\n"}, "finish_reason": "stop"}], "usage": {}}
+            return {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_bash",
+                            "type": "function",
+                            "function": {"name": "Bash", "arguments": json.dumps({"command": "python3 test_todo_stats.py"})},
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {},
+            }
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", side_effect=fake_raw):
+            response = anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "messages": [{"role": "user", "content": "finish task"}],
+                "tools": [{"name": "Bash", "input_schema": {"type": "object"}}],
+            })
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("Return a tool call", calls[1][-1]["content"])
+        self.assertEqual(response["stop_reason"], "tool_use")
+        self.assertEqual(response["content"][0]["name"], "Bash")
+
 
 if __name__ == "__main__":
     unittest.main()

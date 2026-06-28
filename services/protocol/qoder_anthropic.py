@@ -28,9 +28,13 @@ _CLAUDE_CODE_TOOL_HINT = (
     "After each tool result, continue the original task until all requested files, commands, and tests are complete."
 )
 _EMPTY_TOOL_REPLY_RETRY = (
-    "Continue the original task now. Do not return an empty response. "
+    "Continue the original task now. Return a tool call when the next step needs a tool; do not only describe the step. "
     "If files need to be created or changed, use the available Edit tool. "
     "If checks are needed, use Bash only for safe read/test commands."
+)
+_INCOMPLETE_TOOL_TEXT_RE = re.compile(
+    r"\b(now\s+)?(let me|i will|i'll|i need to)\s+(run|execute|test|check|continue|read|inspect|list|create|write|edit)\b",
+    re.IGNORECASE,
 )
 
 
@@ -369,10 +373,11 @@ def _response_parts(response: dict[str, Any]) -> tuple[list[dict[str, object]], 
     return content or [{"type": "text", "text": ""}], str(choice.get("finish_reason") or ""), response.get("usage") if isinstance(response.get("usage"), dict) else {}
 
 
-def _is_empty_tool_response(content: list[dict[str, object]], finish_reason: str, tools: object) -> bool:
+def _should_retry_tool_response(content: list[dict[str, object]], finish_reason: str, tools: object) -> bool:
     if not _tool_names(tools) or finish_reason == "tool_calls":
         return False
-    return not any(str(block.get("text") or "").strip() for block in content if block.get("type") == "text")
+    text = "\n".join(str(block.get("text") or "") for block in content if block.get("type") == "text").strip()
+    return not text or bool(_INCOMPLETE_TOOL_TEXT_RE.search(text))
 
 
 def _raw_completion_with_empty_retry(payload: dict[str, Any]) -> dict[str, Any]:
@@ -380,7 +385,7 @@ def _raw_completion_with_empty_retry(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("tools") is not None:
         response["_qoder_tools"] = payload.get("tools")
     content, finish_reason, _ = _response_parts(response)
-    if not _is_empty_tool_response(content, finish_reason, payload.get("tools")):
+    if not _should_retry_tool_response(content, finish_reason, payload.get("tools")):
         return response
     retry_payload = {**payload, "messages": [*payload["messages"], {"role": "user", "content": _EMPTY_TOOL_REPLY_RETRY}]}
     retry = qoder_chat.raw_chat_completion(retry_payload, retry_payload["messages"], str(retry_payload["model"]))
