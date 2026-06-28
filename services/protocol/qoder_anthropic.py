@@ -27,6 +27,11 @@ _CLAUDE_CODE_TOOL_HINT = (
     "Do not use unavailable tools such as Write unless they are explicitly listed in the available tools. "
     "After each tool result, continue the original task until all requested files, commands, and tests are complete."
 )
+_EMPTY_TOOL_REPLY_RETRY = (
+    "Continue the original task now. Do not return an empty response. "
+    "If files need to be created or changed, use the available Edit tool. "
+    "If checks are needed, use Bash only for safe read/test commands."
+)
 
 
 def _system_text(system: object) -> str:
@@ -364,11 +369,29 @@ def _response_parts(response: dict[str, Any]) -> tuple[list[dict[str, object]], 
     return content or [{"type": "text", "text": ""}], str(choice.get("finish_reason") or ""), response.get("usage") if isinstance(response.get("usage"), dict) else {}
 
 
-def non_stream_response(body: dict[str, Any]) -> dict[str, Any]:
-    payload = qoder_body(dict(body))
+def _is_empty_tool_response(content: list[dict[str, object]], finish_reason: str, tools: object) -> bool:
+    if not _tool_names(tools) or finish_reason == "tool_calls":
+        return False
+    return not any(str(block.get("text") or "").strip() for block in content if block.get("type") == "text")
+
+
+def _raw_completion_with_empty_retry(payload: dict[str, Any]) -> dict[str, Any]:
     response = qoder_chat.raw_chat_completion(payload, payload["messages"], str(payload["model"]))
     if payload.get("tools") is not None:
         response["_qoder_tools"] = payload.get("tools")
+    content, finish_reason, _ = _response_parts(response)
+    if not _is_empty_tool_response(content, finish_reason, payload.get("tools")):
+        return response
+    retry_payload = {**payload, "messages": [*payload["messages"], {"role": "user", "content": _EMPTY_TOOL_REPLY_RETRY}]}
+    retry = qoder_chat.raw_chat_completion(retry_payload, retry_payload["messages"], str(retry_payload["model"]))
+    if payload.get("tools") is not None:
+        retry["_qoder_tools"] = payload.get("tools")
+    return retry
+
+
+def non_stream_response(body: dict[str, Any]) -> dict[str, Any]:
+    payload = qoder_body(dict(body))
+    response = _raw_completion_with_empty_retry(payload)
     content, finish_reason, usage = _response_parts(response)
     text = "\n".join(str(block.get("text") or "") for block in content if block.get("type") == "text")
     return {
@@ -399,8 +422,6 @@ def stream_events(body: dict[str, Any]) -> Iterator[dict[str, object]]:
             response = item
     if response is None:
         response = {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}], "usage": {}}
-    if payload.get("tools") is not None:
-        response["_qoder_tools"] = payload.get("tools")
     content, finish_reason, usage = _response_parts(response)
     output_text: list[str] = []
     for index, block in enumerate(content):
@@ -426,7 +447,7 @@ def _completion_with_ping(payload: dict[str, Any]) -> Iterator[dict[str, Any] | 
 
     def produce() -> None:
         try:
-            response = qoder_chat.raw_chat_completion(payload, payload["messages"], str(payload["model"]))
+            response = _raw_completion_with_empty_retry(payload)
             items.put(("response", response))
         except Exception as exc:
             items.put(("error", exc))
