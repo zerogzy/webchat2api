@@ -291,12 +291,12 @@ class AccountExportTests(unittest.TestCase):
     def test_account_txt_content_includes_key_only_provider_tokens(self) -> None:
         content = AccountService.build_export_text(
             [
-                {"provider": "qoder", "pat_token": "pt-qoder"},
+                {"provider": "qoder", "device_token": "dt-qoder"},
                 {"provider": "codebuddy", "bearer_token": "ck-codebuddy"},
             ]
         )
 
-        self.assertEqual(content, "pt-qoder\nck-codebuddy\n")
+        self.assertEqual(content, "dt-qoder\nck-codebuddy\n")
 
     def test_export_filename_for_provider(self) -> None:
         api_stub = types.ModuleType("api")

@@ -1340,7 +1340,7 @@ class AccountService:
 
     @staticmethod
     def build_export_text(items: list[dict[str, str]]) -> str:
-        lines = [credential for item in items if (credential := _clean_string(item.get("access_token") or item.get("sso") or item.get("pat_token") or item.get("bearer_token")))]
+        lines = [credential for item in items if (credential := _clean_string(item.get("access_token") or item.get("sso") or item.get("device_token") or item.get("pat_token") or item.get("bearer_token")))]
         return "\n".join(lines) + ("\n" if lines else "")
 
 

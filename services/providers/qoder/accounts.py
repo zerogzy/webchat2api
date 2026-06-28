@@ -5,26 +5,51 @@ from typing import Any
 
 UNAVAILABLE_STATUSES = {"禁用", "异常", "限流", "disabled", "unauthorized", "rate_limited", "expired"}
 AUTH_FAILURE_MARKERS = ("auth", "unauthorized", "forbidden", "invalid", "expired", "credential", "token")
-SECRET_KEYS = ("pat_token", "access_token", "accessToken", "token")
+SECRET_KEYS = ("device_token", "pat_token", "access_token", "accessToken", "token")
 
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _json_item(value: str) -> dict[str, Any]:
+    import json
+
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _source(item: dict[str, Any]) -> dict[str, Any]:
+    text = _clean(item.get("access_token") or item.get("token"))
+    parsed = _json_item(text)
+    if parsed:
+        return {**item, **parsed}
+    if "," in text:
+        parts = [part.strip() for part in text.split(",")]
+        if len(parts) >= 3:
+            return {**item, "device_token": parts[0], "user_id": parts[1], "machine_id": parts[2]}
+    return item
+
+
 def normalize_access_token(item: dict[str, Any]) -> str:
-    return _clean(item.get("account_id") or item.get("user_id") or item.get("pat_token") or item.get("access_token") or item.get("token"))
+    source = _source(item)
+    return _clean(source.get("account_id") or source.get("user_id") or source.get("device_token") or source.get("pat_token") or source.get("access_token") or source.get("token"))
 
 
 def normalize_account(account: dict[str, Any]) -> dict[str, Any]:
-    token = _clean(account.get("pat_token") or account.get("access_token") or account.get("token"))
+    account.update(_source(account))
+    token = _clean(account.get("device_token") or account.get("access_token") or account.get("token") or account.get("pat_token"))
     identity = _clean(account.get("account_id") or account.get("user_id"))
     if not identity and token:
         identity = "qoder:" + hashlib.sha256(token.encode()).hexdigest()[:16]
     account["access_token"] = identity
     account["account_id"] = _clean(account.get("account_id")) or identity
     account["user_id"] = _clean(account.get("user_id"))
-    account["pat_token"] = token
+    account["device_token"] = token
+    account["machine_id"] = _clean(account.get("machine_id"))
     account["type"] = "qoder"
     account.setdefault("status", "正常")
     return account
@@ -39,7 +64,7 @@ def sanitize_account(item: dict[str, Any]) -> dict[str, Any]:
     account = dict(item)
     for key in SECRET_KEYS:
         account.pop(key, None)
-    account["has_pat_token"] = bool(_clean(item.get("pat_token")))
+    account["has_device_token"] = bool(_clean(item.get("device_token") or item.get("pat_token")))
     if row_id := account_row_id(item):
         account["row_id"] = row_id
     return account
@@ -47,7 +72,7 @@ def sanitize_account(item: dict[str, Any]) -> dict[str, Any]:
 
 def delete_token_matches_account(token: str, account: dict[str, Any]) -> bool:
     text = _clean(token)
-    return text in {normalize_access_token(account), _clean(account.get("pat_token")), _clean(account.get("user_id"))}
+    return text in {normalize_access_token(account), _clean(account.get("device_token")), _clean(account.get("pat_token")), _clean(account.get("user_id"))}
 
 
 def supports_refresh(account: dict[str, Any]) -> bool:
@@ -71,10 +96,10 @@ def export_filename() -> str:
 
 
 def build_export_item(account: dict[str, Any]) -> dict[str, str] | None:
-    token = _clean(account.get("pat_token"))
+    token = _clean(account.get("device_token") or account.get("pat_token"))
     if not token:
         return None
-    return {"provider": "qoder", "pat_token": token, "user_id": _clean(account.get("user_id"))}
+    return {"provider": "qoder", "device_token": token, "user_id": _clean(account.get("user_id")), "machine_id": _clean(account.get("machine_id"))}
 
 
 def is_auth_failure_payload(payload: Any) -> bool:
@@ -107,7 +132,7 @@ def requested_tiers(spec: Any) -> list[str]:
 
 
 def account_has_capability(account: dict[str, Any], spec: Any) -> bool:
-    return bool(_clean(account.get("pat_token")))
+    return bool(_clean(account.get("device_token") or account.get("pat_token")) and _clean(account.get("user_id")))
 
 
 def tier_matches(account_tier: str, requested_tier: str) -> bool:

@@ -61,11 +61,6 @@ class FakeSession:
 
 
 class QoderProviderTests(unittest.TestCase):
-    def setUp(self) -> None:
-        from services.providers.qoder import client
-
-        client._TOKEN_CACHE.clear()
-
     def test_model_routes_to_qoder_with_al_prefix(self) -> None:
         spec = resolve_model("al-qwen3.7-plus")
 
@@ -73,14 +68,21 @@ class QoderProviderTests(unittest.TestCase):
         self.assertEqual(spec.upstream_model, "qmodel")
         self.assertEqual(normalize_account_provider("al"), QODER_PROVIDER)
 
-    def test_account_sanitization_hides_pat_token(self) -> None:
-        account = normalize_account({"provider": "qoder", "access_token": "fake-qoder-pat"})
+    def test_account_sanitization_hides_device_token(self) -> None:
+        account = normalize_account({"provider": "qoder", "access_token": "dt-token", "user_id": "u1", "machine_id": "m1"})
 
-        self.assertEqual(account["pat_token"], "fake-qoder-pat")
+        self.assertEqual(account["device_token"], "dt-token")
         sanitized = sanitize_account(account)
-        self.assertNotIn("pat_token", sanitized)
-        self.assertNotIn("fake-qoder-pat", str(sanitized))
-        self.assertTrue(sanitized["has_pat_token"])
+        self.assertNotIn("device_token", sanitized)
+        self.assertNotIn("dt-token", str(sanitized))
+        self.assertTrue(sanitized["has_device_token"])
+
+    def test_account_accepts_json_device_token_import(self) -> None:
+        account = normalize_account({"provider": "qoder", "access_token": json.dumps({"device_token": "dt-token", "user_id": "u1", "machine_id": "m1"})})
+
+        self.assertEqual(account["access_token"], "u1")
+        self.assertEqual(account["device_token"], "dt-token")
+        self.assertEqual(account["machine_id"], "m1")
 
     def test_models_list_includes_al_models(self) -> None:
         result = openai_v1_models.list_models()
@@ -94,123 +96,30 @@ class QoderProviderTests(unittest.TestCase):
         self.assertNotIn("al-kimi-k2.7-code", models)
         self.assertNotIn("al-minimax-m3", models)
 
-    def test_client_uses_pat_token_exchange_and_direct_chat_api(self) -> None:
+    def test_client_uses_qoder_cosy_sse_api(self) -> None:
+        first = {"id": "chatcmpl-test", "model": "qmodel", "choices": [{"delta": {"content": "OK"}, "finish_reason": None}]}
+        last = {"id": "chatcmpl-test", "model": "qmodel", "choices": [{"delta": {}, "finish_reason": "stop"}]}
         session = FakeSession([
-            FakeResponse(payload={"token": "fake-job-token"}),
             FakeResponse(lines=[
-                'data: {"id":"chatcmpl-test","model":"qmodel","choices":[{"delta":{"content":"OK"},"finish_reason":null}]}',
-                'data: {"id":"chatcmpl-test","model":"qmodel","choices":[{"delta":{},"finish_reason":"stop"}]}',
-                "data: [DONE]",
+                "data: " + json.dumps({"statusCodeValue": 200, "body": json.dumps(first)}),
+                "data: " + json.dumps({"statusCodeValue": 200, "body": json.dumps(last)}),
             ]),
         ])
 
         with mock.patch("services.providers.qoder.client.create_session", return_value=session), \
-             mock.patch("services.providers.qoder.client.QODER_TRANSPORT", "api"):
-            response = QoderClient({"access_token": "qoder:abc", "pat_token": "fake-qoder-pat"}).chat_completion(
+             mock.patch("services.providers.qoder.model_catalog.create_session", return_value=FakeSession([])), \
+             mock.patch("services.providers.qoder.client.get_model_config", return_value={"key": "qmodel", "is_reasoning": False, "max_output_tokens": 8192}), \
+             mock.patch("services.providers.qoder.client.build_cosy_headers", return_value={"Authorization": "Bearer COSY.x"}):
+            response = QoderClient({"access_token": "u1", "device_token": "dt-token", "user_id": "u1", "machine_id": "m1"}).chat_completion(
                 {"max_tokens": 8, "tools": [{"type": "function", "function": {"name": "Read"}}]},
-                [{"role": "user", "content": "hello"}],
+                [{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}],
                 "al-qwen3.7-plus",
             )
 
         self.assertEqual(response["choices"][0]["message"]["content"], "OK")
-        self.assertEqual(session.posts[0]["url"], "https://openapi.qoder.com.cn/api/v1/jobToken/exchange")
-        self.assertEqual(session.posts[0]["json"], {"personal_token": "fake-qoder-pat"})
-        self.assertEqual(session.posts[1]["url"], "https://gateway.qoder.com.cn/model/v1/chat/completions")
-        self.assertEqual(session.posts[1]["headers"]["Authorization"], "Bearer fake-job-token")
-        chat_body = session.posts[1]["json"]
-        self.assertEqual(chat_body["model"], "qmodel")
-        self.assertEqual(chat_body["messages"], [{"role": "user", "content": "hello"}])
-        self.assertEqual(chat_body["stream"], True)
-        self.assertEqual(chat_body["stream_options"], {"include_usage": True})
-        self.assertEqual(chat_body["metadata"]["context"]["client_type"], "5")
-        self.assertEqual(chat_body["tools"][0]["function"]["name"], "Read")
-
-    def test_auto_transport_falls_back_to_cli_when_direct_api_is_unavailable(self) -> None:
-        captured: dict[str, object] = {}
-
-        def fake_run(cmd, capture_output, text, timeout, env):
-            captured.update({"cmd": cmd, "env": env, "timeout": timeout})
-            return types.SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps({"result": "OK", "is_error": False}),
-                stderr="",
-            )
-
-        with mock.patch("services.providers.qoder.client.create_session", return_value=FakeSession([])), \
-             mock.patch("services.providers.qoder.client.QoderClient._wasm_chat_completion", side_effect=QoderError("wasm unavailable")), \
-             mock.patch("services.providers.qoder.client.shutil.which", return_value="/usr/bin/qoderclicn"), \
-             mock.patch("services.providers.qoder.client.subprocess.run", side_effect=fake_run):
-            response = QoderClient({"access_token": "qoder:abc", "pat_token": "fake-qoder-pat"}).chat_completion(
-                {"max_tokens": 8},
-                [{"role": "user", "content": "hello"}],
-                "al-qwen3.7-plus",
-            )
-
-        self.assertEqual(response["choices"][0]["message"]["content"], "OK")
-        self.assertEqual(captured["cmd"][:8], ["/usr/bin/qoderclicn", "--bare", "-p", "--tools", "", "--model", "Qwen3.7-Plus", "--output-format"])
-        self.assertEqual(captured["env"]["QODERCN_PERSONAL_ACCESS_TOKEN"], "fake-qoder-pat")
-        self.assertEqual(captured["env"]["NO_BROWSER"], "1")
-
-    def test_auto_transport_falls_back_to_cli_on_empty_typed_text_response(self) -> None:
-        with mock.patch("services.providers.qoder.client.create_session", return_value=FakeSession([])), \
-             mock.patch("services.providers.qoder.client.QoderClient._wasm_chat_completion", return_value={
-                 "choices": [{"message": {"role": "assistant", "content": '[{"text":"","type":"text"}]'}, "finish_reason": "stop"}],
-             }), \
-             mock.patch("services.providers.qoder.client.QoderClient._cli_response", return_value={
-                 "choices": [{"message": {"role": "assistant", "content": "continued"}, "finish_reason": "stop"}],
-             }) as cli:
-            response = QoderClient({"access_token": "qoder:abc", "pat_token": "fake-qoder-pat"}).chat_completion(
-                {"max_tokens": 8},
-                [{"role": "user", "content": "继续"}],
-                "al-qwen3.7-plus",
-            )
-
-        self.assertEqual(response["choices"][0]["message"]["content"], "continued")
-        cli.assert_called_once()
-
-    def test_wasm_transport_invokes_node_helper_and_aggregates_chunks(self) -> None:
-        stdout = "\n".join([
-            json.dumps({"id": "chatcmpl-wasm", "model": "qmodel", "choices": [{"delta": {"content": "O"}, "finish_reason": None}]}),
-            json.dumps({"id": "chatcmpl-wasm", "model": "qmodel", "choices": [{"delta": {"content": "K"}, "finish_reason": None}]}),
-            json.dumps({"id": "chatcmpl-wasm", "model": "qmodel", "choices": [{"delta": {}, "finish_reason": "stop"}]}),
-        ])
-        captured: dict[str, object] = {}
-
-        def fake_run(cmd, input, capture_output, text, timeout, env):
-            captured.update({"cmd": cmd, "input": json.loads(input), "env": env, "timeout": timeout})
-            return types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
-
-        with mock.patch("services.providers.qoder.client.create_session", return_value=FakeSession([])), \
-             mock.patch("services.providers.qoder.client.shutil.which", return_value="/usr/bin/node"), \
-             mock.patch("services.providers.qoder.client.subprocess.run", side_effect=fake_run), \
-             mock.patch("services.providers.qoder.client.QODER_TRANSPORT", "wasm"):
-            response = QoderClient({"access_token": "qoder:abc", "pat_token": "fake-qoder-pat"}).chat_completion(
-                {"max_tokens": 8},
-                [{"role": "user", "content": "hello"}],
-                "al-qwen3.7-plus",
-            )
-
-        self.assertEqual(response["choices"][0]["message"]["content"], "OK")
-        self.assertEqual(captured["cmd"][0], "/usr/bin/node")
-        self.assertEqual(captured["input"]["pat_token"], "fake-qoder-pat")
-        self.assertEqual(captured["input"]["upstream_model"], "qmodel")
-        self.assertNotIn("fake-qoder-pat", captured["cmd"])
-
-    def test_cli_fallback_tool_json_is_converted_to_native_tool_calls(self) -> None:
-        tool_json = json.dumps({"status": "call", "tool_calls": [{"name": "Read", "arguments": {"file_path": "README.md"}}]})
-        with mock.patch("services.providers.qoder.client.QoderClient._cli_chat_text", return_value=tool_json), \
-             mock.patch("services.providers.qoder.client.create_session", return_value=FakeSession([])), \
-             mock.patch("services.providers.qoder.client.QODER_TRANSPORT", "cli"):
-            response = QoderClient({"access_token": "qoder:abc", "pat_token": "fake-qoder-pat"}).chat_completion(
-                {"tools": [{"type": "function", "function": {"name": "Read", "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}}}]},
-                [{"role": "user", "content": "read README"}],
-                "al-qwen3.7-plus",
-            )
-
-        message = response["choices"][0]["message"]
-        self.assertEqual(response["choices"][0]["finish_reason"], "tool_calls")
-        self.assertEqual(message["tool_calls"][0]["function"]["name"], "Read")
-        self.assertEqual(json.loads(message["tool_calls"][0]["function"]["arguments"]), {"file_path": "README.md"})
+        self.assertIn("api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation", session.posts[0]["url"])
+        self.assertEqual(session.posts[0]["headers"]["Authorization"], "Bearer COSY.x")
+        self.assertIsInstance(session.posts[0].get("data"), bytes)
 
     def test_qoder_native_tool_calls_are_returned_to_openai_client(self) -> None:
         body = {
