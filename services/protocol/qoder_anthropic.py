@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
+import threading
 import time
 import uuid
 from collections.abc import Iterator, Mapping
@@ -17,6 +19,8 @@ _TEXT_WRAPPER_RE = re.compile(
     r'|\{[^{}]*"type"\s*:\s*"text"[^{}]*"text"\s*:\s*"((?:\\.|[^"\\])*)"[^{}]*\}'
 )
 _MAX_CONTENT_UNWRAP_DEPTH = 8
+STREAM_PING_INTERVAL_SECONDS = 10.0
+_PING = object()
 
 
 def _system_text(system: object) -> str:
@@ -336,12 +340,19 @@ def non_stream_response(body: dict[str, Any]) -> dict[str, Any]:
 
 def stream_events(body: dict[str, Any]) -> Iterator[dict[str, object]]:
     payload = qoder_body({**body, "stream": False})
-    response = qoder_chat.raw_chat_completion(payload, payload["messages"], str(payload["model"]))
-    content, finish_reason, usage = _response_parts(response)
     message_id = f"msg_{uuid.uuid4()}"
-    input_tokens = int(usage.get("prompt_tokens") or count_message_tokens(payload["messages"], str(payload["model"])))
-    output_text: list[str] = []
+    input_tokens = count_message_tokens(payload["messages"], str(payload["model"]))
     yield {"type": "message_start", "message": {"id": message_id, "type": "message", "role": "assistant", "model": str(body.get("model") or payload["model"]), "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": input_tokens, "output_tokens": 0}}}
+    response: dict[str, Any] | None = None
+    for item in _completion_with_ping(payload):
+        if item is _PING:
+            yield {"type": "ping"}
+        else:
+            response = item
+    if response is None:
+        response = {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}], "usage": {}}
+    content, finish_reason, usage = _response_parts(response)
+    output_text: list[str] = []
     for index, block in enumerate(content):
         if block.get("type") == "tool_use":
             input_json = json.dumps(block.get("input") if isinstance(block.get("input"), dict) else {}, ensure_ascii=False)
@@ -358,6 +369,30 @@ def stream_events(body: dict[str, Any]) -> Iterator[dict[str, object]]:
     output_tokens = int(usage.get("completion_tokens") or count_text_tokens("\n".join(output_text), str(payload["model"])))
     yield {"type": "message_delta", "delta": {"stop_reason": _anthropic_stop_reason(finish_reason), "stop_sequence": None}, "usage": {"output_tokens": output_tokens}}
     yield {"type": "message_stop"}
+
+
+def _completion_with_ping(payload: dict[str, Any]) -> Iterator[dict[str, Any] | object]:
+    items: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    def produce() -> None:
+        try:
+            response = qoder_chat.raw_chat_completion(payload, payload["messages"], str(payload["model"]))
+            items.put(("response", response))
+        except Exception as exc:
+            items.put(("error", exc))
+
+    threading.Thread(target=produce, daemon=True).start()
+    interval = max(float(STREAM_PING_INTERVAL_SECONDS), 0.001)
+    while True:
+        try:
+            kind, value = items.get(timeout=interval)
+        except queue.Empty:
+            yield _PING
+            continue
+        if kind == "error":
+            raise value
+        yield value if isinstance(value, dict) else {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}], "usage": {}}
+        return
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, object]]:

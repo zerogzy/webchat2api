@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import types
 import unittest
 from unittest import mock
@@ -352,6 +353,23 @@ class QoderProviderTests(unittest.TestCase):
         self.assertEqual(start["content_block"]["name"], "Read")
         delta = next(event for event in events if event.get("type") == "content_block_delta" and event.get("delta", {}).get("type") == "input_json_delta")
         self.assertEqual(json.loads(delta["delta"]["partial_json"]), {"file_path": "README.md"})
+
+    def test_qoder_anthropic_stream_pings_while_waiting_for_full_response(self) -> None:
+        def fake_raw(body, messages, model):
+            time.sleep(0.03)
+            return {"choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}], "usage": {}}
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic, "STREAM_PING_INTERVAL_SECONDS", 0.01), \
+             mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", side_effect=fake_raw):
+            events = list(anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "stream": True,
+                "messages": [{"role": "user", "content": "slow task"}],
+            }))
+
+        self.assertEqual(events[0]["type"], "message_start")
+        self.assertIn({"type": "ping"}, events)
+        self.assertTrue(any(event.get("type") == "content_block_delta" and event.get("delta", {}).get("text") == "OK" for event in events))
 
 
 if __name__ == "__main__":
