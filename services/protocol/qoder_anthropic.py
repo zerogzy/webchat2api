@@ -23,6 +23,7 @@ STREAM_PING_INTERVAL_SECONDS = 10.0
 _PING = object()
 _CLAUDE_CODE_TOOL_HINT = (
     "Claude Code tool rules for this environment: use Edit for file writes and file creation; create files with old_string empty and new_string set to the full file content. "
+    "If Edit reports that a file already exists, Read the file and then use Edit with an exact non-empty old_string; do not recreate the same file. "
     "Do not use Bash heredocs, shell redirection, or inline multi-line Python to write files; these are blocked by local safety checks. "
     "Do not use unavailable tools such as Write unless they are explicitly listed in the available tools. "
     "After each tool result, continue the original task until all requested files, commands, and tests are complete."
@@ -30,6 +31,7 @@ _CLAUDE_CODE_TOOL_HINT = (
 _EMPTY_TOOL_REPLY_RETRY = (
     "Continue the original task now. Return a tool call when the next step needs a tool; do not only describe the step. "
     "If files need to be created or changed, use the available Edit tool. "
+    "If Edit failed because a file exists, Read it and patch it with a non-empty old_string. "
     "If checks are needed, use Bash only for safe read/test commands."
 )
 _INCOMPLETE_TOOL_TEXT_RE = re.compile(
@@ -384,18 +386,17 @@ def _raw_completion_with_empty_retry(payload: dict[str, Any]) -> dict[str, Any]:
     response = qoder_chat.raw_chat_completion(payload, payload["messages"], str(payload["model"]))
     if payload.get("tools") is not None:
         response["_qoder_tools"] = payload.get("tools")
-    content, finish_reason, _ = _response_parts(response)
-    if not _should_retry_tool_response(content, finish_reason, payload.get("tools")):
-        return response
-    retry_payload = {
-        **payload,
-        "tool_choice": payload.get("tool_choice") or "required",
-        "messages": [*payload["messages"], {"role": "user", "content": _EMPTY_TOOL_REPLY_RETRY}],
-    }
-    retry = qoder_chat.raw_chat_completion(retry_payload, retry_payload["messages"], str(retry_payload["model"]))
-    if payload.get("tools") is not None:
-        retry["_qoder_tools"] = payload.get("tools")
-    return retry
+    messages = payload["messages"]
+    for _ in range(2):
+        content, finish_reason, _ = _response_parts(response)
+        if not _should_retry_tool_response(content, finish_reason, payload.get("tools")):
+            return response
+        messages = [*messages, {"role": "user", "content": _EMPTY_TOOL_REPLY_RETRY}]
+        retry_payload = {**payload, "tool_choice": payload.get("tool_choice") or "required", "messages": messages}
+        response = qoder_chat.raw_chat_completion(retry_payload, retry_payload["messages"], str(retry_payload["model"]))
+        if payload.get("tools") is not None:
+            response["_qoder_tools"] = payload.get("tools")
+    return response
 
 
 def non_stream_response(body: dict[str, Any]) -> dict[str, Any]:

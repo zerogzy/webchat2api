@@ -383,6 +383,7 @@ class QoderProviderTests(unittest.TestCase):
         self.assertIn("You are Claude Code.", system)
         self.assertIn("Do not use Bash heredocs", system)
         self.assertIn("use Edit for file writes", system)
+        self.assertIn("file already exists", system)
         self.assertIn("After each tool result, continue the original task", system)
 
     def test_qoder_anthropic_converts_parameter_style_text_tool_call(self) -> None:
@@ -597,6 +598,39 @@ class QoderProviderTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(response["stop_reason"], "tool_use")
         self.assertEqual(response["content"][0]["name"], "Edit")
+
+    def test_qoder_anthropic_retries_tool_response_twice(self) -> None:
+        calls: list[list[dict[str, object]]] = []
+
+        def fake_raw(body, messages, model):
+            calls.append(messages)
+            if len(calls) < 3:
+                return {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}], "usage": {}}
+            return {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_read",
+                            "type": "function",
+                            "function": {"name": "Read", "arguments": json.dumps({"file_path": "todo_stats.py"})},
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {},
+            }
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", side_effect=fake_raw):
+            response = anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "messages": [{"role": "user", "content": "finish task"}],
+                "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+            })
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(response["stop_reason"], "tool_use")
+        self.assertEqual(response["content"][0]["name"], "Read")
 
 
 if __name__ == "__main__":
