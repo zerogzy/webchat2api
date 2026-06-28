@@ -675,13 +675,19 @@ def _parse_parameter_style_calls(text: str, available_tools: list[str]) -> list[
     for name in sorted(available, key=len, reverse=True):
         match = re.search(rf"(?is)(^|[^\w.\-]){re.escape(name)}\s*>\s*(.*)", text)
         if not match:
+            match = re.search(rf'(?is)["\']text["\']\s*:\s*["\']{re.escape(name)}["\'](.*)', text)
+        if not match:
             continue
-        rest = match.group(2)
+        rest = match.group(match.lastindex or 0)
         args = {}
         for item in re.finditer(r"(?is)<parameter(?:\s+name\s*=\s*['\"]?([\w.\-]+)['\"]?|\s*=\s*['\"]?([\w.\-]+)['\"]?)['\"]?\s*>(.*?)</parameter>", rest):
             key = item.group(1) or item.group(2)
             if key:
                 args[key] = html.unescape(item.group(3).strip())
+        if name == "Bash" and "command" not in args:
+            command = _command_from_broken_json(rest)
+            if command:
+                args["command"] = command
         if args:
             return [_make_call(name, args)]
     return []
@@ -743,7 +749,7 @@ def _has_function_style_tool_call(text: str, available_tools: list[str]) -> bool
 
 
 def _command_from_broken_json(raw: str) -> str:
-    match = re.search(r'(?is)["\']command["\']\s*:\s*(.+?)(?:,\s*["\']description["\']|[}\s]*$)', raw)
+    match = re.search(r'(?is)["\']command["\']\s*:\s*(.+?)(?:,\s*["\']description["\']|</parameter\s*>|<parameter\b|[}\s]*$)', raw)
     if not match:
         return ""
     return _clean_bash_command(match.group(1).strip().rstrip("}").strip())

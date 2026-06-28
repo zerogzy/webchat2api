@@ -425,6 +425,26 @@ class QoderProviderTests(unittest.TestCase):
         self.assertEqual(response["content"][0]["name"], "Read")
         self.assertEqual(response["content"][0]["input"]["file_path"], "/tmp/tasks.json")
 
+    def test_qoder_anthropic_converts_json_text_bash_with_broken_parameters(self) -> None:
+        raw_response = {
+            "choices": [{
+                "message": {"content": '[{"text":"Bash", "arguments": {"command":\nls -la /tmp/work\n</parameter>\n<parameter=description>\nList files\n</parameter>\n</function>\n'},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        }
+
+        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", return_value=raw_response):
+            response = anthropic_v1_messages.handle({
+                "model": "al-qwen3.7-plus",
+                "messages": [{"role": "user", "content": "list files"}],
+                "tools": [{"name": "Bash", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}],
+            })
+
+        self.assertEqual(response["stop_reason"], "tool_use")
+        self.assertEqual(response["content"][0]["name"], "Bash")
+        self.assertEqual(response["content"][0]["input"]["command"], "ls -la /tmp/work")
+
     def test_qoder_anthropic_maps_unavailable_write_to_edit(self) -> None:
         raw_response = {
             "choices": [{
