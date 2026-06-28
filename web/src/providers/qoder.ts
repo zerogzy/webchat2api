@@ -16,17 +16,17 @@ export const qoderProvider: AccountProviderDefinition = {
     submitLabel: "导入 Qoder 凭据",
   },
   importSessionCopy: {
-    label: "暂不支持",
-    placeholder: "Qoder 当前只支持 device token 导入。",
-    help: "请使用手动 PAT 导入。",
+    label: "Qoder device token",
+    placeholder: "Qoder 推荐使用浏览器授权登录；也可粘贴 device token JSON。",
+    help: "浏览器授权会自动生成 machine_id 并轮询 Qoder device token。",
     successLabel: "Qoder 凭据导入完成",
-    submitLabel: "暂不支持",
+    submitLabel: "导入 Qoder 凭据",
     parseJsonAccessToken: false,
   },
-  importMethods: ["token"],
+  importMethods: ["browser-login", "token"],
   importFlowCopy: {
-    providerDescription: "通过 Qoder device token + user_id + machine_id 导入账号，使用 al- 前缀模型。",
-    methodIntro: "粘贴 Qoder device token JSON 后即可使用 al- 模型。",
+    providerDescription: "通过 Qoder device flow 授权登录，自动保存 device token、user_id 和 machine_id。",
+    methodIntro: "推荐使用浏览器授权；也可以手动导入 Qoder device token JSON。",
     emptyMethodsLabel: "当前没有可用的 Qoder 导入方式。",
     cpaHelp: "当前 Qoder 不支持本地 JSON 文件导入。",
     remoteCpaDescription: "当前 Qoder 不支持远程 CPA 快捷入口。",
@@ -43,7 +43,7 @@ export const qoderProvider: AccountProviderDefinition = {
   },
   refresh: {
     enabled: false,
-    rowTitle: "Qoder PAT 当前不支持刷新",
+    rowTitle: "Qoder device token 当前不支持刷新，过期后重新授权登录",
   },
   trial: {
     enabled: true,

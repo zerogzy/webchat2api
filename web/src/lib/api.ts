@@ -495,6 +495,37 @@ export async function cancelJoyCodeQrLogin(jobId: string) {
   });
 }
 
+export type QoderDeviceLoginStatus = {
+  jobId?: string;
+  status: "waiting_for_authorization" | "success" | "failed" | "cancelled";
+  verificationUri?: string;
+  verificationUriComplete?: string;
+  expiresIn?: number;
+  interval?: number;
+  message?: string;
+  items?: Account[];
+  added?: number;
+  skipped?: number;
+};
+
+export async function startQoderDeviceLogin() {
+  return httpRequest<QoderDeviceLoginStatus>("/api/accounts/qoder/device-login", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function fetchQoderDeviceLogin(jobId: string) {
+  return httpRequest<QoderDeviceLoginStatus>(`/api/accounts/qoder/device-login/${encodeURIComponent(jobId)}`);
+}
+
+export async function cancelQoderDeviceLogin(jobId: string) {
+  return httpRequest<QoderDeviceLoginStatus>(`/api/accounts/qoder/device-login/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    body: {},
+  });
+}
+
 export async function refreshCatpawQuota() {
   return httpRequest<AccountMutationResponse>("/api/accounts/catpaw/quota");
 }

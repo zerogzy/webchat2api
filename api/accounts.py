@@ -525,6 +525,35 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         return joycode_flow.cancel_qr_login(job_id)
 
+    @router.post("/api/accounts/qoder/device-login")
+    async def start_qoder_device_login(authorization: str | None = Header(default=None)):
+        from api.account_flows import qoder as qoder_flow
+
+        identity = require_admin(authorization)
+        return qoder_flow.start_device_login(str(identity.get("id") or "admin"))
+
+    @router.get("/api/accounts/qoder/device-login/{job_id}")
+    async def get_qoder_device_login(job_id: str, authorization: str | None = Header(default=None)):
+        from api.account_flows import qoder as qoder_flow
+
+        identity = require_admin(authorization)
+        return await run_in_threadpool(
+            qoder_flow.poll_device_login,
+            job_id,
+            str(identity.get("id") or "admin"),
+            account_service=account_service,
+            sanitize_account_result=sanitize_account_result,
+        )
+
+    @router.delete("/api/accounts/qoder/device-login/{job_id}")
+    async def cancel_qoder_device_login(job_id: str, authorization: str | None = Header(default=None)):
+        from api.account_flows import qoder as qoder_flow
+
+        identity = require_admin(authorization)
+        qoder_flow.require_job(job_id, str(identity.get("id") or "admin"))
+        qoder_flow.forget_job(job_id)
+        return {"status": "cancelled"}
+
     @router.post("/api/accounts/catpaw/quota/apply")
     async def apply_catpaw_quota(authorization: str | None = Header(default=None)):
         require_admin(authorization)

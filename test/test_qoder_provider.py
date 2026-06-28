@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+from pathlib import Path
 import sys
 import time
 import types
@@ -30,6 +32,14 @@ from services.providers.qoder.accounts import normalize_account, sanitize_accoun
 from services.providers.qoder.client import QoderClient, QoderError
 from services.providers.registry import normalize_account_provider, resolve_model
 
+_QODER_FLOW_SPEC = importlib.util.spec_from_file_location(
+    "qoder_flow_under_test",
+    Path(__file__).resolve().parents[1] / "api" / "account_flows" / "qoder.py",
+)
+qoder_flow = importlib.util.module_from_spec(_QODER_FLOW_SPEC)
+assert _QODER_FLOW_SPEC and _QODER_FLOW_SPEC.loader
+_QODER_FLOW_SPEC.loader.exec_module(qoder_flow)
+
 
 class FakeResponse:
     def __init__(self, status_code: int = 200, payload: dict[str, object] | None = None, lines: list[str] | None = None) -> None:
@@ -58,6 +68,29 @@ class FakeSession:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakeGetSession:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.responses = responses
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args) -> None:
+        return None
+
+    def get(self, url: str, **kwargs):
+        return self.responses.pop(0)
+
+
+class FakeAccountService:
+    def __init__(self) -> None:
+        self.items: list[dict[str, object]] = []
+
+    def add_account_items(self, items):
+        self.items.extend(items)
+        return {"added": len(items), "skipped": 0, "items": items}
 
 
 class QoderProviderTests(unittest.TestCase):
@@ -120,6 +153,33 @@ class QoderProviderTests(unittest.TestCase):
         self.assertIn("api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation", session.posts[0]["url"])
         self.assertEqual(session.posts[0]["headers"]["Authorization"], "Bearer COSY.x")
         self.assertIsInstance(session.posts[0].get("data"), bytes)
+
+    def test_device_login_flow_imports_qoder_account(self) -> None:
+        qoder_flow._JOBS.clear()
+        started = qoder_flow.start_device_login("admin")
+        job_id = started["jobId"]
+        account_service = FakeAccountService()
+
+        with mock.patch.object(
+            qoder_flow,
+            "create_session",
+            side_effect=[
+                FakeGetSession([FakeResponse(payload={"token": "dt-token", "user_id": "qoder-user"})]),
+                FakeGetSession([FakeResponse(payload={"name": "Qoder User", "email": "qoder@example.test", "organization_id": "org-1"})]),
+            ],
+        ):
+            result = qoder_flow.poll_device_login(
+                job_id,
+                "admin",
+                account_service=account_service,
+                sanitize_account_result=lambda value: value,
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(account_service.items[0]["device_token"], "dt-token")
+        self.assertEqual(account_service.items[0]["user_id"], "qoder-user")
+        self.assertTrue(account_service.items[0]["machine_id"])
+        self.assertNotIn(job_id, qoder_flow._JOBS)
 
     def test_qoder_native_tool_calls_are_returned_to_openai_client(self) -> None:
         body = {

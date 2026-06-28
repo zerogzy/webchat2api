@@ -32,22 +32,26 @@ import {
   cancelCatpawQrLogin,
   cancelGeminiBrowserLogin,
   cancelJoyCodeQrLogin,
+  cancelQoderDeviceLogin,
   continueGeminiBrowserLogin,
   createAccounts,
   fetchCatpawQrLogin,
   fetchGeminiBrowserLogin,
   fetchJoyCodeQrLogin,
+  fetchQoderDeviceLogin,
   importJoyCodeState,
   startJoyCodeBrowserLogin,
   startJoyCodeQrLogin,
   startCatpawQrLogin,
   startGeminiBrowserLogin,
+  startQoderDeviceLogin,
   submitJoyCodeOAuth,
   type Account,
   type AccountImportPayload,
   type CatpawQrLoginStatus,
   type GeminiBrowserLoginStatus,
   type JoyCodeQrLoginStatus,
+  type QoderDeviceLoginStatus,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
@@ -244,7 +248,11 @@ function methodDescription(method: AccountImportMethod, provider: ImportProvider
   const definition = getAccountProviderDefinition(provider);
   if (method === "token") return definition.importTokenCopy.fileHelp ?? definition.importTokenCopy.placeholder;
   if (method === "session") return definition.importSessionCopy.help || definition.importSessionCopy.placeholder;
-  if (method === "browser-login") return provider === "joycode" ? "打开 JoyCode 官方 OAuth 页面，完成授权后粘贴回调 URL 或 pt_key。" : "通过后端真实浏览器登录 Gemini，并自动提取可用 Cookie。";
+  if (method === "browser-login") {
+    if (provider === "joycode") return "打开 JoyCode 官方 OAuth 页面，完成授权后粘贴回调 URL 或 pt_key。";
+    if (provider === "qoder") return "打开 Qoder device 授权页面，完成后自动轮询并保存 device token。";
+    return "通过后端真实浏览器登录 Gemini，并自动提取可用 Cookie。";
+  }
   if (method === "qr-login") return "扫描二维码登录 CatPawAI，登录成功后自动获取并续期 token。";
   if (method === "cpa") return definition.importFlowCopy.cpaHelp;
   if (method === "remote-cpa") return definition.importFlowCopy.remoteCpaDescription;
@@ -294,6 +302,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   const [geminiLoginTotp, setGeminiLoginTotp] = useState("");
   const [geminiLoginStatus, setGeminiLoginStatus] = useState<GeminiBrowserLoginStatus | null>(null);
   const [catpawLoginStatus, setCatpawLoginStatus] = useState<CatpawQrLoginStatus | null>(null);
+  const [qoderLoginStatus, setQoderLoginStatus] = useState<QoderDeviceLoginStatus | null>(null);
   const [joycodeLoginUrl, setJoycodeLoginUrl] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pendingCpaImport, setPendingCpaImport] = useState<PendingCpaImport | null>(null);
@@ -302,6 +311,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   const txtInputRef = useRef<HTMLInputElement | null>(null);
   const cpaInputRef = useRef<HTMLInputElement | null>(null);
   const catpawJobRef = useRef<string>("");
+  const qoderJobRef = useRef<string>("");
 
   const providerDefinition = getAccountProviderDefinition(importProvider);
   const availableMethods = providerDefinition.importMethods;
@@ -318,7 +328,9 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     setGeminiLoginTotp("");
     setGeminiLoginStatus(null);
     setCatpawLoginStatus(null);
+    setQoderLoginStatus(null);
     setJoycodeLoginUrl("");
+    qoderJobRef.current = "";
     setPendingCpaImport(null);
     setConfirmOpen(false);
   };
@@ -739,6 +751,68 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     }
   };
 
+  const pollQoderDeviceLogin = async (jobId: string, interval = 2) => {
+    qoderJobRef.current = jobId;
+    for (;;) {
+      if (qoderJobRef.current !== jobId) return;
+      let status: QoderDeviceLoginStatus;
+      try {
+        status = await fetchQoderDeviceLogin(jobId);
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, interval * 1000));
+        continue;
+      }
+      if (qoderJobRef.current !== jobId) return;
+      setQoderLoginStatus((prev) => ({ ...(prev ?? {}), ...status, jobId }));
+      if (status.status === "success") {
+        qoderJobRef.current = "";
+        await onImported(status.items ?? [], "qoder");
+        toast.success(`Qoder 授权完成，新增 ${status.added ?? 0} 个账号，跳过 ${status.skipped ?? 0} 个`);
+        setOpen(false);
+        resetState();
+        return;
+      }
+      if (["failed", "cancelled"].includes(status.status)) {
+        qoderJobRef.current = "";
+        toast.error(status.message || "Qoder 授权登录失败");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, interval * 1000));
+    }
+  };
+
+  const handleQoderDeviceLogin = async () => {
+    setIsSubmitting(true);
+    try {
+      const status = await startQoderDeviceLogin();
+      setQoderLoginStatus(status);
+      if (status.verificationUriComplete) {
+        window.open(status.verificationUriComplete, "_blank", "noopener,noreferrer");
+      }
+      if (status.jobId) {
+        void pollQoderDeviceLogin(status.jobId, status.interval || 2);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "生成 Qoder 授权链接失败");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleQoderDeviceLoginCancel = async () => {
+    const jobId = qoderLoginStatus?.jobId;
+    qoderJobRef.current = "";
+    if (jobId) {
+      try {
+        await cancelQoderDeviceLogin(jobId);
+      } catch {
+        // ignore cancel errors
+      }
+    }
+    setQoderLoginStatus(null);
+    toast.info("已取消 Qoder 授权登录");
+  };
+
   const handleCpaSelected = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
@@ -927,6 +1001,39 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             </div>
             {joycodeLoginUrl ? (
               <Input value={joycodeLoginUrl} readOnly className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs" />
+            ) : null}
+          </div>
+        );
+      }
+      if (importProvider === "qoder") {
+        return (
+          <div className="space-y-4">
+            <button type="button" onClick={() => setMethod("methods")} className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800">
+              <ArrowLeft className="size-4" />
+              返回导入方式
+            </button>
+            <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-600">
+              点击生成 Qoder 授权链接，在打开的页面选择账号并确认。系统会按 9router 同款 device flow 自动轮询并保存 device token、user_id 和 machine_id。
+            </div>
+            {qoderLoginStatus?.verificationUriComplete ? (
+              <div className="space-y-2">
+                <Input value={qoderLoginStatus.verificationUriComplete} readOnly className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs" />
+                <Button type="button" variant="outline" className="rounded-xl border-stone-200 bg-white" onClick={() => window.open(qoderLoginStatus.verificationUriComplete, "_blank", "noopener,noreferrer")}>
+                  <ExternalLink className="size-4" />
+                  重新打开授权页
+                </Button>
+              </div>
+            ) : null}
+            {qoderLoginStatus ? (
+              <div className="rounded-2xl border border-stone-200 bg-white p-4 text-sm leading-6 text-stone-600">
+                <div className="font-medium text-stone-900">当前状态：{qoderLoginStatus.status}</div>
+                <div>{qoderLoginStatus.message || (qoderLoginStatus.status === "waiting_for_authorization" ? "等待浏览器授权确认…" : "")}</div>
+                {qoderLoginStatus.jobId && qoderLoginStatus.status === "waiting_for_authorization" ? (
+                  <Button type="button" variant="outline" className="mt-3 rounded-xl border-stone-200 bg-white" onClick={() => void handleQoderDeviceLoginCancel()} disabled={isSubmitting}>
+                    取消授权
+                  </Button>
+                ) : null}
+              </div>
             ) : null}
           </div>
         );
@@ -1193,12 +1300,16 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                     await handleJoyCodeBrowserLogin();
                     return;
                   }
+                  if (importProvider === "qoder") {
+                    await handleQoderDeviceLogin();
+                    return;
+                  }
                   await handleGeminiBrowserLogin();
                 }}
                 disabled={footerDisabled}
               >
                 {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
-                {importProvider === "joycode" ? "生成 OAuth 链接" : "开始浏览器登录"}
+                {importProvider === "joycode" ? "生成 OAuth 链接" : importProvider === "qoder" ? "生成 Qoder 授权链接" : "开始浏览器登录"}
               </Button>
             ) : null}
             {method === "qr-login" ? (
