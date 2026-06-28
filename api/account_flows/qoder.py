@@ -12,9 +12,10 @@ from fastapi import HTTPException
 from services.network.client import create_session
 from services.providers.base import QODER_PROVIDER
 
-LOGIN_URL = "https://qoder.com/device/selectAccounts"
-DEVICE_TOKEN_URL = "https://openapi.qoder.sh/api/v1/deviceToken/poll"
-USERINFO_URL = "https://openapi.qoder.sh/api/v1/userinfo"
+LOGIN_URL = "https://qoder.com.cn/device/selectAccounts"
+DEVICE_TOKEN_URL = "https://openapi.qoder.com.cn/api/v1/deviceToken/poll"
+USERINFO_URL = "https://openapi.qoder.com.cn/api/v1/userinfo"
+CLIENT_ID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb"
 _JOBS: dict[str, dict[str, Any]] = {}
 _TTL = 300
 
@@ -45,6 +46,7 @@ def start_device_login(owner_id: str) -> dict[str, Any]:
         "challenge_method": "S256",
         "machine_id": machine_id,
         "nonce": nonce,
+        "client_id": CLIENT_ID,
     })
     _JOBS[job_id] = {
         "owner_id": owner_id,

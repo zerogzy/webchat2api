@@ -150,7 +150,7 @@ class QoderProviderTests(unittest.TestCase):
             )
 
         self.assertEqual(response["choices"][0]["message"]["content"], "OK")
-        self.assertIn("api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation", session.posts[0]["url"])
+        self.assertIn("gateway.qoder.com.cn/algo/api/v2/service/pro/sse/agent_chat_generation", session.posts[0]["url"])
         self.assertEqual(session.posts[0]["headers"]["Authorization"], "Bearer COSY.x")
         self.assertIsInstance(session.posts[0].get("data"), bytes)
 

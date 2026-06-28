@@ -14,7 +14,7 @@ from services.providers.qoder.model_catalog import get_model_config
 from services.providers.qoder.models import UPSTREAM_MODEL_BY_ID
 from utils.helper import ensure_ok
 
-CHAT_URL = "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
+CHAT_URL = "https://gateway.qoder.com.cn/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
 
 
 class QoderError(RuntimeError):

@@ -6,7 +6,7 @@ from typing import Any
 from services.network.client import create_session
 from services.providers.qoder.cosy import build_cosy_headers
 
-MODEL_LIST_URL = "https://api3.qoder.sh/algo/api/v2/model/list"
+MODEL_LIST_URL = "https://gateway.qoder.com.cn/algo/api/v2/model/list"
 CACHE_TTL_SECONDS = 3600
 _CACHE: dict[str, tuple[float, dict[str, dict[str, Any]]]] = {}
 
