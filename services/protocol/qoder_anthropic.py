@@ -21,24 +21,6 @@ _TEXT_WRAPPER_RE = re.compile(
 _MAX_CONTENT_UNWRAP_DEPTH = 8
 STREAM_PING_INTERVAL_SECONDS = 10.0
 _PING = object()
-_CLAUDE_CODE_TOOL_HINT = (
-    "Claude Code tool rules for this environment: use Edit for file writes and file creation; create files with old_string empty and new_string set to the full file content. "
-    "If Edit reports that a file already exists or the string to replace was not found, Read the file and then use Edit with an exact non-empty old_string; do not recreate the same file. "
-    "Do not use Bash heredocs, shell redirection, or inline multi-line Python to write files; these are blocked by local safety checks. "
-    "Bash calls must include a non-empty command string; never send an empty Bash call. "
-    "Do not use unavailable tools such as Write unless they are explicitly listed in the available tools. "
-    "After each tool result, continue the original task until all requested files, commands, and tests are complete."
-)
-_EMPTY_TOOL_REPLY_RETRY = (
-    "Continue the original task now. Return a tool call when the next step needs a tool; do not only describe the step. "
-    "If files need to be created or changed, use the available Edit tool. "
-    "If Edit failed because a file exists or the string to replace was not found, Read it and patch it with a non-empty old_string. "
-    "If checks are needed, use Bash only for safe read/test commands."
-)
-_INCOMPLETE_TOOL_TEXT_RE = re.compile(
-    r"\b(now\s+)?(let me(?:\s+start\s+by)?|i will|i'll|i need to)\s+(run|execute|test|check|continue|read|inspect|list|create|creating|write|edit)\b|(?:\[\{\s*$)|(?:我来|让我|让我先|先|现在|继续).{0,12}(读取|查看|运行|执行|测试|创建|修改|编辑)",
-    re.IGNORECASE,
-)
 
 
 def _system_text(system: object) -> str:
@@ -75,27 +57,8 @@ def _tool_input(arguments: object) -> dict[str, object]:
     return {}
 
 
-def _tool_names(tools: object) -> set[str]:
-    return set(tool_calls.tool_names(tools))
-
-
-def _tool_use_block(call_id: str, name: str, arguments: object, tools: object) -> dict[str, object] | None:
-    args = _tool_input(arguments)
-    available = _tool_names(tools)
-    if name == "Write" and "Write" not in available and "Edit" in available:
-        file_path = str(args.get("file_path") or "").strip()
-        content = str(args.get("content") or "")
-        if not file_path:
-            return None
-        return {
-            "type": "tool_use",
-            "id": call_id,
-            "name": "Edit",
-            "input": {"file_path": file_path, "old_string": "", "new_string": content, "replace_all": False},
-        }
-    if available and name not in available:
-        return None
-    return {"type": "tool_use", "id": call_id, "name": name, "input": args}
+def _tool_use_block(call_id: str, name: str, arguments: object) -> dict[str, object]:
+    return {"type": "tool_use", "id": call_id, "name": name, "input": _tool_input(arguments)}
 
 
 def _text_from_tool_result(content: object) -> str:
@@ -177,8 +140,6 @@ def _openai_tool_choice(choice: object) -> object:
 def qoder_body(body: dict[str, Any]) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     system = _system_text(body.get("system"))
-    if body.get("tools") is not None:
-        system = "\n\n".join(part for part in (system, _CLAUDE_CODE_TOOL_HINT) if part)
     if system:
         messages.append({"role": "system", "content": system})
     raw_messages = body.get("messages")
@@ -356,53 +317,23 @@ def _response_parts(response: dict[str, Any]) -> tuple[list[dict[str, object]], 
                 str(call.get("id") or f"toolu_{uuid.uuid4().hex}"),
                 name,
                 function.get("arguments") if "arguments" in function else call.get("arguments"),
-                response.get("_qoder_tools"),
             )
-            if block:
-                content.append(block)
+            content.append(block)
     if any(block.get("type") == "tool_use" for block in content):
         content = [block for block in content if block.get("type") != "text" or str(block.get("text") or "").strip()]
-    text = "\n".join(str(block.get("text") or "") for block in content if block.get("type") == "text")
-    parsed = tool_calls.parse_tool_calls_for_tools(text, response.get("_qoder_tools"))
-    if parsed.calls:
-        content = []
-        for call in parsed.calls:
-            block = _tool_use_block(call.call_id, call.name, call.arguments, response.get("_qoder_tools"))
-            if block:
-                content.append(block)
-        if not content:
-            return [{"type": "text", "text": ""}], "stop", response.get("usage") if isinstance(response.get("usage"), dict) else {}
-        return content, "tool_calls", response.get("usage") if isinstance(response.get("usage"), dict) else {}
     return content or [{"type": "text", "text": ""}], str(choice.get("finish_reason") or ""), response.get("usage") if isinstance(response.get("usage"), dict) else {}
 
 
-def _should_retry_tool_response(content: list[dict[str, object]], finish_reason: str, tools: object) -> bool:
-    if not _tool_names(tools) or finish_reason == "tool_calls":
-        return False
-    text = "\n".join(str(block.get("text") or "") for block in content if block.get("type") == "text").strip()
-    return not text or bool(_INCOMPLETE_TOOL_TEXT_RE.search(text))
-
-
-def _raw_completion_with_empty_retry(payload: dict[str, Any]) -> dict[str, Any]:
+def _raw_completion(payload: dict[str, Any]) -> dict[str, Any]:
     response = qoder_chat.raw_chat_completion(payload, payload["messages"], str(payload["model"]))
     if payload.get("tools") is not None:
         response["_qoder_tools"] = payload.get("tools")
-    messages = payload["messages"]
-    for _ in range(2):
-        content, finish_reason, _ = _response_parts(response)
-        if not _should_retry_tool_response(content, finish_reason, payload.get("tools")):
-            return response
-        messages = [*messages, {"role": "user", "content": _EMPTY_TOOL_REPLY_RETRY}]
-        retry_payload = {**payload, "tool_choice": payload.get("tool_choice") or "required", "messages": messages}
-        response = qoder_chat.raw_chat_completion(retry_payload, retry_payload["messages"], str(retry_payload["model"]))
-        if payload.get("tools") is not None:
-            response["_qoder_tools"] = payload.get("tools")
     return response
 
 
 def non_stream_response(body: dict[str, Any]) -> dict[str, Any]:
     payload = qoder_body(dict(body))
-    response = _raw_completion_with_empty_retry(payload)
+    response = _raw_completion(payload)
     content, finish_reason, usage = _response_parts(response)
     text = "\n".join(str(block.get("text") or "") for block in content if block.get("type") == "text")
     return {
@@ -458,7 +389,7 @@ def _completion_with_ping(payload: dict[str, Any]) -> Iterator[dict[str, Any] | 
 
     def produce() -> None:
         try:
-            response = _raw_completion_with_empty_retry(payload)
+            response = _raw_completion(payload)
             items.put(("response", response))
         except Exception as exc:
             items.put(("error", exc))

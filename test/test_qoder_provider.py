@@ -371,7 +371,7 @@ class QoderProviderTests(unittest.TestCase):
         self.assertIn({"type": "ping"}, events)
         self.assertTrue(any(event.get("type") == "content_block_delta" and event.get("delta", {}).get("text") == "OK" for event in events))
 
-    def test_qoder_anthropic_adds_claude_code_tool_hint(self) -> None:
+    def test_qoder_anthropic_preserves_system_without_tool_hint(self) -> None:
         payload = anthropic_v1_messages.qoder_anthropic.qoder_body({
             "model": "al-qwen3.7-plus",
             "system": [{"type": "text", "text": "You are Claude Code."}],
@@ -379,79 +379,12 @@ class QoderProviderTests(unittest.TestCase):
             "tools": [{"name": "Bash", "input_schema": {"type": "object"}}],
         })
 
-        system = payload["messages"][0]["content"]
-        self.assertIn("You are Claude Code.", system)
-        self.assertIn("Do not use Bash heredocs", system)
-        self.assertIn("non-empty command", system)
-        self.assertIn("use Edit for file writes", system)
-        self.assertIn("file already exists", system)
-        self.assertIn("string to replace was not found", system)
-        self.assertIn("After each tool result, continue the original task", system)
+        self.assertEqual(payload["messages"][0], {"role": "system", "content": "You are Claude Code."})
 
-    def test_qoder_anthropic_converts_parameter_style_text_tool_call(self) -> None:
+    def test_qoder_anthropic_returns_text_tool_syntax_as_text(self) -> None:
         raw_response = {
             "choices": [{
-                "message": {"content": 'Bash>\n<parameter name="command">ls -la</parameter>\n<parameter=description">List files</parameter>\n</function>'},
-                "finish_reason": "stop",
-            }],
-            "usage": {},
-        }
-
-        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", return_value=raw_response):
-            response = anthropic_v1_messages.handle({
-                "model": "al-qwen3.7-plus",
-                "messages": [{"role": "user", "content": "list files"}],
-                "tools": [{"name": "Bash", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}],
-            })
-
-        self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(response["content"][0]["name"], "Bash")
-        self.assertEqual(response["content"][0]["input"]["command"], "ls -la")
-
-    def test_qoder_anthropic_infers_read_from_json_array_file_path(self) -> None:
-        raw_response = {
-            "choices": [{
-                "message": {"content": '[{"text":"Read the tasks file.\\n","file_path":"/tmp/tasks.json"}]'},
-                "finish_reason": "stop",
-            }],
-            "usage": {},
-        }
-
-        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", return_value=raw_response):
-            response = anthropic_v1_messages.handle({
-                "model": "al-qwen3.7-plus",
-                "messages": [{"role": "user", "content": "read tasks"}],
-                "tools": [{"name": "Read", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}}],
-            })
-
-        self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(response["content"][0]["name"], "Read")
-        self.assertEqual(response["content"][0]["input"]["file_path"], "/tmp/tasks.json")
-
-    def test_qoder_anthropic_converts_json_text_bash_with_broken_parameters(self) -> None:
-        raw_response = {
-            "choices": [{
-                "message": {"content": '[{"text":"Bash", "arguments": {"command":\nls -la /tmp/work\n</parameter>\n<parameter=description>\nList files\n</parameter>\n</function>\n'},
-                "finish_reason": "stop",
-            }],
-            "usage": {},
-        }
-
-        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", return_value=raw_response):
-            response = anthropic_v1_messages.handle({
-                "model": "al-qwen3.7-plus",
-                "messages": [{"role": "user", "content": "list files"}],
-                "tools": [{"name": "Bash", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}],
-            })
-
-        self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(response["content"][0]["name"], "Bash")
-        self.assertEqual(response["content"][0]["input"]["command"], "ls -la /tmp/work")
-
-    def test_qoder_anthropic_converts_function_style_read_text(self) -> None:
-        raw_response = {
-            "choices": [{
-                "message": {"content": '[{"text":"Read(file_path=/tmp/work/todo_stats.py")}}]'},
+                "message": {"content": "Read(file_path=/tmp/work/todo_stats.py)"},
                 "finish_reason": "stop",
             }],
             "usage": {},
@@ -464,11 +397,10 @@ class QoderProviderTests(unittest.TestCase):
                 "tools": [{"name": "Read", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}}],
             })
 
-        self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(response["content"][0]["name"], "Read")
-        self.assertEqual(response["content"][0]["input"]["file_path"], "/tmp/work/todo_stats.py")
+        self.assertEqual(response["stop_reason"], "end_turn")
+        self.assertEqual(response["content"], [{"type": "text", "text": "Read(file_path=/tmp/work/todo_stats.py)"}])
 
-    def test_qoder_anthropic_maps_unavailable_write_to_edit(self) -> None:
+    def test_qoder_anthropic_does_not_map_unavailable_write_to_edit(self) -> None:
         raw_response = {
             "choices": [{
                 "message": {
@@ -492,180 +424,8 @@ class QoderProviderTests(unittest.TestCase):
             })
 
         self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(response["content"][0]["name"], "Edit")
-        self.assertEqual(response["content"][0]["input"]["file_path"], "todo.py")
-        self.assertEqual(response["content"][0]["input"]["old_string"], "")
-        self.assertEqual(response["content"][0]["input"]["new_string"], "print(1)\n")
-
-    def test_qoder_anthropic_retries_empty_tool_response_once(self) -> None:
-        calls: list[list[dict[str, object]]] = []
-        bodies: list[dict[str, object]] = []
-
-        def fake_raw(body, messages, model):
-            bodies.append(body)
-            calls.append(messages)
-            if len(calls) == 1:
-                return {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}], "usage": {}}
-            return {
-                "choices": [{
-                    "message": {
-                        "content": "",
-                        "tool_calls": [{
-                            "id": "call_bash",
-                            "type": "function",
-                            "function": {"name": "Bash", "arguments": json.dumps({"command": "python3 test_todo_stats.py"})},
-                        }],
-                    },
-                    "finish_reason": "tool_calls",
-                }],
-                "usage": {},
-            }
-
-        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", side_effect=fake_raw):
-            response = anthropic_v1_messages.handle({
-                "model": "al-qwen3.7-plus",
-                "messages": [{"role": "user", "content": "finish task"}],
-                "tools": [{"name": "Bash", "input_schema": {"type": "object"}}],
-            })
-
-        self.assertEqual(len(calls), 2)
-        self.assertIn("Continue the original task", calls[1][-1]["content"])
-        self.assertEqual(bodies[1]["tool_choice"], "required")
-        self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(response["content"][0]["name"], "Bash")
-
-    def test_qoder_anthropic_retries_described_tool_step_once(self) -> None:
-        calls: list[list[dict[str, object]]] = []
-
-        def fake_raw(body, messages, model):
-            calls.append(messages)
-            if len(calls) == 1:
-                return {"choices": [{"message": {"content": "Now let me run the tests.\n"}, "finish_reason": "stop"}], "usage": {}}
-            return {
-                "choices": [{
-                    "message": {
-                        "content": "",
-                        "tool_calls": [{
-                            "id": "call_bash",
-                            "type": "function",
-                            "function": {"name": "Bash", "arguments": json.dumps({"command": "python3 test_todo_stats.py"})},
-                        }],
-                    },
-                    "finish_reason": "tool_calls",
-                }],
-                "usage": {},
-            }
-
-        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", side_effect=fake_raw):
-            response = anthropic_v1_messages.handle({
-                "model": "al-qwen3.7-plus",
-                "messages": [{"role": "user", "content": "finish task"}],
-                "tools": [{"name": "Bash", "input_schema": {"type": "object"}}],
-            })
-
-        self.assertEqual(len(calls), 2)
-        self.assertIn("Return a tool call", calls[1][-1]["content"])
-        self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(response["content"][0]["name"], "Bash")
-
-    def test_qoder_anthropic_retries_truncated_described_step_once(self) -> None:
-        calls: list[list[dict[str, object]]] = []
-
-        def fake_raw(body, messages, model):
-            calls.append(messages)
-            if len(calls) == 1:
-                return {"choices": [{"message": {"content": "Let me start by creating the test file.\n\n[{"}, "finish_reason": "stop"}], "usage": {}}
-            return {
-                "choices": [{
-                    "message": {
-                        "content": "",
-                        "tool_calls": [{
-                            "id": "call_edit",
-                            "type": "function",
-                            "function": {"name": "Edit", "arguments": json.dumps({"file_path": "test_todo_stats.py", "old_string": "", "new_string": "print('ok')\n"})},
-                        }],
-                    },
-                    "finish_reason": "tool_calls",
-                }],
-                "usage": {},
-            }
-
-        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", side_effect=fake_raw):
-            response = anthropic_v1_messages.handle({
-                "model": "al-qwen3.7-plus",
-                "messages": [{"role": "user", "content": "finish task"}],
-                "tools": [{"name": "Edit", "input_schema": {"type": "object"}}],
-            })
-
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(response["content"][0]["name"], "Edit")
-
-    def test_qoder_anthropic_retries_chinese_described_tool_step_once(self) -> None:
-        calls: list[list[dict[str, object]]] = []
-
-        def fake_raw(body, messages, model):
-            calls.append(messages)
-            if len(calls) == 1:
-                return {"choices": [{"message": {"content": "好的，目录里已经有 todo_stats.py 了。让我先读取它看看内容：\n\n"}, "finish_reason": "stop"}], "usage": {}}
-            return {
-                "choices": [{
-                    "message": {
-                        "content": "",
-                        "tool_calls": [{
-                            "id": "call_read",
-                            "type": "function",
-                            "function": {"name": "Read", "arguments": json.dumps({"file_path": "todo_stats.py"})},
-                        }],
-                    },
-                    "finish_reason": "tool_calls",
-                }],
-                "usage": {},
-            }
-
-        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", side_effect=fake_raw):
-            response = anthropic_v1_messages.handle({
-                "model": "al-qwen3.7-plus",
-                "messages": [{"role": "user", "content": "finish task"}],
-                "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
-            })
-
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(response["content"][0]["name"], "Read")
-
-    def test_qoder_anthropic_retries_tool_response_twice(self) -> None:
-        calls: list[list[dict[str, object]]] = []
-
-        def fake_raw(body, messages, model):
-            calls.append(messages)
-            if len(calls) < 3:
-                return {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}], "usage": {}}
-            return {
-                "choices": [{
-                    "message": {
-                        "content": "",
-                        "tool_calls": [{
-                            "id": "call_read",
-                            "type": "function",
-                            "function": {"name": "Read", "arguments": json.dumps({"file_path": "todo_stats.py"})},
-                        }],
-                    },
-                    "finish_reason": "tool_calls",
-                }],
-                "usage": {},
-            }
-
-        with mock.patch.object(anthropic_v1_messages.qoder_anthropic.qoder_chat, "raw_chat_completion", side_effect=fake_raw):
-            response = anthropic_v1_messages.handle({
-                "model": "al-qwen3.7-plus",
-                "messages": [{"role": "user", "content": "finish task"}],
-                "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
-            })
-
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(response["stop_reason"], "tool_use")
-        self.assertEqual(response["content"][0]["name"], "Read")
+        self.assertEqual(response["content"][0]["name"], "Write")
+        self.assertEqual(response["content"][0]["input"], {"file_path": "todo.py", "content": "print(1)\n"})
 
 
 if __name__ == "__main__":

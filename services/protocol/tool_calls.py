@@ -158,7 +158,7 @@ def parse_tool_calls(text: str, available_tools: list[str] | None = None) -> Too
     calls = (
         _parse_xml_tool_calls(text)
         or _parse_json_envelope(text)
-        or _parse_json_array(text, available_tools or [])
+        or _parse_json_array(text)
         or _parse_alt_xml(text)
         or _parse_arg_key_value_tool_calls(text, available_tools or [])
         or _parse_parameter_style_calls(text, available_tools or [])
@@ -337,11 +337,9 @@ def _parse_json_envelope(text: str) -> list[ParsedToolCall]:
     return _calls_from_items(raw_calls) if isinstance(raw_calls, list) else []
 
 
-def _parse_json_array(text: str, available_tools: list[str] | None = None) -> list[ParsedToolCall]:
+def _parse_json_array(text: str) -> list[ParsedToolCall]:
     array = _extract_json_value(text, "[")
-    if not isinstance(array, list):
-        return []
-    return _calls_from_items(array) or _infer_calls_from_json_items(array, available_tools or [])
+    return _calls_from_items(array) if isinstance(array, list) else []
 
 
 def _parse_alt_xml(text: str) -> list[ParsedToolCall]:
@@ -659,19 +657,6 @@ def _parse_tool_element_calls(text: str, available_tools: list[str]) -> list[Par
     return calls
 
 
-def _infer_calls_from_json_items(items: list[Any], available_tools: list[str]) -> list[ParsedToolCall]:
-    available = set(available_tools)
-    calls: list[ParsedToolCall] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if "Read" in available and isinstance(item.get("file_path"), str):
-            calls.append(_make_call("Read", {"file_path": item["file_path"]}))
-        if isinstance(item.get("text"), str):
-            calls.extend(_parse_function_style_calls(str(item["text"]), available_tools))
-    return calls
-
-
 def _parse_parameter_style_calls(text: str, available_tools: list[str]) -> list[ParsedToolCall]:
     available = {tool for tool in available_tools if tool}
     if not available:
@@ -679,19 +664,13 @@ def _parse_parameter_style_calls(text: str, available_tools: list[str]) -> list[
     for name in sorted(available, key=len, reverse=True):
         match = re.search(rf"(?is)(^|[^\w.\-]){re.escape(name)}\s*>\s*(.*)", text)
         if not match:
-            match = re.search(rf'(?is)["\']text["\']\s*:\s*["\']{re.escape(name)}["\'](.*)', text)
-        if not match:
             continue
-        rest = match.group(match.lastindex or 0)
+        rest = match.group(2)
         args = {}
         for item in re.finditer(r"(?is)<parameter(?:\s+name\s*=\s*['\"]?([\w.\-]+)['\"]?|\s*=\s*['\"]?([\w.\-]+)['\"]?)['\"]?\s*>(.*?)</parameter>", rest):
             key = item.group(1) or item.group(2)
             if key:
                 args[key] = html.unescape(item.group(3).strip())
-        if name == "Bash" and "command" not in args:
-            command = _command_from_broken_json(rest)
-            if command:
-                args["command"] = command
         if args:
             return [_make_call(name, args)]
     return []
@@ -735,16 +714,13 @@ def _parse_function_style_calls(text: str, available_tools: list[str]) -> list[P
     if not available:
         return []
     for name in sorted(available, key=len, reverse=True):
-        match = re.search(rf"(?is)(^|[^\w.\-]){re.escape(name)}\s*\(([^)]*)\)", text)
+        match = re.search(rf"(?is)(^|[^\w.\-]){re.escape(name)}\s*\((.*)\)\s*$", text)
         if not match:
             continue
         raw = match.group(2).strip()
         parsed = _parse_arguments(raw)
-        if isinstance(parsed, dict) and parsed:
+        if isinstance(parsed, dict):
             return [_make_call(name, parsed)]
-        key_values = _parse_key_value_arguments(raw)
-        if key_values:
-            return [_make_call(name, key_values)]
         if name == "Bash":
             command = _command_from_broken_json(raw) or raw
             return [_make_call(name, {"command": command})]
@@ -755,15 +731,8 @@ def _has_function_style_tool_call(text: str, available_tools: list[str]) -> bool
     return any(re.search(rf"(?is)(^|[^\w.\-]){re.escape(str(name))}\s*\(", text) for name in available_tools if name)
 
 
-def _parse_key_value_arguments(raw: str) -> dict[str, str]:
-    args: dict[str, str] = {}
-    for match in re.finditer(r"(?is)([\w.\-]+)\s*=\s*([^,]+)", raw):
-        args[match.group(1)] = match.group(2).strip().strip("\"'")
-    return args
-
-
 def _command_from_broken_json(raw: str) -> str:
-    match = re.search(r'(?is)["\']command["\']\s*:\s*(.+?)(?:,\s*["\']description["\']|</parameter\s*>|<parameter\b|[}\s]*$)', raw)
+    match = re.search(r'(?is)["\']command["\']\s*:\s*(.+?)(?:,\s*["\']description["\']|[}\s]*$)', raw)
     if not match:
         return ""
     return _clean_bash_command(match.group(1).strip().rstrip("}").strip())
