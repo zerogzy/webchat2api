@@ -162,20 +162,36 @@ class NetworkProfileTests(unittest.TestCase):
         client.user_agent = "Test UA"
         client.pow_script_sources = []
         client.pow_data_build = ""
-        response = mock.Mock(status_code=200, headers={})
-        response.json.return_value = {"token": "requirements-token", "turnstile": {"required": True, "dx": "challenge"}}
+        prepare_response = mock.Mock(status_code=200, headers={})
+        prepare_response.json.return_value = {"prepare_token": "prepare-token"}
+        finalize_response = mock.Mock(status_code=200, headers={})
+        finalize_response.json.return_value = {"token": "requirements-token", "so_token": "so-token"}
         client.session = mock.Mock(headers={})
-        client.session.post.return_value = response
+        client.session.post.side_effect = [prepare_response, finalize_response]
         client._call_with_retry = lambda callback, context: callback()
-        client._build_requirements = mock.Mock(return_value=ChatRequirements(token="requirements-token"))
+        client._build_requirements = mock.Mock(return_value=ChatRequirements(
+            token="",
+            proof_token="proof-token",
+            turnstile_token="turnstile-token",
+            raw_finalize=prepare_response.json.return_value,
+        ))
 
         with mock.patch("services.openai_backend_api.build_legacy_requirements_token", return_value="generated-p"):
             requirements = client._get_chat_requirements()
 
         self.assertEqual(requirements.token, "requirements-token")
-        client.session.post.assert_called_once()
-        self.assertEqual(client.session.post.call_args.kwargs["json"], {"p": "generated-p"})
-        client._build_requirements.assert_called_once_with(response.json.return_value, "generated-p")
+        self.assertEqual(requirements.so_token, "so-token")
+        self.assertEqual(client.session.post.call_count, 2)
+        prepare_call, finalize_call = client.session.post.call_args_list
+        self.assertTrue(prepare_call.args[0].endswith("/chat-requirements/prepare"))
+        self.assertEqual(prepare_call.kwargs["json"], {"p": "generated-p"})
+        self.assertTrue(finalize_call.args[0].endswith("/chat-requirements/finalize"))
+        self.assertEqual(finalize_call.kwargs["json"], {
+            "prepare_token": "prepare-token",
+            "proof_token": "proof-token",
+            "turnstile_token": "turnstile-token",
+        })
+        client._build_requirements.assert_called_once_with(prepare_response.json.return_value, "generated-p")
 
     def test_grok_profile_prefers_network_profiles_over_legacy_key(self) -> None:
         profile = build_grok_console_profile({

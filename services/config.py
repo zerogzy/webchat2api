@@ -163,7 +163,7 @@ def _normalize_grok_network_profile(value: object) -> dict[str, object]:
     user_agent = _nonempty_string(source.get("user-agent") or source.get("user_agent"))
     if user_agent:
         normalized["user-agent"] = user_agent
-    for key in ("cf_clearance", "cf_cookies", "sec-ch-ua", "sec_ch_ua", "sec-ch-ua-mobile", "sec_ch_ua_mobile", "sec-ch-ua-platform", "sec_ch_ua_platform", "statsig_id", "x-statsig-id"):
+    for key in ("cf_clearance", "cf_cookies", "sec-ch-ua", "sec_ch_ua", "sec-ch-ua-mobile", "sec_ch_ua_mobile", "sec-ch-ua-platform", "sec_ch_ua_platform", "statsig_id", "x-statsig-id", "statsig_signer_url", "statsig-signer-url"):
         if text := _nonempty_string(source.get(key)):
             normalized[key] = text
     if "verify" in source:
@@ -181,7 +181,7 @@ def _normalize_grok_network_profile(value: object) -> dict[str, object]:
 def _normalize_grok_console_profile(value: object) -> dict[str, object]:
     normalized = _normalize_grok_network_profile(value)
     normalized.pop("browser", None)
-    for key in ("cf_cookies", "sec-ch-ua", "sec_ch_ua", "sec-ch-ua-mobile", "sec_ch_ua_mobile", "sec-ch-ua-platform", "sec_ch_ua_platform", "statsig_id", "x-statsig-id"):
+    for key in ("cf_cookies", "sec-ch-ua", "sec_ch_ua", "sec-ch-ua-mobile", "sec_ch_ua_mobile", "sec-ch-ua-platform", "sec_ch_ua_platform", "statsig_id", "x-statsig-id", "statsig_signer_url", "statsig-signer-url"):
         normalized.pop(key, None)
     return normalized
 

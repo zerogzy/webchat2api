@@ -23,7 +23,7 @@ DEFAULT_CHATGPT_WEB_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
 )
-DEFAULT_CHATGPT_WEB_IMPERSONATE = "edge101"
+DEFAULT_CHATGPT_WEB_IMPERSONATE = "chrome110"
 DEFAULT_CHATGPT_WEB_SEC_CH_UA = '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"'
 DEFAULT_CHATGPT_WEB_SEC_CH_UA_MOBILE = "?0"
 DEFAULT_CHATGPT_WEB_SEC_CH_UA_PLATFORM = '"Windows"'
@@ -39,7 +39,8 @@ DEFAULT_GROK_APP_CHAT_USER_AGENT = (
 )
 DEFAULT_GROK_APP_CHAT_VERIFY = True
 DEFAULT_GROK_APP_CHAT_TIMEOUT = 60
-DEFAULT_GROK_APP_CHAT_STATSIG_ID = "0196a8f6-0501-79f8-8d74-a2f2c0f5f5f5"
+DEFAULT_GROK_APP_CHAT_STATSIG_ID = ""
+DEFAULT_GROK_APP_CHAT_STATSIG_SIGNER_URL = "https://grok.wodf.de/sign"
 DEFAULT_GROK_APP_CHAT_SEC_CH_UA = '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"'
 DEFAULT_GROK_APP_CHAT_SEC_CH_UA_MOBILE = "?0"
 DEFAULT_GROK_APP_CHAT_SEC_CH_UA_PLATFORM = '"Windows"'
@@ -165,6 +166,7 @@ class GrokAppChatNetworkProfile:
     sec_ch_ua_mobile: str = DEFAULT_GROK_APP_CHAT_SEC_CH_UA_MOBILE
     sec_ch_ua_platform: str = DEFAULT_GROK_APP_CHAT_SEC_CH_UA_PLATFORM
     statsig_id: str = DEFAULT_GROK_APP_CHAT_STATSIG_ID
+    statsig_signer_url: str = DEFAULT_GROK_APP_CHAT_STATSIG_SIGNER_URL
 
 
 def _fingerprint_values(source: Mapping[str, object]) -> dict[str, str]:
@@ -252,6 +254,10 @@ def build_grok_app_chat_profile(settings: Mapping[str, object] | None = None) ->
         or derived_sec_ch_ua_platform
     )
     statsig_id = _clean_text(app_profile.get("statsig_id") or app_profile.get("x-statsig-id")) or DEFAULT_GROK_APP_CHAT_STATSIG_ID
+    statsig_signer_url = (
+        _clean_text(app_profile.get("statsig_signer_url") or app_profile.get("statsig-signer-url"))
+        or DEFAULT_GROK_APP_CHAT_STATSIG_SIGNER_URL
+    )
     return GrokAppChatNetworkProfile(
         user_agent=user_agent,
         impersonate=impersonate,
@@ -263,4 +269,5 @@ def build_grok_app_chat_profile(settings: Mapping[str, object] | None = None) ->
         sec_ch_ua_mobile=sec_ch_ua_mobile,
         sec_ch_ua_platform=sec_ch_ua_platform,
         statsig_id=statsig_id,
+        statsig_signer_url=statsig_signer_url,
     )

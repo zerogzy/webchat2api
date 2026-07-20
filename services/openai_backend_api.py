@@ -45,8 +45,8 @@ class ChatRequirements:
     raw_finalize: Optional[Dict[str, Any]] = None
 
 
-DEFAULT_CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
-DEFAULT_CLIENT_BUILD_NUMBER = "5955942"
+DEFAULT_CLIENT_VERSION = "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887"
+DEFAULT_CLIENT_BUILD_NUMBER = "6708908"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 SEARCH_MODEL = "gpt-5-5"
@@ -461,9 +461,26 @@ class OpenAIBackendAPI:
             })
         return conversation_messages
 
-    def _conversation_payload(self, messages: list[Dict[str, Any]], model: str, timezone: str) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_thinking_effort(value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"", "none"}:
+            return ""
+        if normalized in {"low", "medium", "high"}:
+            return normalized
+        if normalized in {"xhigh", "extended"}:
+            return "extended"
+        return ""
+
+    def _conversation_payload(
+            self,
+            messages: list[Dict[str, Any]],
+            model: str,
+            timezone: str,
+            thinking_effort: str = "",
+    ) -> Dict[str, Any]:
         """把标准 messages 构造成 web 对话请求体。"""
-        return {
+        payload = {
             "action": "next",
             "messages": self._api_messages_to_conversation_messages(messages),
             "model": model,
@@ -497,6 +514,10 @@ class OpenAIBackendAPI:
                 "screen_width": 2560,
             },
         }
+        normalized_effort = self._normalize_thinking_effort(thinking_effort)
+        if normalized_effort:
+            payload["thinking_effort"] = normalized_effort
+        return payload
 
     def _image_model_slug(self, model: str) -> str:
         """把标准图片模型名映射到底层 model slug。"""
@@ -1236,6 +1257,7 @@ class OpenAIBackendAPI:
             prompt: str = "",
             images: Optional[list[str]] = None,
             system_hints: Optional[list[str]] = None,
+            thinking_effort: str = "",
     ) -> Iterator[str]:
         system_hints = system_hints or []
         if "picture_v2" in system_hints:
@@ -1246,7 +1268,7 @@ class OpenAIBackendAPI:
         self._bootstrap()
         requirements = self._get_chat_requirements()
         path, timezone = self._chat_target()
-        payload = self._conversation_payload(normalized, model, timezone)
+        payload = self._conversation_payload(normalized, model, timezone, thinking_effort)
         response = self._call_with_retry(
             lambda: self.session.post(
                 self.base_url + path,
@@ -1293,25 +1315,50 @@ class OpenAIBackendAPI:
             self.pow_script_sources = [DEFAULT_POW_SCRIPT]
 
     def _get_chat_requirements(self) -> ChatRequirements:
-        """获取当前模式对话所需的 sentinel token。"""
-        path = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
-        context = "auth_chat_requirements" if self.access_token else "noauth_chat_requirements"
-        body = {"p": build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)}
-        response = self._call_with_retry(
+        """使用 ChatGPT Web 当前的 prepare/finalize 两阶段 Sentinel 流程。"""
+        base = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
+        source_p = build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)
+        prepare_path = base + "/prepare"
+        prepare_response = self._call_with_retry(
             lambda: self.session.post(
-                self.base_url + path,
-                headers=self._headers(path, {"Content-Type": "application/json"}),
-                json=body,
+                self.base_url + prepare_path,
+                headers=self._headers(prepare_path, {"Content-Type": "application/json"}),
+                json={"p": source_p},
                 timeout=30,
             ),
-            context=context,
+            context="chat_requirements_prepare",
         )
-        ensure_ok(response, context)
-        requirements = self._build_requirements(response.json(), body.get("p", ""))
-        if not requirements.token:
+        ensure_ok(prepare_response, "chat_requirements_prepare")
+        prepared = self._build_requirements(prepare_response.json(), source_p)
+        prepare_data = prepared.raw_finalize or {}
+
+        finalize_path = base + "/finalize"
+        finalize_response = self._call_with_retry(
+            lambda: self.session.post(
+                self.base_url + finalize_path,
+                headers=self._headers(finalize_path, {"Content-Type": "application/json"}),
+                json={
+                    "prepare_token": prepare_data.get("prepare_token", ""),
+                    "proof_token": prepared.proof_token,
+                    "turnstile_token": prepared.turnstile_token,
+                },
+                timeout=30,
+            ),
+            context="chat_requirements_finalize",
+        )
+        ensure_ok(finalize_response, "chat_requirements_finalize")
+        finalized = finalize_response.json()
+        token = str(finalized.get("token") or "")
+        if not token:
             message = "missing auth chat requirements token" if self.access_token else "missing chat requirements token"
-            raise RuntimeError(f"{message}: {requirements.raw_finalize}")
-        return requirements
+            raise RuntimeError(f"{message}: {finalized}")
+        return ChatRequirements(
+            token=token,
+            proof_token=prepared.proof_token,
+            turnstile_token=prepared.turnstile_token,
+            so_token=str(finalized.get("so_token") or ""),
+            raw_finalize=finalized,
+        )
 
     def _chat_target(self) -> tuple[str, str]:
         if self.access_token:

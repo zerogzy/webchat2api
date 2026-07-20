@@ -66,11 +66,12 @@
       "sec-ch-ua": "\"Chromium\";v=\"136\", \"Google Chrome\";v=\"136\", \"Not.A/Brand\";v=\"99\"",
       "sec-ch-ua-mobile": "?0",
       "sec-ch-ua-platform": "\"Windows\"",
-      "statsig_id": "0196a8f6-0501-79f8-8d74-a2f2c0f5f5f5"
+      "statsig_id": "",
+      "statsig_signer_url": "https://grok.wodf.de/sign"
     }
   },
   "chatgpt_fingerprint": {
-    "impersonate": "edge101",
+    "impersonate": "chrome110",
     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
     "sec-ch-ua": "\"Microsoft Edge\";v=\"143\", \"Chromium\";v=\"143\", \"Not A(Brand\";v=\"24\"",
     "sec-ch-ua-mobile": "?0",

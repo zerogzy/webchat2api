@@ -208,7 +208,7 @@ npm run dev
 
 ## Grok Browser Bridge、防护与账号 tier
 
-Grok Console 与 grok.com app-chat 是不同上游路径。本项目没有接入官方 xAI API，也不声称提供官方兼容能力。Console 路径可使用 `network_profiles.grok_console.cf_clearance` 附加手动 Cookie；app-chat 路径可使用 `network_profiles.grok_app_chat` 覆盖 UA、impersonate、`cf_clearance`、`cf_cookies`、`sec-ch-ua`、`x-statsig-id` 等字段。
+Grok Console 与 grok.com app-chat 是不同上游路径。本项目没有接入官方 xAI API，也不声称提供官方兼容能力。Console 路径可使用 `network_profiles.grok_console.cf_clearance` 附加手动 Cookie；app-chat 路径可使用 `network_profiles.grok_app_chat` 覆盖 UA、impersonate、`cf_clearance`、`cf_cookies`、`sec-ch-ua`、`x-statsig-id` 等字段。未提供手动 `statsig_id` 时，后端按 grok2api 的当前实现从 `grok.com/index` 提取 verification meta，再调用 `statsig_signer_url`（默认 `https://grok.wodf.de/sign`）生成按请求路径签名的 `x-statsig-id`，签名结果缓存一小时。
 
 ### Grok 账号生命周期与状态优先级机制
 系统实现了一套 Grok 账号生命周期状态优先级逻辑，用于应对偶发的 WAF 或探针波动：
@@ -379,6 +379,7 @@ cp config.example.json config.json
 | `network_profiles` | 见 `config.example.json` | ChatGPT Web、Grok Console 和 Grok app-chat 网络 profile |
 | `network_profiles.grok_console.cf_clearance` | 空 | Grok Console 请求附加的 Cloudflare `cf_clearance` Cookie |
 | `network_profiles.grok_app_chat` | 空 | Grok app-chat 请求 profile，可配置 `user-agent`、`impersonate`、`timeout`、`cf_clearance`、`cf_cookies`、`sec-ch-ua`、`x-statsig-id` 等字段 |
+| `network_profiles.grok_app_chat.statsig_signer_url` | `https://grok.wodf.de/sign` | 未配置合法手动 `statsig_id` 时使用的 Grok Statsig 签名服务；公网地址须为 HTTPS:443，容器内网地址可用 HTTP/HTTPS |
 | `chatgpt_fingerprint` | 见 `config.example.json` | ChatGPT Web 请求指纹，可配置 UA、impersonate 和 `sec-ch-ua` 等字段 |
 | `grok_console_fingerprint` | 空 | 旧版 Grok Console 指纹配置，仍兼容；同名字段会被 `network_profiles.grok_console` 覆盖 |
 | `enable_turnstile_solver` | `true` | ChatGPT Turnstile 要求出现时尝试求解，不保证所有真实挑战都能通过 |

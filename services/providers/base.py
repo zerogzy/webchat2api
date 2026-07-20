@@ -220,6 +220,7 @@ class ConversationRequest:
     response_format: str = "b64_json"
     base_url: str | None = None
     message_as_error: bool = False
+    thinking_effort: str = ""
 
 
 @dataclass

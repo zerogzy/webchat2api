@@ -449,7 +449,8 @@ curl http://localhost:83/api/accounts/export \
 | `network_profiles.grok_app_chat.impersonate` | 自动推断或 `chrome136` | Grok app-chat curl-cffi impersonate。 |
 | `network_profiles.grok_app_chat.cf_clearance` | 空 | Grok app-chat 请求附加的 `cf_clearance`。 |
 | `network_profiles.grok_app_chat.cf_cookies` | 空 | Grok app-chat 请求附加的 Cloudflare Cookie 串。 |
-| `network_profiles.grok_app_chat.statsig_id` | 见内置默认 | Grok app-chat `x-statsig-id`。 |
+| `network_profiles.grok_app_chat.statsig_id` | 空 | 手动 Grok app-chat `x-statsig-id`；配置后优先于动态签名。 |
+| `network_profiles.grok_app_chat.statsig_signer_url` | `https://grok.wodf.de/sign` | 动态 Statsig 签名服务；公网地址须为 HTTPS:443，容器内网地址可用 HTTP/HTTPS；签名按 method/path 缓存一小时。 |
 | `chatgpt_fingerprint` | 见示例配置 | ChatGPT Web 请求指纹。 |
 | `grok_console_fingerprint` | 空 | 旧版 Grok Console 指纹配置，仍兼容；建议迁移到 `network_profiles.grok_console`。 |
 

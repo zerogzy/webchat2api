@@ -229,7 +229,11 @@ def stream_text_response(backend, body: dict[str, Any]) -> Iterator[dict[str, An
     response_id = f"resp_{uuid.uuid4().hex}"
     created = int(time.time())
     yield response_created(response_id, model, created)
-    request = ConversationRequest(model=model, messages=messages)
+    request = ConversationRequest(
+        model=model,
+        messages=messages,
+        thinking_effort=gpt_chat.thinking_effort_from_body(body),
+    )
     if stream_text_deltas is not gpt_chat.stream_text_deltas:
         full_text = "".join(stream_text_deltas(backend, request))
     else:

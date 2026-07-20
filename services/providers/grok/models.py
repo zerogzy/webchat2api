@@ -3,6 +3,10 @@ from __future__ import annotations
 from services.providers.base import GROK_PROVIDER, ModelSpec
 
 GROK_MODEL_SPECS = (
+    ModelSpec("grok-chat-fast", GROK_PROVIDER, "xai", "grok-chat-fast", mode_id="fast", model_tier="basic"),
+    ModelSpec("grok-chat-auto", GROK_PROVIDER, "xai", "grok-chat-auto", mode_id="auto", model_tier="super"),
+    ModelSpec("grok-chat-expert", GROK_PROVIDER, "xai", "grok-chat-expert", mode_id="expert", model_tier="super"),
+    ModelSpec("grok-chat-heavy", GROK_PROVIDER, "xai", "grok-chat-heavy", mode_id="heavy", model_tier="heavy"),
     ModelSpec("grok-4.3", GROK_PROVIDER, "xai", "grok-4.3", "high"),
     ModelSpec("grok-4", GROK_PROVIDER, "xai", "grok-4", "high"),
     ModelSpec("grok-4.20", GROK_PROVIDER, "xai", "grok-4.20-reasoning"),
@@ -26,6 +30,7 @@ GROK_MODEL_SPECS = (
     ModelSpec("grok-4.3-beta", GROK_PROVIDER, "xai", "grok-4.3-beta", mode_id="grok-420-computer-use-sa", model_tier="super"),
     ModelSpec("grok-imagine-image-lite", GROK_PROVIDER, "xai", "grok-imagine-image-lite", mode_id="fast", model_tier="basic", capability="image"),
     ModelSpec("grok-imagine-image", GROK_PROVIDER, "xai", "grok-imagine-image", mode_id="auto", model_tier="super", capability="image"),
+    ModelSpec("grok-imagine-image-quality", GROK_PROVIDER, "xai", "grok-imagine-image-quality", mode_id="auto", model_tier="super", capability="image"),
     ModelSpec("grok-imagine-image-pro", GROK_PROVIDER, "xai", "grok-imagine-image-pro", mode_id="auto", model_tier="super", capability="image"),
     ModelSpec("grok-imagine-image-edit", GROK_PROVIDER, "xai", "grok-imagine-image-edit", mode_id="auto", model_tier="super", capability="image_edit"),
     ModelSpec("grok-imagine-video", GROK_PROVIDER, "xai", "grok-imagine-video", mode_id="auto", model_tier="super", capability="video"),

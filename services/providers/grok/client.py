@@ -17,6 +17,7 @@ from fastapi import HTTPException  # type: ignore[import-not-found]
 from services.config import config
 from services.providers.base import GROK_PROVIDER, ModelSpec
 from services.providers.grok.models import GROK_MODEL_SPECS, is_supported_grok_app_chat_image_model
+from services.providers.grok.statsig import grok_statsig_signer, valid_statsig_id
 from services.network.client import create_session
 from services.network.flaresolverr import FlareSolverrClearanceProvider
 from services.network.headers import build_grok_console_headers
@@ -32,7 +33,7 @@ APP_CHAT_RATE_LIMITS_URL = f"{APP_CHAT_BASE_URL}/rest/rate-limits"
 APP_CHAT_UPLOAD_FILE_URL = f"{APP_CHAT_BASE_URL}/rest/app-chat/upload-file"
 APP_CHAT_MEDIA_POST_CREATE_URL = f"{APP_CHAT_BASE_URL}/rest/media/post/create"
 GROK_ASSET_BASE_URL = "https://assets.grok.com/"
-GROK_APP_CHAT_STATSIG_ID = "0196a8f6-0501-79f8-8d74-a2f2c0f5f5f5"
+GROK_APP_CHAT_STATSIG_ID = ""
 GROK_IMAGE_EDIT_MODEL_NAME = "imagine-image-edit"
 GROK_IMAGE_EDIT_MODEL_KIND = "imagine"
 GROK_IMAGE_EDIT_MEDIA_TYPE = "MEDIA_POST_TYPE_IMAGE"
@@ -954,7 +955,6 @@ def app_chat_headers(access_token: str, account: dict[str, Any] | None = None) -
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",
         "User-Agent": _app_chat_profile_value(profile, account, "user_agent", "user_agent", "user-agent"),
-        "x-statsig-id": _app_chat_profile_value(profile, account, "statsig_id", "statsig_id", "x-statsig-id"),
         "x-xai-request-id": str(uuid.uuid4()),
     }
     sec_ch_ua = _app_chat_profile_value(profile, account, "sec_ch_ua", "sec_ch_ua", "sec-ch-ua")
@@ -971,6 +971,9 @@ def app_chat_headers(access_token: str, account: dict[str, Any] | None = None) -
     cookie = _app_chat_cookie(access_token, cf_clearance, cf_cookies)
     if cookie:
         headers["Cookie"] = cookie
+    statsig_id = _app_chat_profile_value(profile, account, "statsig_id", "statsig_id", "x-statsig-id")
+    if valid_statsig_id(statsig_id):
+        headers["x-statsig-id"] = statsig_id
     return headers
 
 
@@ -1016,11 +1019,11 @@ def build_app_chat_payload(
         raise HTTPException(status_code=400, detail={"error": "Grok app-chat requires a user text message"})
     payload: dict[str, Any] = {
         "collectionIds": [],
-        "connectors": [],
+        "disabledConnectorIds": [],
         "deviceEnvInfo": {
             "darkModeEnabled": False,
             "devicePixelRatio": 2,
-            "screenHeight": 1329,
+            "screenHeight": 1328,
             "screenWidth": 2056,
             "viewportHeight": 1083,
             "viewportWidth": 2056,
@@ -1029,36 +1032,23 @@ def build_app_chat_payload(
         "disableSearch": False,
         "disableSelfHarmShortCircuit": False,
         "disableTextFollowUps": False,
-        "enableImageGeneration": image_generation,
-        "enableImageStreaming": image_generation,
+        "enableImageGeneration": True,
+        "enableImageStreaming": True,
         "enableSideBySide": True,
         "fileAttachments": [],
         "forceConcise": False,
         "forceSideBySide": False,
         "imageAttachments": [],
-        "imageGenerationCount": int(body.get("n") or 1) if image_generation else 0,
+        "imageGenerationCount": int(body.get("n") or 2),
         "isAsyncChat": False,
         "message": message,
         "modeId": spec.mode_id or spec.upstream_model or spec.id,
         "responseMetadata": {},
         "returnImageBytes": False,
         "returnRawGrokInXaiRequest": False,
-        "searchAllConnectors": False,
         "sendFinalMetadata": True,
         "temporary": True,
-        "toolOverrides": {
-            "imageGen": False,
-            "webSearch": not image_generation,
-            "xSearch": False,
-            "xMediaSearch": False,
-            "trendsSearch": False,
-            "xPostAnalyze": False,
-        },
     }
-    if spec.model_tier:
-        payload["modelTier"] = spec.model_tier
-    if spec.prefer_best:
-        payload["preferBest"] = True
     if image_generation:
         aspect_ratio = grok_image_aspect_ratio(body.get("size"))
         if aspect_ratio:
@@ -1258,6 +1248,45 @@ def is_app_chat_final_event(event: dict[str, Any]) -> bool:
     if _app_chat_has_final_metadata(event):
         return True
     return False
+
+
+def app_chat_stream_error(event: dict[str, Any]) -> GrokConsoleError | None:
+    candidates: list[object] = [event.get("error")]
+    response = _event_response(event)
+    candidates.append(response.get("error"))
+    model_response = response.get("modelResponse")
+    if isinstance(model_response, dict):
+        candidates.append(model_response.get("error"))
+        stream_errors = model_response.get("streamErrors")
+        if isinstance(stream_errors, list):
+            candidates.extend(stream_errors)
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            message = candidate.strip()
+            code: object = None
+        elif isinstance(candidate, dict):
+            nested = candidate.get("error") if isinstance(candidate.get("error"), dict) else candidate
+            message = str(nested.get("message") or nested.get("detail") or nested.get("error") or "").strip()
+            code = nested.get("code")
+        else:
+            continue
+        if not message:
+            continue
+        lowered = message.lower()
+        if code == 7 or "anti-bot" in lowered:
+            return GrokConsoleError(message, 403, 403, "cloudflare_challenge")
+        if "usage limit" in lowered or "usage quota" in lowered:
+            return GrokConsoleError(message, 429, 429, "rate_limit_exceeded")
+        return GrokConsoleError(message, 502, code=str(code or "upstream_stream_error"))
+    return None
+
+
+def validated_app_chat_events(lines: Iterable[str | bytes]) -> Iterator[dict[str, Any]]:
+    for event in app_chat_line_events(lines):
+        error = app_chat_stream_error(event)
+        if error is not None:
+            raise error
+        yield event
 
 
 def _app_chat_json_data(attachment: dict[str, Any]) -> dict[str, Any]:
@@ -1569,6 +1598,12 @@ def _safe_exception_message(exc: BaseException) -> str:
     return _redact_grok_secrets(str(exc))[:1000]
 
 
+def _close_upstream_response(response: object) -> None:
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
+
+
 def _app_chat_error_contains(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in text for marker in markers)
 
@@ -1876,12 +1911,45 @@ class GrokAppChatClient:
 
         return retry_call(fn, policy=api_policy, deadline=deadline, on_retry=on_retry)
 
+    def _request_headers(self, url: str) -> dict[str, str]:
+        headers = app_chat_headers(self.access_token, self.account)
+        if headers.get("x-statsig-id"):
+            return headers
+        signer_url = str(getattr(self.network_profile, "statsig_signer_url", "") or "").strip()
+        if not signer_url:
+            return headers
+        try:
+            headers["x-statsig-id"] = grok_statsig_signer.sign(
+                self.session,
+                headers,
+                signer_url,
+                "POST",
+                url,
+            )
+        except Exception as exc:
+            logger.warning({
+                "event": "grok_statsig_sign_failed",
+                "path": urlparse(url).path,
+                "error": _safe_exception_message(exc),
+            })
+        return headers
+
+    def _invalidate_dynamic_statsig(self, url: str) -> bool:
+        profile = self.network_profile
+        if valid_statsig_id(getattr(profile, "statsig_id", "")):
+            return False
+        signer_url = str(getattr(profile, "statsig_signer_url", "") or "").strip()
+        if not signer_url:
+            return False
+        grok_statsig_signer.invalidate("POST", url)
+        return True
+
     def validate_rate_limits(self) -> dict[str, Any]:
         try:
             response = self._call_with_retry(
                 lambda: self.session.post(
                     APP_CHAT_RATE_LIMITS_URL,
-                    headers=app_chat_headers(self.access_token, self.account),
+                    headers=self._request_headers(APP_CHAT_RATE_LIMITS_URL),
                     json=build_grok_rate_limits_payload(self.account),
                     timeout=self.network_profile.timeout,
                 ),
@@ -1893,6 +1961,24 @@ class GrokAppChatClient:
                 502,
                 code="rate_limit_network_error",
             ) from exc
+        if response.status_code == 403 and self._invalidate_dynamic_statsig(APP_CHAT_RATE_LIMITS_URL):
+            _close_upstream_response(response)
+            try:
+                response = self._call_with_retry(
+                    lambda: self.session.post(
+                        APP_CHAT_RATE_LIMITS_URL,
+                        headers=self._request_headers(APP_CHAT_RATE_LIMITS_URL),
+                        json=build_grok_rate_limits_payload(self.account),
+                        timeout=self.network_profile.timeout,
+                    ),
+                    context="app_chat_rate_limits_statsig_refresh",
+                )
+            except requests.exceptions.RequestException as exc:
+                raise GrokConsoleError(
+                    "Grok app-chat rate-limit check unavailable",
+                    502,
+                    code="rate_limit_network_error",
+                ) from exc
         if response.status_code >= 400:
             error = classify_app_chat_upstream_error(int(response.status_code), self.access_token, response)
             if error.upstream_status in {401, 403} and error.code is None:
@@ -2016,7 +2102,7 @@ class GrokAppChatClient:
             response = self._call_with_retry(
                 lambda: self.session.post(
                     APP_CHAT_NEW_CONVERSATION_URL,
-                    headers=app_chat_headers(self.access_token, self.account),
+                    headers=self._request_headers(APP_CHAT_NEW_CONVERSATION_URL),
                     json=payload,
                     timeout=self.network_profile.timeout,
                     stream=True,
@@ -2025,12 +2111,27 @@ class GrokAppChatClient:
             )
         except requests.exceptions.RequestException as exc:
             raise GrokConsoleError(f"Grok app-chat upstream request failed: {_safe_exception_message(exc)}", 502) from exc
+        if response.status_code == 403 and self._invalidate_dynamic_statsig(APP_CHAT_NEW_CONVERSATION_URL):
+            _close_upstream_response(response)
+            try:
+                response = self._call_with_retry(
+                    lambda: self.session.post(
+                        APP_CHAT_NEW_CONVERSATION_URL,
+                        headers=self._request_headers(APP_CHAT_NEW_CONVERSATION_URL),
+                        json=payload,
+                        timeout=self.network_profile.timeout,
+                        stream=True,
+                    ),
+                    context="app_chat_statsig_refresh",
+                )
+            except requests.exceptions.RequestException as exc:
+                raise GrokConsoleError(f"Grok app-chat upstream request failed: {_safe_exception_message(exc)}", 502) from exc
         if response.status_code == 403 and self._refresh_clearance():
             try:
                 response = self._call_with_retry(
                     lambda: self.session.post(
                         APP_CHAT_NEW_CONVERSATION_URL,
-                        headers=app_chat_headers(self.access_token, self.account),
+                        headers=self._request_headers(APP_CHAT_NEW_CONVERSATION_URL),
                         json=payload,
                         timeout=self.network_profile.timeout,
                         stream=True,
@@ -2042,7 +2143,7 @@ class GrokAppChatClient:
         if response.status_code >= 400:
             raise classify_app_chat_upstream_error(int(response.status_code), self.access_token, response)
         try:
-            yield from app_chat_line_events(response.iter_lines())
+            yield from validated_app_chat_events(response.iter_lines())
         finally:
             close = getattr(response, "close", None)
             if callable(close):
@@ -2053,7 +2154,7 @@ class GrokAppChatClient:
         if bridge_first:
             bridge_lines = self._try_browser_bridge(payload)
             if bridge_lines is not None:
-                yield from app_chat_line_events(bridge_lines)
+                yield from validated_app_chat_events(bridge_lines)
                 return
         try:
             yield from self._stream_direct_events(payload)
@@ -2066,10 +2167,10 @@ class GrokAppChatClient:
             if bridge_lines is None:
                 raise
             logger.info({"event": "grok_app_chat_direct_fallback_to_bridge", "status": status})
-            yield from app_chat_line_events(bridge_lines)
+            yield from validated_app_chat_events(bridge_lines)
 
     def _post_direct_json(self, url: str, payload: dict[str, Any], *, context: str, referer: str | None = None) -> dict[str, Any]:
-        headers = app_chat_headers(self.access_token, self.account)
+        headers = self._request_headers(url)
         if referer:
             headers["Referer"] = referer
         try:
@@ -2084,8 +2185,25 @@ class GrokAppChatClient:
             )
         except requests.exceptions.RequestException as exc:
             raise GrokConsoleError(f"Grok app-chat {context} request failed: {_safe_exception_message(exc)}", 502) from exc
+        if response.status_code == 403 and self._invalidate_dynamic_statsig(url):
+            _close_upstream_response(response)
+            headers = self._request_headers(url)
+            if referer:
+                headers["Referer"] = referer
+            try:
+                response = self._call_with_retry(
+                    lambda: self.session.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=self.network_profile.timeout,
+                    ),
+                    context=f"{context}_statsig_refresh",
+                )
+            except requests.exceptions.RequestException as exc:
+                raise GrokConsoleError(f"Grok app-chat {context} request failed: {_safe_exception_message(exc)}", 502) from exc
         if response.status_code == 403 and self._refresh_clearance():
-            headers = app_chat_headers(self.access_token, self.account)
+            headers = self._request_headers(url)
             if referer:
                 headers["Referer"] = referer
             try:

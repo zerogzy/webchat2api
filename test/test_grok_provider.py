@@ -259,6 +259,7 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(grok_accounts.normalize_access_token({"sso-rw": " rw-token "}), "")
 
     def test_app_chat_headers_use_grok_app_shape_with_plain_token(self) -> None:
+        statsig_id = base64.b64encode(b"s" * 70).decode()
         with (
             mock.patch.object(grok, "_grok_app_chat_profile", return_value=types.SimpleNamespace(
                 user_agent="Test UA",
@@ -267,7 +268,7 @@ class GrokProviderTests(unittest.TestCase):
                 sec_ch_ua="test sec ua",
                 sec_ch_ua_mobile="?0",
                 sec_ch_ua_platform='"Windows"',
-                statsig_id="statsig-test",
+                statsig_id=statsig_id,
             )),
             mock.patch.object(grok.uuid, "uuid4", return_value="request-id"),
         ):
@@ -287,7 +288,7 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(headers["Sec-Ch-Ua-Mobile"], "?0")
         self.assertEqual(headers["Sec-Ch-Ua-Platform"], '"Windows"')
         self.assertEqual(headers["User-Agent"], "Test UA")
-        self.assertEqual(headers["x-statsig-id"], "statsig-test")
+        self.assertEqual(headers["x-statsig-id"], statsig_id)
         self.assertEqual(headers["x-xai-request-id"], "request-id")
         self.assertEqual(headers["Cookie"], "sso=plain-token; sso-rw=plain-token")
         self.assertNotIn("cf_clearance", headers["Cookie"])
@@ -366,14 +367,12 @@ class GrokProviderTests(unittest.TestCase):
         )
 
         self.assertFalse(payload["disableSearch"])
-        self.assertEqual(payload["toolOverrides"], {
-            "imageGen": False,
-            "webSearch": True,
-            "xSearch": False,
-            "xMediaSearch": False,
-            "trendsSearch": False,
-            "xPostAnalyze": False,
-        })
+        self.assertTrue(payload["enableImageGeneration"])
+        self.assertTrue(payload["enableImageStreaming"])
+        self.assertEqual(payload["imageGenerationCount"], 2)
+        self.assertEqual(payload["disabledConnectorIds"], [])
+        for obsolete in ("connectors", "searchAllConnectors", "toolOverrides"):
+            self.assertNotIn(obsolete, payload)
 
     def test_build_app_chat_payload_uses_mode_tier_and_image_flags(self) -> None:
         spec = resolve_model("grok-4.20-heavy")
@@ -386,14 +385,14 @@ class GrokProviderTests(unittest.TestCase):
 
         self.assertEqual(payload["message"], "Draw a cat")
         self.assertEqual(payload["modeId"], "heavy")
-        self.assertEqual(payload["modelTier"], "heavy")
-        self.assertTrue(payload["preferBest"])
+        self.assertNotIn("modelTier", payload)
+        self.assertNotIn("preferBest", payload)
         self.assertEqual(payload["collectionIds"], [])
-        self.assertEqual(payload["connectors"], [])
+        self.assertEqual(payload["disabledConnectorIds"], [])
         self.assertEqual(payload["deviceEnvInfo"], {
             "darkModeEnabled": False,
             "devicePixelRatio": 2,
-            "screenHeight": 1329,
+            "screenHeight": 1328,
             "screenWidth": 2056,
             "viewportHeight": 1083,
             "viewportWidth": 2056,
@@ -414,17 +413,10 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(payload["responseMetadata"], {})
         self.assertFalse(payload["returnImageBytes"])
         self.assertFalse(payload["returnRawGrokInXaiRequest"])
-        self.assertFalse(payload["searchAllConnectors"])
         self.assertTrue(payload["sendFinalMetadata"])
         self.assertTrue(payload["temporary"])
-        self.assertEqual(payload["toolOverrides"], {
-            "imageGen": False,
-            "webSearch": False,
-            "xSearch": False,
-            "xMediaSearch": False,
-            "trendsSearch": False,
-            "xPostAnalyze": False,
-        })
+        for obsolete in ("connectors", "searchAllConnectors", "toolOverrides"):
+            self.assertNotIn(obsolete, payload)
 
     def test_app_chat_reasoning_and_text_extraction(self) -> None:
         events = grok.app_chat_line_events([
@@ -1847,6 +1839,7 @@ class GrokProviderTests(unittest.TestCase):
         account_service.mark_text_used.assert_not_called()
 
     def test_app_chat_headers_use_account_metadata_over_global_profile(self) -> None:
+        statsig_id = base64.b64encode(b"g" * 70).decode()
         with mock.patch.object(grok, "_grok_app_chat_profile", return_value=types.SimpleNamespace(
             user_agent="Global UA",
             cf_clearance="global-clearance",
@@ -1854,7 +1847,7 @@ class GrokProviderTests(unittest.TestCase):
             sec_ch_ua="global sec ua",
             sec_ch_ua_mobile="?0",
             sec_ch_ua_platform='"Windows"',
-            statsig_id="global-statsig",
+            statsig_id=statsig_id,
         )):
             headers = grok.app_chat_headers("selected-token", {
                 "user_agent": "Account UA",
@@ -1869,8 +1862,22 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(headers["Sec-Ch-Ua"], "account sec ua")
         self.assertEqual(headers["Sec-Ch-Ua-Mobile"], "?1")
         self.assertEqual(headers["Sec-Ch-Ua-Platform"], '"Linux"')
-        self.assertEqual(headers["x-statsig-id"], "global-statsig")
+        self.assertEqual(headers["x-statsig-id"], statsig_id)
         self.assertEqual(headers["Cookie"], "sso=selected-token; sso-rw=selected-token; cf_bm=account-bm; cf_clearance=account-clearance")
+
+    def test_app_chat_headers_ignore_invalid_manual_statsig_id(self) -> None:
+        with mock.patch.object(grok, "_grok_app_chat_profile", return_value=types.SimpleNamespace(
+            user_agent="Test UA",
+            cf_clearance="",
+            cf_cookies="",
+            sec_ch_ua="",
+            sec_ch_ua_mobile="",
+            sec_ch_ua_platform="",
+            statsig_id="obsolete-static-id",
+        )):
+            headers = grok.app_chat_headers("selected-token")
+
+        self.assertNotIn("x-statsig-id", headers)
 
     def test_grok_app_chat_validate_rate_limits_marks_selected_account_limited(self) -> None:
         account_service = types.SimpleNamespace(update_account=mock.Mock())

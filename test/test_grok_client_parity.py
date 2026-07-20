@@ -28,6 +28,65 @@ def _account_service_module(account_service: object) -> ModuleType:
 
 
 class GrokClientParityTests(unittest.TestCase):
+    def test_dynamic_statsig_is_invalidated_and_retried_once_on_403(self) -> None:
+        client = grok.GrokAppChatClient.__new__(grok.GrokAppChatClient)
+        client.access_token = "token"
+        client.account = {}
+        client.network_profile = types.SimpleNamespace(
+            statsig_id="",
+            statsig_signer_url="https://grok.wodf.de/sign",
+            timeout=1,
+        )
+        forbidden = mock.Mock(status_code=403)
+        success = mock.Mock(status_code=200)
+        success.iter_lines.return_value = [b'data: {"result":{"response":{"isSoftStop":true}}}']
+        client.session = mock.Mock()
+        client.session.post.side_effect = [forbidden, success]
+        client._call_with_retry = lambda callback, **_: callback()
+
+        with (
+            mock.patch.object(grok, "app_chat_headers", return_value={}),
+            mock.patch.object(grok.grok_statsig_signer, "sign", return_value="signed"),
+            mock.patch.object(grok.grok_statsig_signer, "invalidate") as invalidate,
+        ):
+            events = list(client._stream_direct_events({"message": "hello"}))
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(client.session.post.call_count, 2)
+        forbidden.close.assert_called_once_with()
+        invalidate.assert_called_once_with("POST", grok.APP_CHAT_NEW_CONVERSATION_URL)
+
+    def test_upstream_public_model_aliases_resolve_to_current_web_modes(self) -> None:
+        expected = {
+            "grok-chat-fast": ("fast", "basic", "chat"),
+            "grok-chat-auto": ("auto", "super", "chat"),
+            "grok-chat-expert": ("expert", "super", "chat"),
+            "grok-chat-heavy": ("heavy", "heavy", "chat"),
+            "grok-imagine-image-quality": ("auto", "super", "image"),
+        }
+        for model, values in expected.items():
+            with self.subTest(model=model):
+                spec = resolve_model(model)
+                self.assertEqual((spec.mode_id, spec.model_tier, spec.capability), values)
+
+    def test_stream_errors_inside_successful_http_stream_are_not_treated_as_empty_output(self) -> None:
+        error = grok.app_chat_stream_error({
+            "result": {"response": {"modelResponse": {"streamErrors": [{"message": "usage limit reached"}]}}},
+        })
+
+        self.assertIsNotNone(error)
+        assert error is not None
+        self.assertEqual(error.status_code, 429)
+        self.assertEqual(error.code, "rate_limit_exceeded")
+
+    def test_validated_events_reject_bridge_stream_errors(self) -> None:
+        lines = [
+            b'data: {"result":{"response":{"modelResponse":{"streamErrors":[{"message":"upstream failed"}]}}}}',
+        ]
+
+        with self.assertRaisesRegex(grok.GrokConsoleError, "upstream failed"):
+            list(grok.validated_app_chat_events(lines))
+
     def test_rate_limit_payload_includes_upstream_model_only(self) -> None:
         self.assertEqual(
             grok.build_grok_rate_limits_payload({"modelName": "grok-custom"}),

@@ -166,8 +166,12 @@ def _text_delta_source(backend, messages: list[dict[str, Any]], model: str, body
     if resolve_model(model).provider == QODER_PROVIDER:
         return qoder_chat.chat_completion_deltas(body=body or {}, messages=messages, model=model)
     if stream_text_deltas is not gpt_chat.stream_text_deltas:
-        return stream_text_deltas(backend, ConversationRequest(model=model, messages=messages))
-    return gpt_chat.chat_completion_deltas(body={}, messages=messages, model=model, backend=backend)
+        return stream_text_deltas(backend, ConversationRequest(
+            model=model,
+            messages=messages,
+            thinking_effort=gpt_chat.thinking_effort_from_body(body or {}),
+        ))
+    return gpt_chat.chat_completion_deltas(body=body or {}, messages=messages, model=model, backend=backend)
 
 
 def stream_text_chat_completion(
@@ -176,12 +180,13 @@ def stream_text_chat_completion(
     model: str,
     include_usage: bool = False,
     usage_messages: list[dict[str, Any]] | None = None,
+    body: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     sent_role = False
     content_parts: list[str] = []
-    for delta_text in _text_delta_source(backend, messages, model):
+    for delta_text in _text_delta_source(backend, messages, model, body):
         content_parts.append(delta_text)
         if not sent_role:
             sent_role = True
@@ -282,7 +287,11 @@ def stream_tool_text_chat_completion(
     model: str,
     include_usage: bool = False,
 ) -> Iterator[dict[str, Any]]:
-    request = ConversationRequest(model=model, messages=messages)
+    request = ConversationRequest(
+        model=model,
+        messages=messages,
+        thinking_effort=gpt_chat.thinking_effort_from_body(body),
+    )
     if stream_text_deltas is not gpt_chat.stream_text_deltas:
         content = "".join(stream_text_deltas(backend, request))
     elif collect_text is not gpt_chat.collect_text:
@@ -852,7 +861,11 @@ def non_stream_text_chat_response(body: dict[str, Any], model: str, messages: li
         raw_response = qoder_chat.raw_chat_completion(body=body, messages=messages, model=model)
         return _raw_openai_provider_response(body, model, messages, original_messages, raw_response)
     if collect_text is not gpt_chat.collect_text:
-        request = ConversationRequest(model=model, messages=messages)
+        request = ConversationRequest(
+            model=model,
+            messages=messages,
+            thinking_effort=gpt_chat.thinking_effort_from_body(body),
+        )
         content = collect_text(text_backend(), request)
     else:
         content = gpt_chat.chat_completion(body, messages, model, backend=text_backend())
@@ -953,16 +966,16 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         if spec.provider == CATPAW_PROVIDER:
             return stream_catpaw_chat_completion(body, messages, model, stream_include_usage(body), original_messages)
         if spec.provider == JOYCODE_PROVIDER:
-            return stream_text_chat_completion(None, messages, model, stream_include_usage(body), original_messages)
+            return stream_text_chat_completion(None, messages, model, stream_include_usage(body), original_messages, body)
         if spec.provider == CODEBUDDY_PROVIDER:
-            return stream_text_chat_completion(None, messages, model, stream_include_usage(body), original_messages)
+            return stream_text_chat_completion(None, messages, model, stream_include_usage(body), original_messages, body)
         if spec.provider == QODER_PROVIDER:
-            return stream_text_chat_completion(None, messages, model, stream_include_usage(body), original_messages)
+            return stream_text_chat_completion(None, messages, model, stream_include_usage(body), original_messages, body)
         if spec.provider == GROK_PROVIDER:
             return stream_grok_chat_completion(body, spec, messages, model)
         if spec.provider == GEMINI_PROVIDER:
             return stream_gemini_chat_completion(body, spec, messages, model)
-        return stream_text_chat_completion(text_backend(), messages, model, stream_include_usage(body), original_messages)
+        return stream_text_chat_completion(text_backend(), messages, model, stream_include_usage(body), original_messages, body)
     model, messages, original_messages = text_chat_parts(body)
     spec = resolve_model(model)
     reject_gemini_image_model_in_chat(spec)
