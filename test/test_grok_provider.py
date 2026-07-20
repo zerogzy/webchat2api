@@ -831,6 +831,42 @@ class GrokProviderTests(unittest.TestCase):
         self.assertEqual(error.code, "rate_limit_exceeded")
         account_service.update_account.assert_called_once_with("token-1", {"status": "限流"})
 
+    def test_console_rps_429_does_not_persist_account_as_limited(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+        response = mock.Mock()
+        response.json.return_value = {
+            "error": {
+                "message": (
+                    "Too many requests for team 00000000-0000-0000-0000-000000000013 "
+                    "and model grok-4.3. Requests per Second (actual/limit): 2/2."
+                ),
+            },
+        }
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": _account_service_module(account_service)}),
+            self.assertRaises(grok.GrokConsoleError) as ctx,
+        ):
+            grok._raise_console_upstream_error("token-1", 429, response)
+
+        self.assertEqual(ctx.exception.code, "rate_limit_transient")
+        self.assertEqual(ctx.exception.status_code, 429)
+        account_service.update_account.assert_not_called()
+
+    def test_console_explicit_quota_429_persists_account_as_limited(self) -> None:
+        account_service = types.SimpleNamespace(update_account=mock.Mock())
+        response = mock.Mock()
+        response.json.return_value = {"error": {"message": "Usage limit reached: quota exhausted"}}
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": _account_service_module(account_service)}),
+            self.assertRaises(grok.GrokConsoleError) as ctx,
+        ):
+            grok._raise_console_upstream_error("token-1", 429, response)
+
+        self.assertEqual(ctx.exception.code, "quota_exhausted")
+        account_service.update_account.assert_called_once_with("token-1", {"status": "限流"})
+
     def test_app_chat_completion_events_retries_second_token_after_rate_limit(self) -> None:
         calls: list[set[str]] = []
 
@@ -1034,6 +1070,34 @@ class GrokProviderTests(unittest.TestCase):
 
         account_service.get_grok_console_access_token.assert_called_once_with()
         account_service.mark_grok_console_used.assert_called_once_with("grok-token", success=False)
+
+    def test_console_chat_completion_refunds_reserved_quota_for_transient_rate_limit(self) -> None:
+        account_service = types.SimpleNamespace(
+            get_grok_console_access_token=mock.Mock(return_value="grok-token"),
+            mark_grok_console_used=mock.Mock(),
+        )
+        client = mock.Mock()
+        client.__enter__ = mock.Mock(return_value=client)
+        client.__exit__ = mock.Mock(return_value=None)
+        client.create_response.side_effect = grok.GrokConsoleError(
+            "requests per second exceeded",
+            429,
+            429,
+            "rate_limit_transient",
+        )
+
+        with (
+            mock.patch.dict(sys.modules, {"services.account_service": _account_service_module(account_service)}),
+            mock.patch.object(grok, "GrokConsoleClient", return_value=client),
+        ):
+            with self.assertRaises(grok.HTTPException):
+                grok.console_chat_completion({}, resolve_model("grok-4.3"), [{"role": "user", "content": "Hello"}])
+
+        account_service.mark_grok_console_used.assert_called_once_with(
+            "grok-token",
+            success=False,
+            refund_quota=True,
+        )
 
     def test_console_chat_completion_marks_empty_response_failed_without_extra_quota_decrement(self) -> None:
         account_service = types.SimpleNamespace(

@@ -112,6 +112,28 @@ _APP_CHAT_CHALLENGE_MARKERS = (
     "interstitial",
     "browser integrity check",
 )
+_CONSOLE_TRANSIENT_RATE_LIMIT_MARKERS = (
+    "requests per second",
+    "request per second",
+    "requests per minute",
+    "request per minute",
+    "tokens per second",
+    "token per second",
+    "tokens per minute",
+    "token per minute",
+    "actual/limit",
+    "too many requests for team",
+)
+_CONSOLE_QUOTA_EXHAUSTED_MARKERS = (
+    "quota exhausted",
+    "quota_exhausted",
+    "insufficient quota",
+    "usage limit reached",
+    "usage quota",
+    "credits exhausted",
+    "credit balance",
+    "billing hard limit",
+)
 _APP_CHAT_AUTH_STATUS_CODES = {401, 403}
 _APP_CHAT_LIMIT_STATUS_CODES = {402, 429}
 _APP_CHAT_TRANSIENT_STATUS_CODES = {408, 500, 502, 503, 504}
@@ -605,10 +627,25 @@ def _openai_status(upstream_status: int) -> int:
     return 502
 
 
-def _feedback_status(upstream_status: int) -> str | None:
+def _console_limit_code(upstream_status: int, detail: str = "") -> str | None:
+    if upstream_status == 402:
+        return "quota_exhausted"
+    if upstream_status != 429:
+        return None
+    lowered = str(detail or "").lower()
+    if any(marker in lowered for marker in _CONSOLE_TRANSIENT_RATE_LIMIT_MARKERS):
+        return "rate_limit_transient"
+    if any(marker in lowered for marker in _CONSOLE_QUOTA_EXHAUSTED_MARKERS):
+        return "quota_exhausted"
+    # An unqualified 429 is normally a temporary throughput limit. Persisting it
+    # as account exhaustion makes a healthy account unavailable until manual refresh.
+    return "rate_limit_transient"
+
+
+def _feedback_status(upstream_status: int, detail: str = "") -> str | None:
     if upstream_status in {401, 403}:
         return "异常"
-    if upstream_status in {402, 429}:
+    if _console_limit_code(upstream_status, detail) == "quota_exhausted":
         return "限流"
     return None
 
@@ -653,16 +690,21 @@ def _console_upstream_error_detail(response: object | None) -> str:
 
 
 def _raise_console_upstream_error(access_token: str, upstream_status: int, response: object | None = None) -> None:
-    feedback_status = _feedback_status(upstream_status)
+    detail = _console_upstream_error_detail(response)
+    feedback_status = _feedback_status(upstream_status, detail)
     if feedback_status:
         from services.account_service import account_service
 
         account_service.update_account(access_token, {"status": feedback_status})
     message = f"Grok upstream error (HTTP {upstream_status})"
-    detail = _console_upstream_error_detail(response)
     if detail:
         message = f"{message}: {detail}"
-    raise GrokConsoleError(message, _openai_status(upstream_status), upstream_status)
+    raise GrokConsoleError(
+        message,
+        _openai_status(upstream_status),
+        upstream_status,
+        code=_console_limit_code(upstream_status, detail),
+    )
 
 
 class GrokConsoleClient:
@@ -2547,7 +2589,10 @@ def console_chat_completion(body: dict[str, Any], spec: ModelSpec, messages: lis
         with GrokConsoleClient(access_token) as client:
             response_json = client.create_response(payload)
     except GrokConsoleError as exc:
-        account_service.mark_grok_console_used(access_token, success=False)
+        if exc.code == "rate_limit_transient":
+            account_service.mark_grok_console_used(access_token, success=False, refund_quota=True)
+        else:
+            account_service.mark_grok_console_used(access_token, success=False)
         raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
     completion = extract_console_completion(response_json)
     if not completion.content and not completion.reasoning_content:
@@ -2569,7 +2614,10 @@ def console_chat_completion_events(body: dict[str, Any], spec: ModelSpec, messag
             for event in client.stream_response(payload):
                 yield event
     except GrokConsoleError as exc:
-        account_service.mark_grok_console_used(access_token, success=False)
+        if exc.code == "rate_limit_transient":
+            account_service.mark_grok_console_used(access_token, success=False, refund_quota=True)
+        else:
+            account_service.mark_grok_console_used(access_token, success=False)
         raise HTTPException(status_code=exc.status_code, detail=exc.to_http_detail()) from exc
     account_service.mark_grok_console_used(access_token, success=True)
 

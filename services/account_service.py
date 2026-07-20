@@ -567,7 +567,12 @@ class AccountService:
             "last_check_at": now,
         }, provider=CODEBUDDY_PROVIDER)
 
-    def mark_grok_console_used(self, access_token: str, success: bool = True) -> None:
+    def mark_grok_console_used(
+        self,
+        access_token: str,
+        success: bool = True,
+        refund_quota: bool = False,
+    ) -> None:
         if not access_token:
             return
         with self._lock:
@@ -584,6 +589,14 @@ class AccountService:
                     next_item["status"] = "正常"
             else:
                 next_item["fail"] = int(next_item.get("fail") or 0) + 1
+                if refund_quota:
+                    grok_strategy = account_strategy(GROK_PROVIDER)
+                    quota = grok_strategy.normalize_console_quota(next_item.get("quota_console"))
+                    total = max(0, int(quota.get("total") or 0))
+                    quota["remaining"] = min(total, max(0, int(quota.get("remaining") or 0)) + 1)
+                    if quota["remaining"] > 0:
+                        quota["reset_at"] = None
+                    next_item["quota_console"] = quota
             account = self._normalize_account(next_item)
             if account is None:
                 return

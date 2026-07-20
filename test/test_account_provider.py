@@ -627,6 +627,24 @@ class AccountProviderTests(unittest.TestCase):
         self.assertEqual(account["quota_console"]["reset_at"], 5900)
         self.assertEqual(service.get_grok_console_access_token(), "")
 
+    def test_grok_console_transient_rate_limit_refunds_reserved_quota(self) -> None:
+        service = AccountService(MemoryStorage([
+            {
+                "access_token": "sso=grok-token",
+                "provider": "grok",
+                "quota_console": {"remaining": 1, "total": 30, "window_seconds": 900, "reset_at": None},
+            }
+        ]), now=lambda: 5000.0)
+
+        self.assertEqual(service.get_grok_console_access_token(), "grok-token")
+        service.mark_grok_console_used("grok-token", success=False, refund_quota=True)
+
+        account = service.get_account("grok-token", provider=GROK_PROVIDER)
+        self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["fail"], 1)
+        self.assertEqual(account["quota_console"]["remaining"], 1)
+        self.assertIsNone(account["quota_console"]["reset_at"])
+
     def test_grok_console_selection_reserves_without_provider_mark(self) -> None:
         service = AccountService(MemoryStorage([
             {
