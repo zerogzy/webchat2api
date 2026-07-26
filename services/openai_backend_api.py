@@ -18,6 +18,8 @@ from services.config import config
 from services.network.client import create_session
 from services.network.headers import build_chatgpt_web_headers
 from services.network.profiles import build_chatgpt_web_profile
+from services.providers.base import GPT_PROVIDER
+from services.providers.gpt.models import gpt_upstream_model_id, normalize_gpt_thinking_effort
 from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
@@ -85,6 +87,7 @@ class OpenAIBackendAPI:
         self.user_agent = self.fp["user-agent"]
         self.device_id = self.fp["oai-device-id"]
         self.session_id = self.fp["oai-session-id"]
+        self._persist_network_profile()
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
         self.session = create_session(impersonate=self.network_profile.impersonate, verify=self.network_profile.verify, account=self.account)
@@ -107,7 +110,7 @@ class OpenAIBackendAPI:
         self.close()
 
     def _load_account(self) -> dict:
-        account = account_service.get_account(self.access_token) if self.access_token else {}
+        account = account_service.get_account(self.access_token, provider=GPT_PROVIDER) if self.access_token else {}
         return account if isinstance(account, dict) else {}
 
     def _build_network_profile(self):
@@ -115,6 +118,35 @@ class OpenAIBackendAPI:
         global_fp = config.data.get("chatgpt_fingerprint")
         global_fp = global_fp if isinstance(global_fp, dict) else {}
         return build_chatgpt_web_profile(account, global_fp)
+
+    def _persist_network_profile(self, *, force: bool = False) -> None:
+        if not self.access_token or not self.account:
+            return
+        raw_fp = self.account.get("fp")
+        stored_fp = dict(raw_fp) if isinstance(raw_fp, dict) else {}
+        has_device_id = bool(self.account.get("oai-device-id") or stored_fp.get("oai-device-id"))
+        has_session_id = bool(self.account.get("oai-session-id") or stored_fp.get("oai-session-id"))
+        if not force and has_device_id and has_session_id:
+            return
+
+        updates: dict[str, Any] = {"fp": {**stored_fp, **self.fp}}
+        for key in ("oai-device-id", "oai-session-id"):
+            if key in self.account:
+                updates[key] = self.fp[key]
+        try:
+            persisted = account_service.update_account(
+                self.access_token,
+                updates,
+                provider=GPT_PROVIDER,
+            )
+        except Exception as exc:
+            logger.warning({
+                "event": "chatgpt_fingerprint_persist_failed",
+                "error_type": type(exc).__name__,
+            })
+            return
+        if isinstance(persisted, dict):
+            self.account = persisted
 
     def _call_with_retry(self, fn, policy=None, context=""):
         """Wrap a callable with retry + session refresh on 403."""
@@ -134,32 +166,36 @@ class OpenAIBackendAPI:
 
     def _refresh_session(self) -> None:
         """Create a fresh session with new device/session IDs after anti-bot detection."""
-        from services.account_service import account_service
-        from services.network.client import create_session
-        from services.network.headers import build_chatgpt_web_headers
-        from services.network.profiles import build_chatgpt_web_profile
-
-        account = account_service.get_account(self.access_token) if self.access_token else {}
+        account = account_service.get_account(self.access_token, provider=GPT_PROVIDER) if self.access_token else {}
         account = account if isinstance(account, dict) else {}
         raw_fp = account.get("fp")
-        if isinstance(raw_fp, dict):
-            raw_fp.pop("oai-device-id", None)
-            raw_fp.pop("oai-session-id", None)
-            account["fp"] = raw_fp
-
-        from services.config import config
+        raw_fp = dict(raw_fp) if isinstance(raw_fp, dict) else {}
+        raw_fp.pop("oai-device-id", None)
+        raw_fp.pop("oai-session-id", None)
+        account["fp"] = raw_fp
+        account.pop("oai-device-id", None)
+        account.pop("oai-session-id", None)
 
         global_fp = config.data.get("chatgpt_fingerprint", {})
-        global_fp = global_fp if isinstance(global_fp, dict) else {}
+        global_fp = dict(global_fp) if isinstance(global_fp, dict) else {}
+        global_fp.pop("oai-device-id", None)
+        global_fp.pop("oai-session-id", None)
 
         fresh = build_chatgpt_web_profile(account, global_fp)
+        previous_account = self.account
+        self.account = account
         self.network_profile = fresh
         self.fp = fresh.as_fingerprint()
         self.user_agent = self.fp["user-agent"]
         self.device_id = self.fp["oai-device-id"]
         self.session_id = self.fp["oai-session-id"]
 
-        self.session = create_session(impersonate=fresh.impersonate, verify=fresh.verify)
+        previous_session = self.session
+        self.session = create_session(
+            impersonate=fresh.impersonate,
+            verify=fresh.verify,
+            account=account,
+        )
         self.session.headers.update(build_chatgpt_web_headers(
             fresh,
             base_url=self.base_url,
@@ -168,9 +204,11 @@ class OpenAIBackendAPI:
         ))
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+        previous_session.close()
 
-        if self.access_token:
-            account_service.update_account(self.access_token, {"fp": self.fp})
+        if previous_account:
+            self.account = previous_account
+        self._persist_network_profile(force=True)
 
         # Raw bootstrap to avoid recursive retry-wrapping — session is already fresh.
         _bootstrap_response = self.session.get(self.base_url + "/", headers=self._bootstrap_headers(), timeout=30)
@@ -216,18 +254,25 @@ class OpenAIBackendAPI:
             raise RuntimeError(f"{path} failed: HTTP {response.status_code}")
         return response.json()
 
-    def _get_conversation_init(self) -> Dict[str, Any]:
+    def _get_conversation_init(
+            self,
+            requested_default_model: Optional[str] = None,
+            system_hints: Optional[list[str]] = None,
+    ) -> Dict[str, Any]:
         path = "/backend-api/conversation/init"
+        body: Dict[str, Any] = {
+            "gizmo_id": None,
+            "requested_default_model": requested_default_model,
+            "conversation_id": None,
+            "timezone_offset_min": -480,
+        }
+        if system_hints:
+            body["system_hints"] = list(system_hints)
         response = self._call_with_retry(
             lambda: self.session.post(
                 self.base_url + path,
                 headers=self._headers(path, {"Content-Type": "application/json"}),
-                json={
-                    "gizmo_id": None,
-                    "requested_default_model": None,
-                    "conversation_id": None,
-                    "timezone_offset_min": -480,
-                },
+                json=body,
                 timeout=20,
             ),
             context=path,
@@ -463,14 +508,30 @@ class OpenAIBackendAPI:
 
     @staticmethod
     def _normalize_thinking_effort(value: object) -> str:
-        normalized = str(value or "").strip().lower()
-        if normalized in {"", "none"}:
-            return ""
-        if normalized in {"low", "medium", "high"}:
-            return normalized
-        if normalized in {"xhigh", "extended"}:
-            return "extended"
-        return ""
+        return normalize_gpt_thinking_effort(value)
+
+    @staticmethod
+    def _conversation_system_hints(messages: list[Dict[str, Any]]) -> list[str]:
+        has_file = any(
+            isinstance(message.get("content"), list)
+            and any(
+                isinstance(part, dict) and part.get("type") == "file"
+                for part in message.get("content", [])
+            )
+            for message in messages
+        )
+        return ["retrieval"] if has_file else []
+
+    @staticmethod
+    def _partial_query(conversation_messages: list[Dict[str, Any]]) -> Dict[str, Any]:
+        for message in reversed(conversation_messages):
+            if str((message.get("author") or {}).get("role") or "") == "user":
+                return dict(message)
+        return dict(conversation_messages[-1]) if conversation_messages else {
+            "id": new_uuid(),
+            "author": {"role": "user"},
+            "content": {"content_type": "text", "parts": [""]},
+        }
 
     def _conversation_payload(
             self,
@@ -478,32 +539,31 @@ class OpenAIBackendAPI:
             model: str,
             timezone: str,
             thinking_effort: str = "",
+            *,
+            conversation_messages: Optional[list[Dict[str, Any]]] = None,
+            parent_message_id: str = "",
+            client_prepare_state: str = "",
+            system_hints: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
         """把标准 messages 构造成 web 对话请求体。"""
-        payload = {
+        converted_messages = (
+            conversation_messages
+            if conversation_messages is not None
+            else self._api_messages_to_conversation_messages(messages)
+        )
+        parent_id = parent_message_id or new_uuid()
+        hints = list(system_hints) if system_hints is not None else self._conversation_system_hints(messages)
+        payload: Dict[str, Any] = {
             "action": "next",
-            "messages": self._api_messages_to_conversation_messages(messages),
+            "messages": converted_messages,
             "model": model,
-            "parent_message_id": new_uuid(),
+            "parent_message_id": parent_id,
             "conversation_mode": {"kind": "primary_assistant"},
             "conversation_origin": None,
-            "force_paragen": False,
-            "force_paragen_model_slug": "",
-            "force_rate_limit": False,
-            "force_use_sse": True,
             "history_and_training_disabled": True,
-            "reset_rate_limits": False,
-            "suggestions": [],
-            "supported_encodings": [],
-            "system_hints": ["retrieval"] if any(
-                isinstance(message.get("content"), list)
-                and any(isinstance(part, dict) and part.get("type") == "file" for part in message.get("content", []))
-                for message in messages
-            ) else [],
+            "system_hints": hints,
             "timezone": timezone,
             "timezone_offset_min": -480,
-            "variant_purpose": "comparison_implicit",
-            "websocket_request_id": new_uuid(),
             "client_contextual_info": {
                 "is_dark_mode": False,
                 "time_since_loaded": 120,
@@ -512,12 +572,108 @@ class OpenAIBackendAPI:
                 "pixel_ratio": 2,
                 "screen_height": 1440,
                 "screen_width": 2560,
+                "app_name": "chatgpt.com",
             },
         }
+        if client_prepare_state:
+            payload.update({
+                "client_prepare_state": client_prepare_state,
+                "enable_message_followups": True,
+                "supports_buffering": True,
+                "supported_encodings": ["v1"],
+                "paragen_cot_summary_display_override": "allow",
+                "force_parallel_switch": "auto",
+            })
+        else:
+            payload.update({
+                "force_paragen": False,
+                "force_paragen_model_slug": "",
+                "force_rate_limit": False,
+                "force_use_sse": True,
+                "reset_rate_limits": False,
+                "suggestions": [],
+                "supported_encodings": [],
+                "variant_purpose": "comparison_implicit",
+                "websocket_request_id": new_uuid(),
+            })
         normalized_effort = self._normalize_thinking_effort(thinking_effort)
         if normalized_effort:
             payload["thinking_effort"] = normalized_effort
         return payload
+
+    def _prepare_text_conversation(
+            self,
+            conversation_messages: list[Dict[str, Any]],
+            model: str,
+            timezone: str,
+            thinking_effort: str,
+            parent_message_id: str,
+            system_hints: list[str],
+    ) -> str:
+        path = "/backend-api/f/conversation/prepare"
+        body: Dict[str, Any] = {
+            "action": "next",
+            "fork_from_shared_post": False,
+            "parent_message_id": parent_message_id,
+            "model": model,
+            "client_prepare_state": "N/A",
+            "timezone_offset_min": -480,
+            "timezone": timezone,
+            "conversation_mode": {"kind": "primary_assistant"},
+            "history_and_training_disabled": True,
+            "system_hints": system_hints,
+            "partial_query": self._partial_query(conversation_messages),
+            "supports_buffering": True,
+            "supported_encodings": ["v1"],
+            "client_contextual_info": {"app_name": "chatgpt.com"},
+        }
+        normalized_effort = self._normalize_thinking_effort(thinking_effort)
+        if normalized_effort:
+            body["thinking_effort"] = normalized_effort
+        response = self._call_with_retry(
+            lambda: self.session.post(
+                self.base_url + path,
+                headers=self._headers(path, {
+                    "Accept": "*/*",
+                    "Content-Type": "application/json",
+                    "X-Conduit-Token": "no-token",
+                }),
+                json=body,
+                timeout=60,
+            ),
+            context=path,
+        )
+        ensure_ok(response, path)
+        payload = response.json()
+        conduit_token = str(payload.get("conduit_token") or "") if isinstance(payload, dict) else ""
+        if not conduit_token:
+            raise RuntimeError("missing conduit_token")
+        return conduit_token
+
+    def _prepare_text_request(
+            self,
+            conversation_messages: list[Dict[str, Any]],
+            model: str,
+            timezone: str,
+            thinking_effort: str,
+            parent_message_id: str,
+            system_hints: list[str],
+    ) -> tuple[ChatRequirements, str]:
+        for _ in range(3):
+            session_id = self.session_id
+            self._get_conversation_init(model, system_hints)
+            conduit_token = self._prepare_text_conversation(
+                conversation_messages,
+                model,
+                timezone,
+                thinking_effort,
+                parent_message_id,
+                system_hints,
+            )
+            requirements = self._get_chat_requirements()
+            if self.session_id == session_id:
+                return requirements, conduit_token
+        raise RuntimeError("ChatGPT session changed repeatedly while preparing the conversation")
 
     def _image_model_slug(self, model: str) -> str:
         """把标准图片模型名映射到底层 model slug。"""
@@ -1266,17 +1422,69 @@ class OpenAIBackendAPI:
 
         normalized = messages or [{"role": "user", "content": prompt}]
         self._bootstrap()
-        requirements = self._get_chat_requirements()
         path, timezone = self._chat_target()
-        payload = self._conversation_payload(normalized, model, timezone, thinking_effort)
-        response = self._call_with_retry(
-            lambda: self.session.post(
+        upstream_model = gpt_upstream_model_id(model)
+        if self.access_token:
+            conversation_messages = self._api_messages_to_conversation_messages(normalized)
+            hints = self._conversation_system_hints(normalized)
+            parent_message_id = new_uuid()
+            requirements, conduit_token = self._prepare_text_request(
+                conversation_messages,
+                upstream_model,
+                timezone,
+                thinking_effort,
+                parent_message_id,
+                hints,
+            )
+            payload = self._conversation_payload(
+                normalized,
+                upstream_model,
+                timezone,
+                thinking_effort,
+                conversation_messages=conversation_messages,
+                parent_message_id=parent_message_id,
+                client_prepare_state="success",
+                system_hints=hints,
+            )
+        else:
+            requirements = self._get_chat_requirements()
+            payload = self._conversation_payload(normalized, upstream_model, timezone, thinking_effort)
+
+        request_state: Dict[str, Any] = {
+            "session_id": self.session_id,
+            "requirements": requirements,
+            "conduit_token": conduit_token if self.access_token else "",
+        }
+
+        def post_conversation():
+            if request_state["session_id"] != self.session_id:
+                if self.access_token:
+                    refreshed_requirements, refreshed_conduit = self._prepare_text_request(
+                        conversation_messages,
+                        upstream_model,
+                        timezone,
+                        thinking_effort,
+                        parent_message_id,
+                        hints,
+                    )
+                    request_state["requirements"] = refreshed_requirements
+                    request_state["conduit_token"] = refreshed_conduit
+                else:
+                    request_state["requirements"] = self._get_chat_requirements()
+                request_state["session_id"] = self.session_id
+            headers = self._conversation_headers(path, request_state["requirements"])
+            if request_state["conduit_token"]:
+                headers["X-Conduit-Token"] = request_state["conduit_token"]
+            return self.session.post(
                 self.base_url + path,
-                headers=self._conversation_headers(path, requirements),
+                headers=headers,
                 json=payload,
                 timeout=300,
                 stream=True,
-            ),
+            )
+
+        response = self._call_with_retry(
+            post_conversation,
             context=path,
         )
         ensure_ok(response, path)
@@ -1362,13 +1570,42 @@ class OpenAIBackendAPI:
 
     def _chat_target(self) -> tuple[str, str]:
         if self.access_token:
-            return "/backend-api/conversation", "Asia/Shanghai"
+            return "/backend-api/f/conversation", "Asia/Shanghai"
         return "/backend-anon/conversation", "America/Los_Angeles"
+
+    @staticmethod
+    def _model_slug(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            for key in ("slug", "id", "model_slug", "model"):
+                slug = str(value.get(key) or "").strip()
+                if slug:
+                    return slug
+        return ""
+
+    @classmethod
+    def _picker_model_slugs(cls, payload: Dict[str, Any]) -> list[str]:
+        categories = payload.get("categories")
+        if not isinstance(categories, list):
+            return []
+        slugs: list[str] = []
+        for category in categories:
+            if not isinstance(category, dict):
+                continue
+            if category.get("disabled_by_admin") is True or category.get("disabled") is True:
+                continue
+            if category.get("enabled") is False or category.get("is_available") is False:
+                continue
+            slug = cls._model_slug(category.get("default_model") or category.get("default_model_slug"))
+            if slug and slug not in slugs:
+                slugs.append(slug)
+        return slugs
 
     def list_models(self) -> Dict[str, Any]:
         """返回当前模式下可用模型，格式对齐 OpenAI `/v1/models`。"""
         self._bootstrap()
-        path = "/backend-api/models?history_and_training_disabled=false" if self.access_token else (
+        path = "/backend-api/models?history_and_training_disabled=true" if self.access_token else (
             "/backend-anon/models?iim=false&is_gizmo=false"
         )
         route = "/backend-api/models" if self.access_token else "/backend-anon/models"
@@ -1382,13 +1619,22 @@ class OpenAIBackendAPI:
             context=context,
         )
         ensure_ok(response, context)
+        payload = response.json()
+        raw_models = payload.get("models") if isinstance(payload, dict) else []
+        raw_models = raw_models if isinstance(raw_models, list) else []
+        model_by_slug = {
+            slug: item
+            for item in raw_models
+            if isinstance(item, dict) and (slug := self._model_slug(item))
+        }
+        model_slugs = self._picker_model_slugs(payload if isinstance(payload, dict) else {})
         data = []
         seen = set()
-        for item in response.json().get("models", []):
-            if not isinstance(item, dict):
-                continue
-            slug = str(item.get("slug", "")).strip()
+        for slug in model_slugs:
             if not slug or slug in seen:
+                continue
+            item = model_by_slug.get(slug) or {}
+            if item.get("is_work_mode_model") is True or slug == "research":
                 continue
             seen.add(slug)
             data.append({

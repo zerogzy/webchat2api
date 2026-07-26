@@ -88,26 +88,28 @@ class ProviderModelListTests(unittest.TestCase):
             result = openai_v1_models.list_models()
 
         models = {item["id"]: item for item in result["data"]}
-        self.assertEqual(models["gpt-4o"]["provider"], "gpt")
+        self.assertEqual(models["gpt-5-6-thinking"]["provider"], "gpt")
         self.assertEqual(models["grok-4.3"]["provider"], "grok")
         self.assertEqual(models["gemini-3-pro"]["provider"], "gemini")
         self.assertEqual(models["gemini-3-pro"]["owned_by"], "google")
         self.assertEqual(models["grok-4.20-multi-agent"]["owned_by"], "xai")
-        for model_id in ["gpt-5-1", "gpt-5-2", "gpt-5-3", "gpt-5-3-mini", "gpt-5-mini"]:
+        for model_id in ["gpt-5-5", "gpt-5-5-instant", "gpt-5-5-thinking", "gpt-5-6-thinking"]:
             self.assertEqual(models[model_id]["provider"], "gpt")
             self.assertEqual(models[model_id]["owned_by"], "chatgpt")
+        self.assertNotIn("gpt-4o", models)
 
-    def test_gpt_model_specs_match_upstream_old_feature_ids(self) -> None:
+    def test_gpt_model_specs_match_current_picker_routes(self) -> None:
         expected_text_models = {
             "auto",
-            "gpt-5",
-            "gpt-5-1",
-            "gpt-5-2",
-            "gpt-5-3",
-            "gpt-5-3-mini",
-            "gpt-5-mini",
+            "gpt-5-5",
+            "gpt-5-5-instant",
+            "gpt-5-5-thinking",
+            "gpt-5-6-thinking",
+            "gpt-5-3-instant",
+            "o3",
         }
-        self.assertTrue(expected_text_models.issubset(GPT_FALLBACK_MODEL_IDS))
+        self.assertEqual(set(GPT_FALLBACK_MODEL_IDS), expected_text_models)
+        self.assertEqual(resolve_model("auto").upstream_model, "gpt-5-5")
 
         image_specs = {spec.id: spec for spec in GPT_IMAGE_MODEL_SPECS}
         self.assertEqual(image_specs["gpt-image-2"].upstream_model, "gpt-image-2")
@@ -170,6 +172,8 @@ class ProviderModelListTests(unittest.TestCase):
         self.assertEqual(account_service.calls, ["gpt"])
         self.assertEqual(models["dynamic-gpt"]["provider"], "gpt")
         self.assertNotIn("anon-gpt", models)
+        self.assertIn("auto", models)
+        self.assertNotIn("gpt-5-6-thinking", models)
         self.assertIn("gpt-image-2", models)
         self.assertIn("grok-4.3", models)
         self.assertIn("gemini-3-flash", models)
@@ -189,7 +193,8 @@ class ProviderModelListTests(unittest.TestCase):
         self.assertEqual(FakeBackend.calls, ["stored-token", ""])
         self.assertEqual(models["anon-gpt"]["provider"], "gpt")
         self.assertNotIn("dynamic-gpt", models)
-        self.assertIn("gpt-4o", models)
+        self.assertIn("auto", models)
+        self.assertNotIn("gpt-5-5", models)
         self.assertIn("gpt-image-2", models)
         self.assertIn("grok-4.3", models)
 
@@ -206,7 +211,7 @@ class ProviderModelListTests(unittest.TestCase):
 
         models = {item["id"]: item for item in result["data"]}
         self.assertEqual(FakeBackend.calls, ["stored-token", ""])
-        self.assertEqual(models["gpt-4o"]["provider"], "gpt")
+        self.assertEqual(models["gpt-5-5"]["provider"], "gpt")
         self.assertEqual(models["gpt-image-2"]["provider"], "gpt")
         self.assertEqual(models["gpt-image-2"]["capability"], "image")
         self.assertEqual(models["codex-gpt-image-2"]["provider"], "gpt")

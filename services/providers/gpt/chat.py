@@ -3,18 +3,12 @@ from __future__ import annotations
 from typing import Any, Iterator
 
 from services.providers.base import ConversationRequest
+from services.providers.gpt.models import normalize_gpt_thinking_effort
 from services.providers.gpt.runtime import collect_text, stream_text_deltas, text_backend
 
 
 def normalize_thinking_effort(value: object) -> str:
-    normalized = str(value or "").strip().lower()
-    if normalized in {"", "none"}:
-        return ""
-    if normalized in {"low", "medium", "high"}:
-        return normalized
-    if normalized in {"xhigh", "extended"}:
-        return "extended"
-    return ""
+    return normalize_gpt_thinking_effort(value)
 
 
 def thinking_effort_from_body(body: dict[str, Any]) -> str:

@@ -79,7 +79,10 @@ def list_models() -> dict[str, Any]:
     for item in data:
         if isinstance(item, dict):
             _append_model(normalized_data, seen, _with_provider(item, GPT_PROVIDER))
-    for item in gpt_fallback_model_metadata():
+    fallback_metadata = gpt_fallback_model_metadata()
+    if normalized_data:
+        fallback_metadata = [item for item in fallback_metadata if item.get("id") == "auto"]
+    for item in fallback_metadata:
         _append_model(normalized_data, seen, item)
     for item in gpt_image_model_metadata():
         _append_model(normalized_data, seen, item)

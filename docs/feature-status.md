@@ -5,7 +5,7 @@
 | 功能 | 状态 | 说明 |
 | --- |:---:| --- |
 | 公共健康与版本接口 | ✅ | 已提供 `GET /health`、`GET /version` 和 `POST /auth/login`。默认登录密钥仍为 `admin`，生产环境必须修改。 |
-| OpenAI 兼容 `GET /v1/models` | ✅ | 优先通过 `provider=gpt` 账号动态拉取 GPT 模型，失败时回退到匿名或内置 GPT 文本模型 `auto`、`gpt-5`、`gpt-5-thinking`、`gpt-4o`、`gpt-4o-mini`，并合并静态 Grok 文本模型、GPT 图片模型 `gpt-image-2` / `codex-gpt-image-2` 和 Grok app-chat 图片模型。 |
+| OpenAI 兼容 `GET /v1/models` | ✅ | 优先通过 `provider=gpt` 账号动态拉取 picker categories，只展示账号实际可选 GPT 模型并保留 `auto` 别名；失败时回退到匿名或当前内置 GPT 文本模型，并合并静态 Grok 文本模型、GPT 图片模型 `gpt-image-2` / `codex-gpt-image-2` 和 Grok app-chat 图片模型。 |
 | GPT/Grok 文本服务商拆分 | ✅ | 账号 `provider` 选择 `gpt` 或 `grok`，`type` 只记录套餐、订阅或计划信息，不再用于选择服务商。 |
 | OpenAI 兼容 `POST /v1/chat/completions` | ✅ | GPT 模型走 ChatGPT 链路。Grok Console 文本模型包括 `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent`；Grok app-chat 文本模型包括 `grok-4.20-0309` 系列、`grok-4.20-fast`、`grok-4.20-auto`、`grok-4.20-expert`、`grok-4.20-heavy`、`grok-4.3-beta`，并按账号 `tier` 和 `capabilities` 路由。Grok 搜索来源支持结构化 `search_sources`、OpenAI 风格 `url_citation` annotations，流式最终 stop chunk 会附带 metadata；`show_search_sources` 默认关闭，开启后非流式文本追加 Markdown `Sources`。 |
 | OpenAI 兼容 `POST /v1/completions`、`POST /v1/complete` | ✅ | `/v1/completions` 是标准文本补全入口，`/v1/complete` 为兼容别名；按请求模型分发到现有文本 provider，不代表没有账号时可直连上游成功。 |
