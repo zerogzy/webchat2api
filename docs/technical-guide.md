@@ -268,7 +268,7 @@ curl http://localhost:83/v1/messages \
 | 分组 | 模型 | 路由与说明 |
 | --- | --- | --- |
 | GPT 动态模型 | 通过 `provider=gpt` 账号动态拉取 picker categories | 成功拉取时只展示账号实际可选模型，并保留 `auto` 兼容别名。 |
-| GPT fallback 文本 | `auto`、`gpt-5-5`、`gpt-5-5-instant`、`gpt-5-5-thinking`、`gpt-5-6-thinking`、`gpt-5-3-instant`、`o3` | 没有 GPT 账号或动态拉取失败时保留可见。 |
+| GPT fallback 文本 | `auto`、`gpt-5-5`、`gpt-5-5-instant`、`gpt-5-5-thinking`、`gpt-5-6-thinking`、`gpt-5-6-thinking-medium`、`gpt-5-6-thinking-high`、`gpt-5-3-instant`、`o3` | 没有 GPT 账号或动态拉取失败时保留可见；5.6 的 medium/high 别名分别发送上游 `standard`/`extended` 档位。 |
 | GPT 图片 | `gpt-image-2`、`codex-gpt-image-2` | 走 GPT 图片账号池。 |
 | Grok Console 文本 | `grok-4.3`、`grok-4`、`grok-4.20`、`grok-4.20-reasoning`、`grok-4.20-non-reasoning`、`grok-4.20-multi-agent` | 无 `mode_id`，走 Console Responses 路径。 |
 | Grok app-chat 文本 | `grok-4.20-0309` 系列、`grok-4.20-fast`、`grok-4.20-auto`、`grok-4.20-expert`、`grok-4.20-heavy`、`grok-4.3-beta` | 带 `mode_id`，走 grok.com app-chat。 |

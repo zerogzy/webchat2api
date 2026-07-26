@@ -8,7 +8,12 @@ from services.providers.base import GPT_PROVIDER
 from services.providers.catpaw.models import catpaw_model_metadata, is_catpaw_model_id
 from services.providers.codebuddy.models import codebuddy_model_metadata, is_codebuddy_model_id
 from services.providers.gemini.models import gemini_model_metadata
-from services.providers.gpt.models import GPT_IMAGE_MODEL_IDS, gpt_fallback_model_metadata, gpt_image_model_metadata
+from services.providers.gpt.models import (
+    GPT_IMAGE_MODEL_IDS,
+    gpt_alias_model_metadata,
+    gpt_fallback_model_metadata,
+    gpt_image_model_metadata,
+)
 from services.providers.grok.models import grok_model_metadata
 from services.providers.joycode.models import is_joycode_model_id, joycode_model_metadata
 from services.providers.qoder.models import is_qoder_model_id, qoder_model_metadata
@@ -82,6 +87,7 @@ def list_models() -> dict[str, Any]:
     fallback_metadata = gpt_fallback_model_metadata()
     if normalized_data:
         fallback_metadata = [item for item in fallback_metadata if item.get("id") == "auto"]
+        fallback_metadata.extend(gpt_alias_model_metadata(seen))
     for item in fallback_metadata:
         _append_model(normalized_data, seen, item)
     for item in gpt_image_model_metadata():

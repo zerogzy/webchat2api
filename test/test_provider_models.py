@@ -105,11 +105,17 @@ class ProviderModelListTests(unittest.TestCase):
             "gpt-5-5-instant",
             "gpt-5-5-thinking",
             "gpt-5-6-thinking",
+            "gpt-5-6-thinking-medium",
+            "gpt-5-6-thinking-high",
             "gpt-5-3-instant",
             "o3",
         }
         self.assertEqual(set(GPT_FALLBACK_MODEL_IDS), expected_text_models)
         self.assertEqual(resolve_model("auto").upstream_model, "gpt-5-5")
+        self.assertEqual(resolve_model("gpt-5-6-thinking-medium").upstream_model, "gpt-5-6-thinking")
+        self.assertEqual(resolve_model("gpt-5-6-thinking-medium").default_reasoning_effort, "medium")
+        self.assertEqual(resolve_model("gpt-5-6-thinking-high").upstream_model, "gpt-5-6-thinking")
+        self.assertEqual(resolve_model("gpt-5-6-thinking-high").default_reasoning_effort, "high")
 
         image_specs = {spec.id: spec for spec in GPT_IMAGE_MODEL_SPECS}
         self.assertEqual(image_specs["gpt-image-2"].upstream_model, "gpt-image-2")
@@ -178,6 +184,25 @@ class ProviderModelListTests(unittest.TestCase):
         self.assertIn("grok-4.3", models)
         self.assertIn("gemini-3-flash", models)
         self.assertIn("gemini-3-pro", models)
+
+    def test_dynamic_gpt_5_6_model_adds_medium_and_high_aliases(self) -> None:
+        account_service = FakeAccountService("stored-token")
+
+        with mock.patch.object(openai_v1_models, "_get_gpt_access_token", account_service.get_text_access_token), \
+             mock.patch.object(FakeBackend, "list_models", return_value={
+                 "object": "list",
+                 "data": [{"id": "gpt-5-6-thinking", "object": "model", "owned_by": "chatgpt"}],
+             }), \
+             mock.patch.dict(sys.modules, {"services.openai_backend_api": types.SimpleNamespace(
+                 OpenAIBackendAPI=FakeBackend,
+             )}):
+            result = openai_v1_models.list_models()
+
+        models = {item["id"]: item for item in result["data"]}
+        self.assertEqual(models["gpt-5-6-thinking-medium"]["root"], "gpt-5-6-thinking")
+        self.assertEqual(models["gpt-5-6-thinking-medium"]["reasoning_effort"], "medium")
+        self.assertEqual(models["gpt-5-6-thinking-high"]["root"], "gpt-5-6-thinking")
+        self.assertEqual(models["gpt-5-6-thinking-high"]["reasoning_effort"], "high")
 
     def test_list_models_falls_back_to_anonymous_when_account_fetch_fails(self) -> None:
         account_service = FakeAccountService("stored-token")

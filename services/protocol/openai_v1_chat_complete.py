@@ -169,7 +169,7 @@ def _text_delta_source(backend, messages: list[dict[str, Any]], model: str, body
         return stream_text_deltas(backend, ConversationRequest(
             model=model,
             messages=messages,
-            thinking_effort=gpt_chat.thinking_effort_from_body(body or {}),
+            thinking_effort=gpt_chat.thinking_effort_from_body(body or {}, model),
         ))
     return gpt_chat.chat_completion_deltas(body=body or {}, messages=messages, model=model, backend=backend)
 
@@ -290,7 +290,7 @@ def stream_tool_text_chat_completion(
     request = ConversationRequest(
         model=model,
         messages=messages,
-        thinking_effort=gpt_chat.thinking_effort_from_body(body),
+        thinking_effort=gpt_chat.thinking_effort_from_body(body, model),
     )
     if stream_text_deltas is not gpt_chat.stream_text_deltas:
         content = "".join(stream_text_deltas(backend, request))
@@ -864,7 +864,7 @@ def non_stream_text_chat_response(body: dict[str, Any], model: str, messages: li
         request = ConversationRequest(
             model=model,
             messages=messages,
-            thinking_effort=gpt_chat.thinking_effort_from_body(body),
+            thinking_effort=gpt_chat.thinking_effort_from_body(body, model),
         )
         content = collect_text(text_backend(), request)
     else:

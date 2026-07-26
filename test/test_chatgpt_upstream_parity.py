@@ -15,7 +15,7 @@ install_tiktoken_stub()
 from services.config import config
 from services.openai_backend_api import ChatRequirements, DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_VERSION, OpenAIBackendAPI
 from services.providers.gpt.chat import normalize_thinking_effort, thinking_effort_from_body
-from services.providers.gpt.models import gpt_upstream_model_id
+from services.providers.gpt.models import gpt_effective_thinking_effort, gpt_upstream_model_id
 
 
 class FakeResponse:
@@ -69,6 +69,15 @@ class ChatGPTUpstreamParityTests(unittest.TestCase):
         self.assertEqual(normalize_thinking_effort("standard"), "standard")
         self.assertEqual(normalize_thinking_effort("low"), "standard")
         self.assertEqual(normalize_thinking_effort("unsupported"), "")
+
+    def test_gpt_5_6_effort_aliases_supply_defaults_and_allow_explicit_override(self) -> None:
+        self.assertEqual(thinking_effort_from_body({}, "gpt-5-6-thinking-medium"), "standard")
+        self.assertEqual(thinking_effort_from_body({}, "gpt-5-6-thinking-high"), "extended")
+        self.assertEqual(
+            thinking_effort_from_body({"reasoning_effort": "high"}, "gpt-5-6-thinking-medium"),
+            "extended",
+        )
+        self.assertEqual(gpt_effective_thinking_effort("gpt-5-6-thinking-high"), "extended")
 
     def test_conversation_payload_only_emits_normalized_thinking_effort(self) -> None:
         client = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
@@ -164,7 +173,11 @@ class ChatGPTUpstreamParityTests(unittest.TestCase):
         client.session = session
         client._bootstrap = mock.Mock()
         client._call_with_retry = lambda fn, policy=None, context="": fn()
-        converted = [{"id": "u1", "author": {"role": "user"}, "content": {"content_type": "text", "parts": ["hello"]}}]
+        converted = [{
+            "id": "u1",
+            "author": {"role": "user"},
+            "content": {"content_type": "text", "parts": ["hello"]},
+        }]
         client._api_messages_to_conversation_messages = mock.Mock(return_value=converted)
         client._prepare_text_request = mock.Mock(return_value=(ChatRequirements("sentinel-1"), "conduit-1"))
 
@@ -180,6 +193,39 @@ class ChatGPTUpstreamParityTests(unittest.TestCase):
         self.assertEqual(request["json"]["model"], "gpt-5-5")
         self.assertEqual(request["json"]["client_prepare_state"], "success")
         self.assertEqual(gpt_upstream_model_id("auto"), "gpt-5-5")
+        self.assertTrue(response.closed)
+
+    def test_authenticated_stream_maps_gpt_5_6_high_alias_and_effort(self) -> None:
+        response = FakeResponse(lines=[b'data: {"message":"ok"}', b"data: [DONE]"])
+        session = FakeSession([response])
+        client = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
+        client.base_url = "https://chatgpt.com"
+        client.access_token = "token"
+        client.session_id = "session-1"
+        client.session = session
+        client._bootstrap = mock.Mock()
+        client._call_with_retry = lambda fn, policy=None, context="": fn()
+        converted = [{
+            "id": "u1",
+            "author": {"role": "user"},
+            "content": {"content_type": "text", "parts": ["hello"]},
+        }]
+        client._api_messages_to_conversation_messages = mock.Mock(return_value=converted)
+        client._prepare_text_request = mock.Mock(return_value=(ChatRequirements("sentinel-1"), "conduit-1"))
+
+        chunks = list(client.stream_conversation(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-5-6-thinking-high",
+        ))
+
+        self.assertEqual(chunks, ['{"message":"ok"}', "[DONE]"])
+        prepare_args = client._prepare_text_request.call_args.args
+        self.assertEqual(prepare_args[1], "gpt-5-6-thinking")
+        self.assertEqual(prepare_args[3], "extended")
+        request = session.posts[0]
+        self.assertEqual(request["json"]["model"], "gpt-5-6-thinking")
+        self.assertEqual(request["json"]["thinking_effort"], "extended")
+        self.assertEqual(gpt_upstream_model_id("gpt-5-6-thinking-high"), "gpt-5-6-thinking")
         self.assertTrue(response.closed)
 
     def test_authenticated_model_list_uses_picker_categories(self) -> None:

@@ -19,7 +19,11 @@ from services.network.client import create_session
 from services.network.headers import build_chatgpt_web_headers
 from services.network.profiles import build_chatgpt_web_profile
 from services.providers.base import GPT_PROVIDER
-from services.providers.gpt.models import gpt_upstream_model_id, normalize_gpt_thinking_effort
+from services.providers.gpt.models import (
+    gpt_effective_thinking_effort,
+    gpt_upstream_model_id,
+    normalize_gpt_thinking_effort,
+)
 from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
@@ -1420,6 +1424,7 @@ class OpenAIBackendAPI:
             yield from self._stream_picture_conversation(prompt, model, images or [])
             return
 
+        thinking_effort = gpt_effective_thinking_effort(model, thinking_effort)
         normalized = messages or [{"role": "user", "content": prompt}]
         self._bootstrap()
         path, timezone = self._chat_target()
