@@ -26,13 +26,13 @@ def _conversation_request(body: dict[str, Any], messages: list[dict[str, Any]], 
     return ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort_from_body(body, model))
 
 
-def _resolved_backend(backend: Any = None) -> Any:
-    return backend or text_backend()
+def _resolved_backend(backend: Any = None, model: str = "auto") -> Any:
+    return backend or text_backend(model)
 
 
 def chat_completion(body: dict[str, Any], messages: list[dict[str, Any]], model: str, backend: Any = None) -> str:
-    return collect_text(_resolved_backend(backend), _conversation_request(body, messages, model))
+    return collect_text(_resolved_backend(backend, model), _conversation_request(body, messages, model))
 
 
 def chat_completion_deltas(body: dict[str, Any], messages: list[dict[str, Any]], model: str, backend: Any = None) -> Iterator[str]:
-    yield from stream_text_deltas(_resolved_backend(backend), _conversation_request(body, messages, model))
+    yield from stream_text_deltas(_resolved_backend(backend, model), _conversation_request(body, messages, model))

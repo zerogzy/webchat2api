@@ -314,7 +314,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         if spec.provider == GEMINI_PROVIDER:
             yield from stream_gemini_response(body)
             return
-        yield from stream_text_response(text_backend(), body)
+        yield from stream_text_response(text_backend(str(body.get("model") or "auto")), body)
         return
 
     prompt = extract_response_prompt(body.get("input"))

@@ -10,8 +10,6 @@ from services.providers.codebuddy.models import codebuddy_model_metadata, is_cod
 from services.providers.gemini.models import gemini_model_metadata
 from services.providers.gpt.models import (
     GPT_IMAGE_MODEL_IDS,
-    gpt_alias_model_metadata,
-    gpt_fallback_model_metadata,
     gpt_image_model_metadata,
 )
 from services.providers.grok.models import grok_model_metadata
@@ -42,39 +40,12 @@ def _empty_model_result() -> dict[str, Any]:
     return {"object": "list", "data": []}
 
 
-def _fetch_chatgpt_models(OpenAIBackendAPI: type, access_token: str = "") -> dict[str, Any]:
-    with OpenAIBackendAPI(access_token) as backend:
-        return backend.list_models()
-
-
-def _get_gpt_access_token() -> str:
-    try:
-        from services.account_service import account_service
-        return account_service.get_text_access_token(provider=GPT_PROVIDER)
-    except Exception:
-        return ""
-
-
 def list_models() -> dict[str, Any]:
     try:
-        from services.openai_backend_api import OpenAIBackendAPI
+        from services.providers.gpt.model_catalog import gpt_model_catalog
+        result = gpt_model_catalog.list_models()
     except Exception:
         result = _empty_model_result()
-    else:
-        access_token = _get_gpt_access_token()
-        if access_token:
-            try:
-                result = _fetch_chatgpt_models(OpenAIBackendAPI, access_token)
-            except Exception:
-                try:
-                    result = _fetch_chatgpt_models(OpenAIBackendAPI)
-                except Exception:
-                    result = _empty_model_result()
-        else:
-            try:
-                result = _fetch_chatgpt_models(OpenAIBackendAPI)
-            except Exception:
-                result = _empty_model_result()
     data = result.get("data")
     if not isinstance(data, list):
         result = _empty_model_result()
@@ -84,12 +55,6 @@ def list_models() -> dict[str, Any]:
     for item in data:
         if isinstance(item, dict):
             _append_model(normalized_data, seen, _with_provider(item, GPT_PROVIDER))
-    fallback_metadata = gpt_fallback_model_metadata()
-    if normalized_data:
-        fallback_metadata = [item for item in fallback_metadata if item.get("id") == "auto"]
-        fallback_metadata.extend(gpt_alias_model_metadata(seen))
-    for item in fallback_metadata:
-        _append_model(normalized_data, seen, item)
     for item in gpt_image_model_metadata():
         _append_model(normalized_data, seen, item)
     for item in grok_model_metadata():

@@ -433,19 +433,34 @@ class AccountService:
                 return access_token
             self.release_image_slot(access_token)
 
-    def get_text_access_token(self, excluded_tokens: set[str] | None = None, provider: str = GPT_PROVIDER) -> str:
+    def get_text_access_token(
+        self,
+        excluded_tokens: set[str] | None = None,
+        provider: str = GPT_PROVIDER,
+        model: str = "auto",
+    ) -> str:
         excluded = set(excluded_tokens or set())
         target_provider = normalize_account_provider(provider)
+        account_types: set[str] | None = None
+        allow_anonymous = True
+        if target_provider == GPT_PROVIDER and str(model or "auto") != "auto":
+            from services.providers.gpt.model_catalog import gpt_model_catalog
+
+            account_types, allow_anonymous = gpt_model_catalog.account_types_for_model(model)
         with self._lock:
             candidates = [
                 token
                 for account in self._all_accounts_locked()
                 if not self._state_decision(account).unavailable
                    and normalize_provider(account.get("provider")) == target_provider
+                   and (account_types is None or str(account.get("type") or "free") in account_types)
                    and (token := account.get("access_token") or "")
                    and token not in excluded
             ]
-            return self._next_text_token(candidates)
+            token = self._next_text_token(candidates)
+        if token or allow_anonymous:
+            return token
+        raise RuntimeError(f"model {model!r} is not available to any active ChatGPT account")
 
     def _next_text_token(self, candidates: list[str]) -> str:
         if not candidates:

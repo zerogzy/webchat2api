@@ -24,7 +24,7 @@ from services.providers.base import (
 from services.providers.catpaw.models import CATPAW_IMAGE_MODEL_IDS, CATPAW_MODEL_SPECS, is_catpaw_model_id
 from services.providers.codebuddy.models import CODEBUDDY_IMAGE_MODEL_IDS, CODEBUDDY_MODEL_SPECS, is_codebuddy_model_id
 from services.providers.gemini.models import GEMINI_IMAGE_MODEL_IDS, GEMINI_MODEL_SPECS
-from services.providers.gpt.models import GPT_FALLBACK_MODEL_IDS, GPT_IMAGE_MODEL_IDS, GPT_MODEL_SPECS
+from services.providers.gpt.models import GPT_IMAGE_MODEL_IDS, GPT_MODEL_SPECS
 from services.providers.grok.models import GROK_IMAGE_MODEL_IDS, GROK_MODEL_SPECS
 from services.providers.joycode.models import JOYCODE_IMAGE_MODEL_IDS, JOYCODE_MODEL_SPECS, is_joycode_model_id
 from services.providers.qoder.models import QODER_IMAGE_MODEL_IDS, QODER_MODEL_SPECS, is_qoder_model_id

@@ -54,16 +54,8 @@ export const gptProvider: AccountProviderDefinition = {
   },
   trial: {
     enabled: true,
-    textFallbackModels: [
-      "auto",
-      "gpt-5-5",
-      "gpt-5-5-instant",
-      "gpt-5-5-thinking",
-      "gpt-5-6-thinking",
-      "gpt-5-6-thinking-medium",
-      "gpt-5-6-thinking-high",
-    ],
-    textFallbackMode: "always",
+    textFallbackModels: [],
+    textFallbackMode: "without-metadata",
     imageFallbackModels: ["gpt-image-2", "codex-gpt-image-2"],
     imageUnsupportedCopy: "当前 GPT 模型列表未返回图像能力。",
     modelIdPrefixes: ["gpt-", "codex-", "dall-e"],

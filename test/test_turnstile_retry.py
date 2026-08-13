@@ -38,7 +38,7 @@ class TurnstileRetryTests(unittest.TestCase):
         requested_attempts: list[set[str]] = []
         account_service = mock.Mock()
 
-        def get_text_access_token(attempted_tokens: set[str]) -> str:
+        def get_text_access_token(attempted_tokens: set[str], model: str = "auto") -> str:
             requested_attempts.append(set(attempted_tokens))
             return "second-token"
 

@@ -29,7 +29,7 @@ from services.openai_backend_api import OpenAIBackendAPI
 from services.protocol import openai_v1_models
 from services.providers.gemini import models as gemini_models
 from services.providers.gpt import images as gpt_images
-from services.providers.gpt.models import GPT_FALLBACK_MODEL_IDS, GPT_IMAGE_MODEL_SPECS
+from services.providers.gpt.models import GPT_IMAGE_MODEL_SPECS
 
 
 class FakeBackend:
@@ -88,34 +88,15 @@ class ProviderModelListTests(unittest.TestCase):
             result = openai_v1_models.list_models()
 
         models = {item["id"]: item for item in result["data"]}
-        self.assertEqual(models["gpt-5-6-thinking"]["provider"], "gpt")
         self.assertEqual(models["grok-4.3"]["provider"], "grok")
         self.assertEqual(models["gemini-3-pro"]["provider"], "gemini")
         self.assertEqual(models["gemini-3-pro"]["owned_by"], "google")
         self.assertEqual(models["grok-4.20-multi-agent"]["owned_by"], "xai")
-        for model_id in ["gpt-5-5", "gpt-5-5-instant", "gpt-5-5-thinking", "gpt-5-6-thinking"]:
-            self.assertEqual(models[model_id]["provider"], "gpt")
-            self.assertEqual(models[model_id]["owned_by"], "chatgpt")
+        self.assertFalse(any(item.get("provider") == "gpt" and item.get("capability") != "image" for item in models.values()))
         self.assertNotIn("gpt-4o", models)
 
-    def test_gpt_model_specs_match_current_picker_routes(self) -> None:
-        expected_text_models = {
-            "auto",
-            "gpt-5-5",
-            "gpt-5-5-instant",
-            "gpt-5-5-thinking",
-            "gpt-5-6-thinking",
-            "gpt-5-6-thinking-medium",
-            "gpt-5-6-thinking-high",
-            "gpt-5-3-instant",
-            "o3",
-        }
-        self.assertEqual(set(GPT_FALLBACK_MODEL_IDS), expected_text_models)
-        self.assertEqual(resolve_model("auto").upstream_model, "gpt-5-5")
-        self.assertEqual(resolve_model("gpt-5-6-thinking-medium").upstream_model, "gpt-5-6-thinking")
-        self.assertEqual(resolve_model("gpt-5-6-thinking-medium").default_reasoning_effort, "medium")
-        self.assertEqual(resolve_model("gpt-5-6-thinking-high").upstream_model, "gpt-5-6-thinking")
-        self.assertEqual(resolve_model("gpt-5-6-thinking-high").default_reasoning_effort, "high")
+    def test_gpt_model_specs_only_register_image_models(self) -> None:
+        self.assertEqual(resolve_model("auto").upstream_model, "auto")
 
         image_specs = {spec.id: spec for spec in GPT_IMAGE_MODEL_SPECS}
         self.assertEqual(image_specs["gpt-image-2"].upstream_model, "gpt-image-2")
@@ -167,76 +148,68 @@ class ProviderModelListTests(unittest.TestCase):
     def test_list_models_tries_gpt_account_token_before_anonymous(self) -> None:
         account_service = FakeAccountService("stored-token")
 
-        with mock.patch.object(openai_v1_models, "_get_gpt_access_token", account_service.get_text_access_token), \
-             mock.patch.dict(sys.modules, {"services.openai_backend_api": types.SimpleNamespace(
-                 OpenAIBackendAPI=FakeBackend,
-             )}):
+        with mock.patch(
+            "services.providers.gpt.model_catalog.gpt_model_catalog.list_models",
+            return_value=FakeBackend("stored-token").list_models(),
+        ):
             result = openai_v1_models.list_models()
 
         models = {item["id"]: item for item in result["data"]}
         self.assertEqual(FakeBackend.calls, ["stored-token"])
-        self.assertEqual(account_service.calls, ["gpt"])
         self.assertEqual(models["dynamic-gpt"]["provider"], "gpt")
         self.assertNotIn("anon-gpt", models)
-        self.assertIn("auto", models)
+        self.assertNotIn("auto", models)
         self.assertNotIn("gpt-5-6-thinking", models)
         self.assertIn("gpt-image-2", models)
         self.assertIn("grok-4.3", models)
         self.assertIn("gemini-3-flash", models)
         self.assertIn("gemini-3-pro", models)
 
-    def test_dynamic_gpt_5_6_model_adds_medium_and_high_aliases(self) -> None:
-        account_service = FakeAccountService("stored-token")
-
-        with mock.patch.object(openai_v1_models, "_get_gpt_access_token", account_service.get_text_access_token), \
-             mock.patch.object(FakeBackend, "list_models", return_value={
+    def test_dynamic_gpt_models_are_not_augmented_with_local_aliases(self) -> None:
+        with mock.patch("services.providers.gpt.model_catalog.gpt_model_catalog.list_models", return_value={
                  "object": "list",
                  "data": [{"id": "gpt-5-6-thinking", "object": "model", "owned_by": "chatgpt"}],
-             }), \
-             mock.patch.dict(sys.modules, {"services.openai_backend_api": types.SimpleNamespace(
-                 OpenAIBackendAPI=FakeBackend,
-             )}):
+             }):
             result = openai_v1_models.list_models()
 
         models = {item["id"]: item for item in result["data"]}
-        self.assertEqual(models["gpt-5-6-thinking-medium"]["root"], "gpt-5-6-thinking")
-        self.assertEqual(models["gpt-5-6-thinking-medium"]["reasoning_effort"], "medium")
-        self.assertEqual(models["gpt-5-6-thinking-high"]["root"], "gpt-5-6-thinking")
-        self.assertEqual(models["gpt-5-6-thinking-high"]["reasoning_effort"], "high")
+        self.assertIn("gpt-5-6-thinking", models)
+        self.assertNotIn("gpt-5-6-thinking-medium", models)
+        self.assertNotIn("gpt-5-6-thinking-high", models)
 
     def test_list_models_falls_back_to_anonymous_when_account_fetch_fails(self) -> None:
         account_service = FakeAccountService("stored-token")
         FakeBackend.fail_authenticated = True
 
-        with mock.patch.object(openai_v1_models, "_get_gpt_access_token", account_service.get_text_access_token), \
-             mock.patch.dict(sys.modules, {"services.openai_backend_api": types.SimpleNamespace(
-                 OpenAIBackendAPI=FakeBackend,
-             )}):
+        with mock.patch(
+            "services.providers.gpt.model_catalog.gpt_model_catalog.list_models",
+            return_value=FakeBackend("").list_models(),
+        ):
             result = openai_v1_models.list_models()
 
         models = {item["id"]: item for item in result["data"]}
-        self.assertEqual(FakeBackend.calls, ["stored-token", ""])
+        self.assertEqual(FakeBackend.calls, [""])
         self.assertEqual(models["anon-gpt"]["provider"], "gpt")
         self.assertNotIn("dynamic-gpt", models)
-        self.assertIn("auto", models)
+        self.assertNotIn("auto", models)
         self.assertNotIn("gpt-5-5", models)
         self.assertIn("gpt-image-2", models)
         self.assertIn("grok-4.3", models)
 
-    def test_list_models_uses_fallbacks_when_authenticated_and_anonymous_fetch_fail(self) -> None:
+    def test_list_models_keeps_only_registered_image_models_when_catalog_fails(self) -> None:
         account_service = FakeAccountService("stored-token")
         FakeBackend.fail_authenticated = True
         FakeBackend.fail_anonymous = True
 
-        with mock.patch.object(openai_v1_models, "_get_gpt_access_token", account_service.get_text_access_token), \
-             mock.patch.dict(sys.modules, {"services.openai_backend_api": types.SimpleNamespace(
-                 OpenAIBackendAPI=FakeBackend,
-             )}):
+        with mock.patch(
+            "services.providers.gpt.model_catalog.gpt_model_catalog.list_models",
+            side_effect=RuntimeError("unavailable"),
+        ):
             result = openai_v1_models.list_models()
 
         models = {item["id"]: item for item in result["data"]}
-        self.assertEqual(FakeBackend.calls, ["stored-token", ""])
-        self.assertEqual(models["gpt-5-5"]["provider"], "gpt")
+        self.assertEqual(FakeBackend.calls, [])
+        self.assertNotIn("gpt-5-5", models)
         self.assertEqual(models["gpt-image-2"]["provider"], "gpt")
         self.assertEqual(models["gpt-image-2"]["capability"], "image")
         self.assertEqual(models["codex-gpt-image-2"]["provider"], "gpt")
@@ -309,7 +282,10 @@ class ProviderModelListTests(unittest.TestCase):
         self.assertEqual(models["grok-imagine-video"]["capability"], "video")
 
     def test_list_models_uses_gemini_static_metadata_without_dynamic_hook(self) -> None:
-        with mock.patch.object(openai_v1_models, "_fetch_chatgpt_models", side_effect=RuntimeError("unavailable")):
+        with mock.patch(
+            "services.providers.gpt.model_catalog.gpt_model_catalog.list_models",
+            side_effect=RuntimeError("unavailable"),
+        ):
             result = openai_v1_models.list_models()
 
         models = {item["id"]: item for item in result["data"]}

@@ -3,6 +3,7 @@ import json
 import os
 import random
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -38,6 +39,10 @@ class RetryableTurnstileError(RuntimeError):
 
 
 class ImagePollTimeoutError(RuntimeError):
+    pass
+
+
+class ImageStreamHardTimeoutError(RuntimeError):
     pass
 
 
@@ -1511,9 +1516,27 @@ class OpenAIBackendAPI:
         requirements = self._get_chat_requirements()
         conduit_token = self._prepare_image_conversation(prompt, requirements, model)
         response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
+        yield from self._iter_sse_payloads_capped(response, float(config.image_poll_timeout_secs))
+
+    @staticmethod
+    def _iter_sse_payloads_capped(response: Any, hard_cap_secs: float) -> Iterator[str]:
+        deadline = time.monotonic() + hard_cap_secs
+        watchdog = threading.Timer(hard_cap_secs, response.close)
+        watchdog.daemon = True
+        watchdog.start()
         try:
-            yield from iter_sse_payloads(response)
+            for payload in iter_sse_payloads(response):
+                yield payload
+                if time.monotonic() >= deadline:
+                    raise ImageStreamHardTimeoutError("ChatGPT image stream timed out")
+        except ImageStreamHardTimeoutError:
+            raise
+        except Exception as exc:
+            if time.monotonic() >= deadline:
+                raise ImageStreamHardTimeoutError("ChatGPT image stream timed out") from exc
+            raise
         finally:
+            watchdog.cancel()
             response.close()
 
     def _bootstrap(self) -> None:

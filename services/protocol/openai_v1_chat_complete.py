@@ -866,9 +866,9 @@ def non_stream_text_chat_response(body: dict[str, Any], model: str, messages: li
             messages=messages,
             thinking_effort=gpt_chat.thinking_effort_from_body(body, model),
         )
-        content = collect_text(text_backend(), request)
+        content = collect_text(text_backend(model), request)
     else:
-        content = gpt_chat.chat_completion(body, messages, model, backend=text_backend())
+        content = gpt_chat.chat_completion(body, messages, model, backend=text_backend(model))
     tool_response = parsed_chat_tool_response(body, model, content, messages)
     if tool_response:
         return tool_response
@@ -962,7 +962,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
                     model,
                     include_usage=stream_include_usage(body),
                 )
-            return stream_tool_text_chat_completion(text_backend(), body, messages, model, stream_include_usage(body))
+            return stream_tool_text_chat_completion(text_backend(model), body, messages, model, stream_include_usage(body))
         if spec.provider == CATPAW_PROVIDER:
             return stream_catpaw_chat_completion(body, messages, model, stream_include_usage(body), original_messages)
         if spec.provider == JOYCODE_PROVIDER:
@@ -975,7 +975,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
             return stream_grok_chat_completion(body, spec, messages, model)
         if spec.provider == GEMINI_PROVIDER:
             return stream_gemini_chat_completion(body, spec, messages, model)
-        return stream_text_chat_completion(text_backend(), messages, model, stream_include_usage(body), original_messages, body)
+        return stream_text_chat_completion(text_backend(model), messages, model, stream_include_usage(body), original_messages, body)
     model, messages, original_messages = text_chat_parts(body)
     spec = resolve_model(model)
     reject_gemini_image_model_in_chat(spec)

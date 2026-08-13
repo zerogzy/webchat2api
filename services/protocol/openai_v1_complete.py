@@ -100,6 +100,6 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     if spec.provider != "gpt":
         raise HTTPException(status_code=400, detail={"error": "/v1/complete currently supports GPT and Gemini text models only"})
     if body.get("stream"):
-        return _text_completion_chunks(stream_text_chat_completion(text_backend(), messages, model))
-    content = collect_text(text_backend(), ConversationRequest(model=model, messages=messages))
+        return _text_completion_chunks(stream_text_chat_completion(text_backend(model), messages, model))
+    content = collect_text(text_backend(model), ConversationRequest(model=model, messages=messages))
     return completion_response(model, prompt, content)

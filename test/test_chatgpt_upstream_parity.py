@@ -13,7 +13,7 @@ install_pybase64_stub()
 install_tiktoken_stub()
 
 from services.config import config
-from services.openai_backend_api import ChatRequirements, DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_VERSION, OpenAIBackendAPI
+from services.openai_backend_api import ChatRequirements, DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_VERSION, ImageStreamHardTimeoutError, OpenAIBackendAPI
 from services.providers.gpt.chat import normalize_thinking_effort, thinking_effort_from_body
 from services.providers.gpt.models import gpt_effective_thinking_effort, gpt_upstream_model_id
 
@@ -62,6 +62,14 @@ class ChatGPTUpstreamParityTests(unittest.TestCase):
         self.assertEqual(DEFAULT_CLIENT_VERSION, "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887")
         self.assertEqual(DEFAULT_CLIENT_BUILD_NUMBER, "6708908")
 
+    def test_image_stream_hard_timeout_closes_response(self) -> None:
+        response = FakeResponse(lines=[b"data: first"])
+
+        with self.assertRaises(ImageStreamHardTimeoutError):
+            list(OpenAIBackendAPI._iter_sse_payloads_capped(response, 0))
+
+        self.assertTrue(response.closed)
+
     def test_thinking_effort_accepts_openai_chat_and_responses_shapes(self) -> None:
         self.assertEqual(thinking_effort_from_body({"reasoning_effort": "high"}), "extended")
         self.assertEqual(thinking_effort_from_body({"thinking_effort": "xhigh"}), "extended")
@@ -70,14 +78,9 @@ class ChatGPTUpstreamParityTests(unittest.TestCase):
         self.assertEqual(normalize_thinking_effort("low"), "standard")
         self.assertEqual(normalize_thinking_effort("unsupported"), "")
 
-    def test_gpt_5_6_effort_aliases_supply_defaults_and_allow_explicit_override(self) -> None:
-        self.assertEqual(thinking_effort_from_body({}, "gpt-5-6-thinking-medium"), "standard")
-        self.assertEqual(thinking_effort_from_body({}, "gpt-5-6-thinking-high"), "extended")
-        self.assertEqual(
-            thinking_effort_from_body({"reasoning_effort": "high"}, "gpt-5-6-thinking-medium"),
-            "extended",
-        )
-        self.assertEqual(gpt_effective_thinking_effort("gpt-5-6-thinking-high"), "extended")
+    def test_upstream_effort_suffixes_are_removed_from_model_id(self) -> None:
+        self.assertEqual(gpt_upstream_model_id("gpt-5-6-thinking-max"), "gpt-5-6-thinking")
+        self.assertEqual(gpt_effective_thinking_effort("gpt-5-6-thinking-max"), "max")
 
     def test_conversation_payload_only_emits_normalized_thinking_effort(self) -> None:
         client = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
@@ -163,7 +166,7 @@ class ChatGPTUpstreamParityTests(unittest.TestCase):
         self.assertEqual(request["json"]["requested_default_model"], "gpt-5-6-thinking")
         self.assertEqual(request["json"]["system_hints"], ["retrieval"])
 
-    def test_authenticated_stream_uses_conduit_flow_and_auto_alias(self) -> None:
+    def test_authenticated_stream_uses_conduit_flow_with_auto(self) -> None:
         response = FakeResponse(lines=[b'data: {"message":"ok"}', b"data: [DONE]"])
         session = FakeSession([response])
         client = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
@@ -186,16 +189,16 @@ class ChatGPTUpstreamParityTests(unittest.TestCase):
         self.assertEqual(chunks, ['{"message":"ok"}', "[DONE]"])
         client._api_messages_to_conversation_messages.assert_called_once()
         prepare_args = client._prepare_text_request.call_args.args
-        self.assertEqual(prepare_args[1], "gpt-5-5")
+        self.assertEqual(prepare_args[1], "auto")
         request = session.posts[0]
         self.assertTrue(request["url"].endswith("/backend-api/f/conversation"))
         self.assertEqual(request["headers"]["X-Conduit-Token"], "conduit-1")
-        self.assertEqual(request["json"]["model"], "gpt-5-5")
+        self.assertEqual(request["json"]["model"], "auto")
         self.assertEqual(request["json"]["client_prepare_state"], "success")
-        self.assertEqual(gpt_upstream_model_id("auto"), "gpt-5-5")
+        self.assertEqual(gpt_upstream_model_id("auto"), "auto")
         self.assertTrue(response.closed)
 
-    def test_authenticated_stream_maps_gpt_5_6_high_alias_and_effort(self) -> None:
+    def test_authenticated_stream_maps_upstream_extended_suffix(self) -> None:
         response = FakeResponse(lines=[b'data: {"message":"ok"}', b"data: [DONE]"])
         session = FakeSession([response])
         client = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
@@ -215,7 +218,7 @@ class ChatGPTUpstreamParityTests(unittest.TestCase):
 
         chunks = list(client.stream_conversation(
             messages=[{"role": "user", "content": "hello"}],
-            model="gpt-5-6-thinking-high",
+            model="gpt-5-6-thinking-extended",
         ))
 
         self.assertEqual(chunks, ['{"message":"ok"}', "[DONE]"])
@@ -225,7 +228,7 @@ class ChatGPTUpstreamParityTests(unittest.TestCase):
         request = session.posts[0]
         self.assertEqual(request["json"]["model"], "gpt-5-6-thinking")
         self.assertEqual(request["json"]["thinking_effort"], "extended")
-        self.assertEqual(gpt_upstream_model_id("gpt-5-6-thinking-high"), "gpt-5-6-thinking")
+        self.assertEqual(gpt_upstream_model_id("gpt-5-6-thinking-extended"), "gpt-5-6-thinking")
         self.assertTrue(response.closed)
 
     def test_authenticated_model_list_uses_picker_categories(self) -> None:
