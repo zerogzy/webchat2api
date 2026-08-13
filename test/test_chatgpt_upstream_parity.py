@@ -44,6 +44,7 @@ class FakeSession:
         self.posts: list[dict[str, Any]] = []
         self.gets: list[dict[str, Any]] = []
         self.closed = False
+        self.cookies = mock.Mock()
 
     def post(self, url: str, **kwargs: Any) -> FakeResponse:
         self.posts.append({"url": url, **kwargs})
@@ -69,6 +70,50 @@ class ChatGPTUpstreamParityTests(unittest.TestCase):
             list(OpenAIBackendAPI._iter_sse_payloads_capped(response, 0))
 
         self.assertTrue(response.closed)
+
+    def test_bootstrap_retries_with_flaresolverr_clearance_on_403(self) -> None:
+        blocked = FakeResponse()
+        blocked.status_code = 403
+        solved = FakeResponse()
+        solved.text = ""
+        session = FakeSession([blocked, solved])
+        client = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
+        client.base_url = "https://chatgpt.com"
+        client.session = session
+        client.pow_script_sources = []
+        client.pow_data_build = ""
+        client._call_with_retry = lambda fn, policy=None, context="": fn()
+        client._bootstrap_headers = lambda: {}
+        client._refresh_cloudflare_clearance = mock.Mock(return_value=True)
+
+        client._bootstrap()
+
+        self.assertEqual(len(session.gets), 2)
+        self.assertTrue(blocked.closed)
+        client._refresh_cloudflare_clearance.assert_called_once_with()
+
+    def test_refresh_cloudflare_clearance_updates_user_agent_and_cookies(self) -> None:
+        session = FakeSession()
+        client = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
+        client.base_url = "https://chatgpt.com"
+        client.session = session
+        client.user_agent = "Old UA"
+        clearance = mock.Mock(
+            user_agent="Solved UA",
+            cf_cookies="cf_clearance=clearance; __cf_bm=browser-management",
+        )
+
+        with (
+            mock.patch.object(config, "data", {"flaresolverr_url": "http://solver.local"}),
+            mock.patch("services.openai_backend_api.FlareSolverrClearanceProvider.solve", return_value=clearance) as solve,
+        ):
+            refreshed = client._refresh_cloudflare_clearance()
+
+        self.assertTrue(refreshed)
+        self.assertEqual(client.user_agent, "Solved UA")
+        self.assertEqual(session.headers["User-Agent"], "Solved UA")
+        self.assertEqual(session.cookies.set.call_count, 2)
+        solve.assert_called_once_with("https://chatgpt.com/auth/login")
 
     def test_thinking_effort_accepts_openai_chat_and_responses_shapes(self) -> None:
         self.assertEqual(thinking_effort_from_body({"reasoning_effort": "high"}), "extended")

@@ -18,6 +18,7 @@ from services.account_service import account_service
 from services.config import config
 from services.network.client import create_session
 from services.network.headers import build_chatgpt_web_headers
+from services.network.flaresolverr import FlareSolverrClearanceProvider
 from services.network.profiles import build_chatgpt_web_profile
 from services.providers.base import GPT_PROVIDER
 from services.providers.gpt.models import (
@@ -307,7 +308,6 @@ class OpenAIBackendAPI:
                 raise InvalidAccessTokenError(f"{route} failed: HTTP {response.status_code}")
             raise RuntimeError(f"/backend-api/accounts/check failed: HTTP {response.status_code}")
         payload = response.json()
-        logger.debug({"event": "backend_user_info_account_payload", "account_payload": payload})
         return ((payload.get("accounts") or {}).get("default") or {}).get("account") or {}
 
     def get_user_info(self) -> Dict[str, Any]:
@@ -1541,14 +1541,34 @@ class OpenAIBackendAPI:
 
     def _bootstrap(self) -> None:
         """预热首页，并提取 PoW 相关脚本引用。"""
+        from services.network.retry import RetryPolicy
+
         response = self._call_with_retry(
             lambda: self.session.get(self.base_url + "/", headers=self._bootstrap_headers(), timeout=30),
+            policy=RetryPolicy(),
             context="bootstrap",
         )
+        if response.status_code == 403 and self._refresh_cloudflare_clearance():
+            response.close()
+            response = self.session.get(self.base_url + "/", headers=self._bootstrap_headers(), timeout=30)
         ensure_ok(response, "bootstrap")
         self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
         if not self.pow_script_sources:
             self.pow_script_sources = [DEFAULT_POW_SCRIPT]
+
+    def _refresh_cloudflare_clearance(self) -> bool:
+        if not config.flaresolverr_url:
+            return False
+        clearance = FlareSolverrClearanceProvider().solve(self.base_url + "/auth/login")
+        if clearance is None:
+            return False
+        self.user_agent = clearance.user_agent
+        self.session.headers["User-Agent"] = clearance.user_agent
+        for part in clearance.cf_cookies.split("; "):
+            name, separator, value = part.partition("=")
+            if separator and name and value:
+                self.session.cookies.set(name, value, domain=".chatgpt.com", path="/")
+        return True
 
     def _get_chat_requirements(self) -> ChatRequirements:
         """使用 ChatGPT Web 当前的 prepare/finalize 两阶段 Sentinel 流程。"""

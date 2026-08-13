@@ -20,12 +20,12 @@ class FlareSolverrClearanceProvider:
         self.flaresolverr_url = str(flaresolverr_url or config.flaresolverr_url).strip().rstrip("/")
         self.timeout_sec = int(timeout_sec if timeout_sec is not None else config.flaresolverr_timeout_sec)
 
-    def solve(self) -> FlareSolverrClearance | None:
+    def solve(self, url: str = "https://grok.com") -> FlareSolverrClearance | None:
         if not self.flaresolverr_url:
             return None
         payload: dict[str, Any] = {
             "cmd": "request.get",
-            "url": "https://grok.com",
+            "url": str(url or "").strip() or "https://grok.com",
             "maxTimeout": max(1, self.timeout_sec) * 1000,
         }
         if proxy := config.get_proxy_settings():

@@ -2669,6 +2669,23 @@ class GrokProviderTests(unittest.TestCase):
             "cf_clearance=clearance-value; __cf_bm=bm-value; session=kept; x-challenge=challenge-value; x-signature=signature-value",
         )
 
+    def test_flaresolverr_provider_accepts_target_url(self) -> None:
+        class FakeResponse:
+            def raise_for_status(self) -> None:
+                pass
+
+            def json(self) -> dict[str, object]:
+                return {"solution": {"userAgent": "Solved UA", "cookies": [{"name": "cf_clearance", "value": "ok"}]}}
+
+        with (
+            mock.patch.object(flaresolverr.config, "data", {"flaresolverr_url": "http://solver.local", "flaresolverr_timeout_sec": 12}),
+            mock.patch.object(flaresolverr.config, "get_proxy_settings", return_value=""),
+            mock.patch.object(flaresolverr.requests, "post", return_value=FakeResponse(), create=True) as post,
+        ):
+            flaresolverr.FlareSolverrClearanceProvider().solve("https://chatgpt.com/auth/login")
+
+        self.assertEqual(post.call_args.kwargs["json"]["url"], "https://chatgpt.com/auth/login")
+
 
 class TestBrowserBridge(unittest.TestCase):
     def test_extract_raw_sso_plain_token(self):
